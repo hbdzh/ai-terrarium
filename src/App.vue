@@ -1,8 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { useMediaQuery, useStorage } from "@vueuse/core";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
+import { Telescope, ClipboardList, PanelRightClose, X, Copy, Check, Code2 } from "lucide-vue-next";
+import { isMacOS } from "./utils/platform";
+import AdaptiveModal from "./components/ui/AdaptiveModal.vue";
+import Sheet from "./components/ui/Sheet.vue";
+import ResizablePanelGroup from "./components/ui/ResizablePanelGroup.vue";
+import ResizablePanel from "./components/ui/ResizablePanel.vue";
+import ResizableHandle from "./components/ui/ResizableHandle.vue";
 import TopControlBar from "./components/TopControlBar.vue";
+import LeftSidebar from "./components/LeftSidebar.vue";
 import ThoughtStream, { type StreamingDraft } from "./components/ThoughtStream.vue";
 import ObserverPanel from "./components/ObserverPanel.vue";
 import CreatorConsole from "./components/CreatorConsole.vue";
@@ -13,6 +22,7 @@ import NewExperimentModal from "./components/NewExperimentModal.vue";
 import type {
   BoardApprovalMode,
   BoardApprovalRequest,
+  CharacterCard,
   EngineState,
   ExperimentConfig,
   ExperimentDetail,
@@ -28,17 +38,89 @@ import type {
 const experiment = ref<ExperimentDetail | null>(null);
 const experiments = ref<ExperimentSummary[]>([]);
 const presets = ref<PresetTemplate[]>([]);
+const characterCards = ref<CharacterCard[]>([]);
 const engineState = ref<EngineState>("idle");
 const statusReason = ref<string | null>(null);
 const streaming = ref<StreamingDraft | null>(null);
 const observerRunning = ref(false);
 const generatingReport = ref(false);
+const directorBusy = ref(false);
+const finalePromptVisible = ref(false);
 const queueLen = ref(0);
 const toastMessage = ref<string | null>(null);
+const contextUsagePct = ref<number | null>(null);
+const contextActiveTokens = ref<number>(0);
+const observerPanelRef = ref<InstanceType<typeof ObserverPanel> | null>(null);
+
+interface RawPromptMessageItem {
+  role: string;
+  content?: string | null;
+}
+
+interface RawPromptPayload {
+  model?: string;
+  temperature?: number;
+  reasoning_effort?: string | null;
+  private_note?: string | null;
+  messages?: RawPromptMessageItem[];
+  tools?: unknown;
+}
+
+const promptModalOpen = ref(false);
+const promptModalRaw = ref<string | null>(null);
+const promptModalParsed = ref<RawPromptPayload | null>(null);
+const promptCopied = ref(false);
 
 const settingsOpen = ref(false);
 const newExpOpen = ref(false);
-const boardOpen = ref(false);
+
+// 三档响应式工作台布局：宽屏(>=1280px)可拖拽分栏 / 半屏(768-1279px)悬浮侧滑Sheet / 窄屏(<768px)顶部Tab切换
+const isWideDesktop = useMediaQuery("(min-width: 1280px)");
+const isDesktopSidebar = useMediaQuery("(min-width: 1024px)");
+const isTabletOrDesktop = useMediaQuery("(min-width: 768px)");
+const isTablet = computed(() => isTabletOrDesktop.value && !isWideDesktop.value);
+const isMobile = computed(() => !isTabletOrDesktop.value);
+
+const desktopLeftSidebarOpen = useStorage("terrarium_left_sidebar_open", true);
+const sheetLeftSidebarOpen = ref(false);
+const leftSidebarOpen = computed({
+  get: () => (isDesktopSidebar.value ? desktopLeftSidebarOpen.value : sheetLeftSidebarOpen.value),
+  set: (val: boolean) => {
+    if (isDesktopSidebar.value) {
+      desktopLeftSidebarOpen.value = val;
+    } else {
+      sheetLeftSidebarOpen.value = val;
+    }
+  },
+});
+
+const desktopInspectorOpen = useStorage("terrarium_inspector_open", true);
+const inspectorWidthPct = useStorage("terrarium_inspector_width_pct", 34);
+const sheetInspectorOpen = ref(false);
+
+const inspectorOpen = computed({
+  get: () => (isWideDesktop.value ? desktopInspectorOpen.value : sheetInspectorOpen.value),
+  set: (val: boolean) => {
+    if (isWideDesktop.value) {
+      desktopInspectorOpen.value = val;
+    } else {
+      sheetInspectorOpen.value = val;
+    }
+  },
+});
+
+const streamDefaultSize = computed(() =>
+  Math.max(45, Math.min(78, 100 - inspectorWidthPct.value))
+);
+const inspectorDefaultSize = computed(() => 100 - streamDefaultSize.value);
+
+function onPanelLayout(sizes: number[]) {
+  if (sizes.length >= 2 && sizes[1] >= 18) {
+    inspectorWidthPct.value = Math.round(sizes[1]);
+  }
+}
+
+const inspectorTab = ref<"observer" | "board">("observer");
 const pendingApproval = ref<BoardApprovalRequest | null>(null);
 const boardLastActor = ref<string>("");
 const boardLastReason = ref<string>("");
@@ -235,7 +317,15 @@ function stepReplay(delta: number) {
   replayMsgIndex.value = Math.max(0, Math.min(max, replayMsgIndex.value + delta));
 }
 
+function handleGlobalKeydown(e: KeyboardEvent) {
+  if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+    e.preventDefault();
+    settingsOpen.value = true;
+  }
+}
+
 onUnmounted(() => {
+  window.removeEventListener("keydown", handleGlobalKeydown);
   stopReplayTimer();
   const win = window as unknown as { __handleAndroidBack?: () => boolean };
   delete win.__handleAndroidBack;
@@ -324,6 +414,8 @@ function handleStreamEvent(ev: StreamEvent) {
       break;
 
     case "stream_start":
+      contextUsagePct.value = ev.contextUsagePct;
+      contextActiveTokens.value = ev.activeTokens;
       streaming.value = {
         messageId: ev.messageId,
         agentId: ev.agentId,
@@ -398,6 +490,7 @@ function handleStreamEvent(ev: StreamEvent) {
     case "memory_compacted":
       experiment.value.compactedUntilSeq = ev.compactedUntilSeq;
       experiment.value.compactedSummary = ev.compactedSummary;
+      contextUsagePct.value = ev.contextUsagePct;
       showToast(
         `上下文已自动折叠为历史纪要（~${ev.tokensBefore.toLocaleString()} → ${ev.tokensAfter.toLocaleString()} tok）`
       );
@@ -412,6 +505,17 @@ function handleStreamEvent(ev: StreamEvent) {
       experiment.value.boardPrevContent = ev.boardPrevContent;
       boardLastActor.value = ev.actorLabel;
       boardLastReason.value = ev.reason;
+      break;
+
+    case "private_note_updated":
+      if (!experiment.value.privateNotes) {
+        experiment.value.privateNotes = {};
+      }
+      if (ev.note) {
+        experiment.value.privateNotes[ev.agentId] = ev.note;
+      } else {
+        delete experiment.value.privateNotes[ev.agentId];
+      }
       break;
 
     case "board_approval_requested":
@@ -440,10 +544,29 @@ function handleStreamEvent(ev: StreamEvent) {
       streaming.value = null;
       showToast(ev.message);
       break;
+
+    case "engine_notice":
+      showToast(ev.message);
+      break;
+
+    case "config_hot_updated":
+      experiment.value.config = ev.config;
+      break;
+
+    case "private_room_updated":
+      experiment.value.activePrivateRoom = ev.activeRoom;
+      experiment.value.roomMembers = ev.roomMembers;
+      break;
+
+    case "narrative_finale_reached":
+      finalePromptVisible.value = true;
+      showToast(`已达第 ${ev.totalTurns}/${ev.targetTurns} 轮目标，故事自然落幕`);
+      break;
   }
 }
 
 onMounted(async () => {
+  window.addEventListener("keydown", handleGlobalKeydown);
   const win = window as unknown as { __handleAndroidBack?: () => boolean };
   win.__handleAndroidBack = () => {
     if (settingsOpen.value) {
@@ -458,8 +581,8 @@ onMounted(async () => {
       mobileTab.value = "stream";
       return true;
     }
-    if (boardOpen.value) {
-      boardOpen.value = false;
+    if (inspectorOpen.value) {
+      inspectorOpen.value = false;
       return true;
     }
     if (replayActive.value) {
@@ -473,16 +596,18 @@ onMounted(async () => {
   ch.onmessage = handleStreamEvent;
   await invoke("register_stream_channel", { channel: ch });
 
-  const [loadedPresets, activeExp, list, state] = await Promise.all([
+  const [loadedPresets, activeExp, list, state, cards] = await Promise.all([
     invoke<PresetTemplate[]>("get_presets"),
     invoke<ExperimentDetail>("get_active_experiment"),
     invoke<ExperimentSummary[]>("list_experiments"),
     invoke<EngineState>("get_engine_state"),
+    invoke<CharacterCard[]>("list_character_cards"),
   ]);
   presets.value = loadedPresets;
   experiment.value = activeExp;
   experiments.value = list;
   engineState.value = state;
+  characterCards.value = cards;
 });
 
 async function startEngine() {
@@ -498,13 +623,13 @@ async function pauseEngine() {
   await invoke("pause_engine");
 }
 
-async function stepEngine() {
+async function stepEngine(targetAgentId?: string | null) {
   if (missingKeys.value) {
     settingsOpen.value = true;
     showToast("请先为所有参与对话的 AI 节点配置 API Key");
     return;
   }
-  await invoke("step_engine");
+  await invoke("step_engine", { targetAgentId: targetAgentId ?? null });
 }
 
 async function saveConfig(newConfig: ExperimentConfig) {
@@ -547,9 +672,12 @@ async function renameExperiment(newTitle: string) {
 
 async function selectExperiment(id: string) {
   exitReplay();
+  finalePromptVisible.value = false;
   streaming.value = null;
   queueLen.value = 0;
   pendingApproval.value = null;
+  contextUsagePct.value = null;
+  contextActiveTokens.value = 0;
   boardLastActor.value = "";
   boardLastReason.value = "";
   experiment.value = await invoke<ExperimentDetail>("switch_experiment", {
@@ -560,9 +688,12 @@ async function selectExperiment(id: string) {
 
 async function createNewExperiment(title: string, config: ExperimentConfig) {
   exitReplay();
+  finalePromptVisible.value = false;
   streaming.value = null;
   queueLen.value = 0;
   pendingApproval.value = null;
+  contextUsagePct.value = null;
+  contextActiveTokens.value = 0;
   boardLastActor.value = "";
   boardLastReason.value = "";
   experiment.value = await invoke<ExperimentDetail>("create_experiment", {
@@ -575,6 +706,7 @@ async function createNewExperiment(title: string, config: ExperimentConfig) {
 async function handleFork(targetTurn: number) {
   if (!experiment.value) return;
   exitReplay();
+  finalePromptVisible.value = false;
   streaming.value = null;
   queueLen.value = 0;
   const forked = await invoke<ExperimentDetail>("fork_experiment", {
@@ -595,6 +727,7 @@ async function handleEditAndReplay(payload: {
 }) {
   if (!experiment.value) return;
   exitReplay();
+  finalePromptVisible.value = false;
   streaming.value = null;
   queueLen.value = 0;
   pendingApproval.value = null;
@@ -630,7 +763,13 @@ async function handleToggleApprovalMode(mode: BoardApprovalMode) {
     mode,
   });
   experiment.value.config = updatedConfig;
-  showToast(mode === "approval" ? "已开启造物主白板审批拦截" : "已切换为白板自动放行");
+  showToast(
+    mode === "approval"
+      ? "已开启造物主人工审批拦截"
+      : mode === "guardian"
+        ? "已开启防泄密审核"
+        : "已切换为白板自动放行"
+  );
 }
 
 async function handleResolveApproval(payload: {
@@ -650,9 +789,12 @@ async function handleResolveApproval(payload: {
 
 async function deleteExperiment(id: string) {
   exitReplay();
+  finalePromptVisible.value = false;
   streaming.value = null;
   queueLen.value = 0;
   pendingApproval.value = null;
+  contextUsagePct.value = null;
+  contextActiveTokens.value = 0;
   boardLastActor.value = "";
   boardLastReason.value = "";
   const next = await invoke<ExperimentDetail>("delete_experiment", {
@@ -673,6 +815,73 @@ async function enqueueIntervention(
     input: { kind, agentId, content },
   });
   queueLen.value = len;
+}
+
+async function handleDirectorCommand(instruction: string) {
+  if (!experiment.value || directorBusy.value) return;
+  directorBusy.value = true;
+  try {
+    const summary = await invoke<string>("execute_director_command", {
+      experimentId: experiment.value.id,
+      instruction,
+    });
+    showToast(`🎬 ${summary}`);
+  } catch (err: any) {
+    showToast(`导演遥控解析失败: ${err?.toString?.() ?? err}`);
+  } finally {
+    directorBusy.value = false;
+  }
+}
+
+async function handleStartPrivateRoom(memberIds: string[], turns: number) {
+  if (!experiment.value) return;
+  try {
+    await invoke("start_private_room", {
+      experimentId: experiment.value.id,
+      memberIds,
+      turns,
+    });
+    showToast(`已开启临时私密房间（${turns}轮），仅成员互相可见`);
+  } catch (err: any) {
+    showToast(`开启私密房间失败: ${err?.toString?.() ?? err}`);
+  }
+}
+
+async function handleClosePrivateRoom() {
+  if (!experiment.value) return;
+  await invoke("close_private_room", {
+    experimentId: experiment.value.id,
+  });
+}
+
+async function handleSaveCharacterCard(agentId: string) {
+  if (!experiment.value) return;
+  try {
+    characterCards.value = await invoke<CharacterCard[]>("save_agent_to_character_library", {
+      experimentId: experiment.value.id,
+      agentId,
+    });
+    showToast("角色已提取并存入跨世界灵魂角色库");
+  } catch (err: any) {
+    showToast(`存入角色库失败: ${err?.toString?.() ?? err}`);
+  }
+}
+
+async function handleDeleteCharacterCard(cardId: string) {
+  characterCards.value = await invoke<CharacterCard[]>("delete_character_card", {
+    cardId,
+  });
+  showToast("已从角色库移除");
+}
+
+function openFinaleReport() {
+  finalePromptVisible.value = false;
+  inspectorOpen.value = true;
+  inspectorTab.value = "observer";
+  mobileTab.value = "observer";
+  nextTick(() => {
+    observerPanelRef.value?.openReportModal();
+  });
 }
 
 async function triggerObserverNow() {
@@ -761,6 +970,8 @@ async function handleImportScenario(file: File) {
     streaming.value = null;
     queueLen.value = 0;
     pendingApproval.value = null;
+    contextUsagePct.value = null;
+    contextActiveTokens.value = 0;
     const created = await invoke<ExperimentDetail>("import_scenario_package", { pkg });
     experiment.value = created;
     await refreshExperiments();
@@ -809,147 +1020,505 @@ async function handleJumpToTurn(turnNumber: number) {
     streamRef.value?.scrollToTurn(turnNumber);
   }, 80);
 }
+
+async function handleInspectPrompt(messageId: string) {
+  try {
+    const raw = await invoke<string | null>("get_message_raw_prompt", { messageId });
+    if (!raw) {
+      showToast("该轮消息未记录原始 Prompt（可能为早期历史存档）");
+      return;
+    }
+    promptModalRaw.value = raw;
+    try {
+      promptModalParsed.value = JSON.parse(raw) as RawPromptPayload;
+    } catch {
+      promptModalParsed.value = null;
+    }
+    promptCopied.value = false;
+    promptModalOpen.value = true;
+  } catch (err: any) {
+    showToast(`读取原始 Prompt 失败: ${err?.toString?.() ?? err}`);
+  }
+}
+
+async function copyRawPrompt() {
+  if (!promptModalRaw.value) return;
+  try {
+    const pretty = promptModalParsed.value
+      ? JSON.stringify(promptModalParsed.value, null, 2)
+      : promptModalRaw.value;
+    await navigator.clipboard.writeText(pretty);
+    promptCopied.value = true;
+    setTimeout(() => {
+      promptCopied.value = false;
+    }, 2000);
+  } catch {
+    showToast("复制失败，请手动选中复制");
+  }
+}
 </script>
 
 <template>
-  <div class="h-dvh w-screen flex flex-col bg-[#F6F6F8] text-[#1D1D1F] overflow-hidden">
-    <TopControlBar
-      :experiment="experiment"
-      :experiments="experiments"
-      :engine-state="engineState"
-      :status-reason="statusReason"
-      :missing-keys="missingKeys"
-      :replay-active="replayActive"
-      :board-open="boardOpen"
-      :has-pending-approval="Boolean(pendingApproval)"
-      @start="startEngine"
-      @pause="pauseEngine"
-      @step="stepEngine"
-      @export-md="exportMarkdown"
-      @open-settings="settingsOpen = true"
-      @open-new-experiment="newExpOpen = true"
-      @select-experiment="selectExperiment"
-      @delete-experiment="deleteExperiment"
-      @rename-experiment="renameExperiment"
-      @toggle-replay="toggleReplay"
-      @toggle-board="boardOpen = !boardOpen"
-      @export-scenario="handleExportScenario"
-      @import-scenario="handleImportScenario"
-    />
-
-    <!-- Mobile View Switcher (< md) -->
-    <div
-      class="md:hidden shrink-0 px-3 py-1.5 bg-white/90 border-b border-black/[0.05] flex items-center justify-between gap-2"
+  <div class="h-dvh w-screen flex bg-[#F6F6F8] text-[#1D1D1F] overflow-hidden">
+    <!-- Full-height Native Left Archive Sidebar (Desktop >= 1024px) -->
+    <aside
+      v-if="isDesktopSidebar && desktopLeftSidebarOpen"
+      class="w-[248px] shrink-0 h-full overflow-hidden"
     >
-      <div class="flex p-0.5 rounded-full bg-[#F2F2F5] border border-black/[0.04]">
-        <button
-          @click="mobileTab = 'stream'"
-          class="px-3 py-1 rounded-full text-[11px] font-medium transition"
-          :class="mobileTab === 'stream' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
-        >
-          对话流 ({{ experiment?.totalTurns ?? 0 }})
-        </button>
-        <button
-          @click="mobileTab = 'board'"
-          class="px-3 py-1 rounded-full text-[11px] font-medium transition"
-          :class="mobileTab === 'board' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
-        >
-          白板
-        </button>
-        <button
-          @click="mobileTab = 'observer'"
-          class="px-3 py-1 rounded-full text-[11px] font-medium transition"
-          :class="mobileTab === 'observer' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
-        >
-          观察舱 ({{ experiment?.observerNotes.length ?? 0 }})
-        </button>
-      </div>
-      <span class="text-[11px] text-slate-500 tabular-nums">
-        {{ experiment?.totalTokens.toLocaleString() ?? 0 }} tok
-      </span>
-    </div>
-
-    <!-- Main Split Stage: Main Stream (60%) / Collapsible Shared Board / Observer Horizon (40%) -->
-    <main
-      @touchstart.passive="onMainTouchStart"
-      @touchend.passive="onMainTouchEnd"
-      class="flex-1 flex min-h-0 overflow-hidden"
-    >
-      <section
-        class="relative flex-1 h-full flex-col bg-white/60 min-w-0"
-        :class="mobileTab === 'stream' ? 'flex' : 'hidden md:flex'"
-      >
-        <ThoughtStream
-          ref="streamRef"
-          :messages="displayMessages"
-          :streaming="displayStreaming"
-          :config="experiment?.config ?? null"
-          :compacted-summary="experiment?.compactedSummary ?? ''"
-          :can-branch="canBranch"
-          @fork="handleFork"
-          @edit-and-replay="handleEditAndReplay"
-        />
-
-        <ReplayController
-          v-if="replayActive"
-          :playing="replayPlaying"
-          :speed="replaySpeed"
-          :current-index="replayMsgIndex"
-          :total-count="experiment?.messages.length ?? 0"
-          :current-turn="replayCurrentTurn"
-          :total-turns="experiment?.totalTurns ?? 0"
-          @toggle-play="toggleReplayPlay"
-          @set-speed="setReplaySpeed"
-          @seek="seekReplay"
-          @step-prev="stepReplay(-1)"
-          @step-next="stepReplay(1)"
-          @exit="exitReplay"
-        />
-        <CreatorConsole
-          v-else
-          :queue-len="queueLen"
-          :agents="experiment?.config.agents ?? []"
-          :pending-approval="pendingApproval"
-          :crisis-cards="latestCrisisCards"
-          :observer-running="observerRunning"
-          @submit="enqueueIntervention"
-          @resolve-approval="handleResolveApproval"
-          @trigger-observer="triggerObserverNow"
-        />
-      </section>
-
-      <SharedBoardDrawer
-        :open="boardOpen || mobileTab === 'board'"
-        :class="boardOpen ? (mobileTab === 'board' ? 'flex' : 'hidden md:flex') : 'flex md:hidden'"
-        :board-content="displayBoardContent"
-        :board-prev-content="displayBoardPrevContent"
-        :approval-mode="experiment?.config.boardApprovalMode ?? 'auto'"
-        :last-actor="boardLastActor"
-        :last-reason="boardLastReason"
-        :read-only="replayActive"
-        @close="boardOpen = false; mobileTab = 'stream'"
-        @save-board="handleSaveBoard"
-        @toggle-approval-mode="handleToggleApprovalMode"
+      <LeftSidebar
+        :experiments="experiments"
+        :current-experiment-id="experiment?.id ?? null"
+        :character-cards="characterCards"
+        @open-new-experiment="newExpOpen = true"
+        @select-experiment="selectExperiment"
+        @delete-experiment="deleteExperiment"
+        @export-scenario="handleExportScenario"
+        @import-scenario="handleImportScenario"
+        @export-md="exportMarkdown"
+        @delete-character-card="handleDeleteCharacterCard"
+        @open-settings="settingsOpen = true"
       />
+    </aside>
 
-      <section
-        class="w-full md:w-[38%] lg:w-[36%] xl:w-[40%] max-w-[520px] h-full md:min-w-[290px]"
-        :class="mobileTab === 'observer' ? 'block' : 'hidden md:block'"
-      >
-        <ObserverPanel
-          :notes="displayObserverNotes"
-          :observer-running="observerRunning"
-          :observer-interval="experiment?.config.observerInterval ?? 10"
-          :total-turns="replayActive ? replayCurrentTurn : (experiment?.totalTurns ?? 0)"
-          :has-observer-key="hasObserverKey"
-          :final-report="experiment?.finalReport ?? ''"
-          :generating-report="generatingReport"
-          @jump-to-turn="handleJumpToTurn"
-          @trigger-now="triggerObserverNow"
-          @generate-report="handleGenerateReport"
+    <!-- Left Archive Slide-out Sheet (< 1024px) -->
+    <Sheet
+      v-if="!isDesktopSidebar"
+      side="left"
+      :open="sheetLeftSidebarOpen"
+      title="实验档案库"
+      width-class="w-[272px] max-w-[85vw]"
+      @update:open="sheetLeftSidebarOpen = $event"
+    >
+      <LeftSidebar
+        :experiments="experiments"
+        :current-experiment-id="experiment?.id ?? null"
+        :character-cards="characterCards"
+        :in-sheet="true"
+        @open-new-experiment="sheetLeftSidebarOpen = false; newExpOpen = true"
+        @select-experiment="(id) => { sheetLeftSidebarOpen = false; selectExperiment(id); }"
+        @delete-experiment="deleteExperiment"
+        @export-scenario="handleExportScenario"
+        @import-scenario="handleImportScenario"
+        @export-md="exportMarkdown"
+        @delete-character-card="handleDeleteCharacterCard"
+        @open-settings="sheetLeftSidebarOpen = false; settingsOpen = true"
+      />
+    </Sheet>
+
+    <!-- Right Workspace: Full-Height 3-Column Stage on Wide Desktop, or TopBar + Main on Narrower Viewports -->
+    <div class="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
+      <template v-if="!isWideDesktop">
+        <TopControlBar
+          :experiment="experiment"
+          :engine-state="engineState"
+          :status-reason="statusReason"
+          :missing-keys="missingKeys"
+          :replay-active="replayActive"
+          :sidebar-open="leftSidebarOpen"
+          :traffic-light-clearance="isMacOS && !(isDesktopSidebar && desktopLeftSidebarOpen)"
+          :inspector-open="inspectorOpen"
+          :has-pending-approval="Boolean(pendingApproval)"
+          :context-usage-pct="contextUsagePct"
+          :context-active-tokens="contextActiveTokens"
+          @start="startEngine"
+          @pause="pauseEngine"
+          @step="stepEngine"
+          @open-settings="settingsOpen = true"
+          @rename-experiment="renameExperiment"
+          @toggle-replay="toggleReplay"
+          @toggle-sidebar="leftSidebarOpen = !leftSidebarOpen"
+          @toggle-inspector="inspectorOpen = !inspectorOpen"
         />
-      </section>
+
+        <!-- Mobile View Switcher (< md) -->
+        <div
+          class="md:hidden shrink-0 px-3 py-1.5 bg-white/90 border-b border-black/[0.05] flex items-center justify-between gap-2"
+        >
+          <div class="flex p-0.5 rounded-full bg-[#F2F2F5] border border-black/[0.04]">
+            <button
+              @click="mobileTab = 'stream'"
+              class="px-3 py-1 rounded-full text-[11px] font-medium transition"
+              :class="mobileTab === 'stream' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
+            >
+              对话流 ({{ experiment?.totalTurns ?? 0 }})
+            </button>
+            <button
+              @click="mobileTab = 'board'"
+              class="px-3 py-1 rounded-full text-[11px] font-medium transition"
+              :class="mobileTab === 'board' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
+            >
+              白板
+            </button>
+            <button
+              @click="mobileTab = 'observer'"
+              class="px-3 py-1 rounded-full text-[11px] font-medium transition"
+              :class="mobileTab === 'observer' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
+            >
+              观察舱 ({{ experiment?.observerNotes.length ?? 0 }})
+            </button>
+          </div>
+          <span class="text-[11px] text-slate-500 tabular-nums">
+            {{ experiment?.totalTokens.toLocaleString() ?? 0 }} tok
+          </span>
+        </div>
+      </template>
+
+      <!-- Main Stage: Stream + Full-Height Right Inspector Sidebar -->
+      <main
+        @touchstart.passive="onMainTouchStart"
+        @touchend.passive="onMainTouchEnd"
+        class="flex-1 flex min-h-0 overflow-hidden"
+      >
+
+      <!-- 1. Wide Desktop (>= 1280px): Resizable Split Panels with Full-Height Right Sidebar -->
+      <ResizablePanelGroup
+        v-if="isWideDesktop"
+        direction="horizontal"
+        class="flex-1 min-w-0 h-full"
+        @layout="onPanelLayout"
+      >
+        <ResizablePanel :default-size="streamDefaultSize" :min-size="45">
+          <section class="relative flex-1 h-full flex flex-col bg-white/60 min-w-0">
+            <TopControlBar
+              :experiment="experiment"
+              :engine-state="engineState"
+              :status-reason="statusReason"
+              :missing-keys="missingKeys"
+              :replay-active="replayActive"
+              :sidebar-open="leftSidebarOpen"
+              :traffic-light-clearance="isMacOS && !(isDesktopSidebar && desktopLeftSidebarOpen)"
+              :inspector-open="inspectorOpen"
+              :has-pending-approval="Boolean(pendingApproval)"
+              :context-usage-pct="contextUsagePct"
+              :context-active-tokens="contextActiveTokens"
+              @start="startEngine"
+              @pause="pauseEngine"
+              @step="stepEngine"
+              @open-settings="settingsOpen = true"
+              @rename-experiment="renameExperiment"
+              @toggle-replay="toggleReplay"
+              @toggle-sidebar="leftSidebarOpen = !leftSidebarOpen"
+              @toggle-inspector="inspectorOpen = !inspectorOpen"
+            />
+
+            <ThoughtStream
+              ref="streamRef"
+              :messages="displayMessages"
+              :streaming="displayStreaming"
+              :config="experiment?.config ?? null"
+              :compacted-summary="experiment?.compactedSummary ?? ''"
+              :can-branch="canBranch"
+              @fork="handleFork"
+              @edit-and-replay="handleEditAndReplay"
+              @inspect-prompt="handleInspectPrompt"
+            />
+
+            <ReplayController
+              v-if="replayActive"
+              :playing="replayPlaying"
+              :speed="replaySpeed"
+              :current-index="replayMsgIndex"
+              :total-count="experiment?.messages.length ?? 0"
+              :current-turn="replayCurrentTurn"
+              :total-turns="experiment?.totalTurns ?? 0"
+              @toggle-play="toggleReplayPlay"
+              @set-speed="setReplaySpeed"
+              @seek="seekReplay"
+              @step-prev="stepReplay(-1)"
+              @step-next="stepReplay(1)"
+              @exit="exitReplay"
+            />
+            <CreatorConsole
+              v-else
+              :queue-len="queueLen"
+              :agents="experiment?.config.agents ?? []"
+              :pending-approval="pendingApproval"
+              :crisis-cards="latestCrisisCards"
+              :observer-running="observerRunning"
+              :active-private-room="experiment?.activePrivateRoom ?? null"
+              :director-busy="directorBusy"
+              @submit="enqueueIntervention"
+              @director-command="handleDirectorCommand"
+              @start-private-room="handleStartPrivateRoom"
+              @close-private-room="handleClosePrivateRoom"
+              @resolve-approval="handleResolveApproval"
+              @trigger-observer="triggerObserverNow"
+            />
+          </section>
+        </ResizablePanel>
+
+        <template v-if="desktopInspectorOpen">
+          <ResizableHandle />
+          <ResizablePanel :default-size="inspectorDefaultSize" :min-size="22" :max-size="55">
+            <aside class="w-full h-full flex flex-col bg-[#F5F5F7] overflow-hidden">
+              <div
+                :data-tauri-drag-region="isMacOS ? '' : undefined"
+                class="h-12 flex items-center justify-between gap-2 px-3 border-b border-black/[0.07] bg-[#F5F5F7] shrink-0 select-none"
+              >
+                <div class="flex items-center p-0.5 rounded-lg bg-black/[0.06] w-full">
+                  <button
+                    type="button"
+                    @click="inspectorTab = 'observer'"
+                    class="flex-1 flex items-center justify-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors"
+                    :class="
+                      inspectorTab === 'observer'
+                        ? 'bg-white text-[#1D1D1F] shadow-xs'
+                        : 'text-slate-600 hover:text-[#1D1D1F]'
+                    "
+                  >
+                    <Telescope class="w-3.5 h-3.5" />
+                    <span>观察舱</span>
+                    <span
+                      v-if="(experiment?.observerNotes.length ?? 0) > 0"
+                      class="text-[10px] opacity-75 tabular-nums"
+                    >
+                      ({{ experiment?.observerNotes.length }})
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    @click="inspectorTab = 'board'"
+                    class="flex-1 relative flex items-center justify-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors"
+                    :class="
+                      inspectorTab === 'board'
+                        ? 'bg-white text-[#1D1D1F] shadow-xs'
+                        : 'text-slate-600 hover:text-[#1D1D1F]'
+                    "
+                  >
+                    <ClipboardList class="w-3.5 h-3.5" />
+                    <span>共享白板</span>
+                    <span
+                      v-if="pendingApproval"
+                      class="w-2 h-2 rounded-full bg-amber-500 animate-ping"
+                    ></span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="flex-1 min-h-0 overflow-hidden">
+                <SharedBoardDrawer
+                  v-show="inspectorTab === 'board'"
+                  :open="true"
+                  :embedded="true"
+                  :board-content="displayBoardContent"
+                  :board-prev-content="displayBoardPrevContent"
+                  :approval-mode="experiment?.config.boardApprovalMode ?? 'auto'"
+                  :last-actor="boardLastActor"
+                  :last-reason="boardLastReason"
+                  :read-only="replayActive"
+                  @close="inspectorOpen = false"
+                  @save-board="handleSaveBoard"
+                  @toggle-approval-mode="handleToggleApprovalMode"
+                />
+
+                <ObserverPanel
+                  ref="observerPanelRef"
+                  v-show="inspectorTab === 'observer'"
+                  :notes="displayObserverNotes"
+                  :observer-running="observerRunning"
+                  :observer-interval="experiment?.config.observerInterval ?? 10"
+                  :total-turns="replayActive ? replayCurrentTurn : (experiment?.totalTurns ?? 0)"
+                  :has-observer-key="hasObserverKey"
+                  :final-report="experiment?.finalReport ?? ''"
+                  :generating-report="generatingReport"
+                  :agents="experiment?.config.agents ?? []"
+                  @jump-to-turn="handleJumpToTurn"
+                  @trigger-now="triggerObserverNow"
+                  @generate-report="handleGenerateReport"
+                  @save-character-card="handleSaveCharacterCard"
+                />
+              </div>
+            </aside>
+          </ResizablePanel>
+        </template>
+      </ResizablePanelGroup>
+
+      <!-- 2. Half-screen / Tablet (768px~1279px) & Mobile (< 768px) -->
+      <template v-else>
+        <section
+          class="relative flex-1 h-full flex-col bg-white/60 min-w-0"
+          :class="isMobile && mobileTab !== 'stream' ? 'hidden' : 'flex'"
+        >
+          <ThoughtStream
+            ref="streamRef"
+            :messages="displayMessages"
+            :streaming="displayStreaming"
+            :config="experiment?.config ?? null"
+            :compacted-summary="experiment?.compactedSummary ?? ''"
+            :can-branch="canBranch"
+            @fork="handleFork"
+            @edit-and-replay="handleEditAndReplay"
+            @inspect-prompt="handleInspectPrompt"
+          />
+
+          <ReplayController
+            v-if="replayActive"
+            :playing="replayPlaying"
+            :speed="replaySpeed"
+            :current-index="replayMsgIndex"
+            :total-count="experiment?.messages.length ?? 0"
+            :current-turn="replayCurrentTurn"
+            :total-turns="experiment?.totalTurns ?? 0"
+            @toggle-play="toggleReplayPlay"
+            @set-speed="setReplaySpeed"
+            @seek="seekReplay"
+            @step-prev="stepReplay(-1)"
+            @step-next="stepReplay(1)"
+            @exit="exitReplay"
+          />
+          <CreatorConsole
+            v-else
+            :queue-len="queueLen"
+            :agents="experiment?.config.agents ?? []"
+            :pending-approval="pendingApproval"
+            :crisis-cards="latestCrisisCards"
+            :observer-running="observerRunning"
+            :active-private-room="experiment?.activePrivateRoom ?? null"
+            :director-busy="directorBusy"
+            @submit="enqueueIntervention"
+            @director-command="handleDirectorCommand"
+            @start-private-room="handleStartPrivateRoom"
+            @close-private-room="handleClosePrivateRoom"
+            @resolve-approval="handleResolveApproval"
+            @trigger-observer="triggerObserverNow"
+          />
+        </section>
+
+        <!-- Tablet / Half-screen Floating Sheet Inspector (768px ~ 1279px) -->
+        <Sheet
+          v-if="isTablet"
+          :open="sheetInspectorOpen"
+          title="观察舱与共享白板"
+          width-class="w-[400px] max-w-[88vw]"
+          @update:open="sheetInspectorOpen = $event"
+        >
+          <div class="flex items-center justify-between gap-2 px-3 py-2 border-b border-black/[0.06] bg-white/90 shrink-0">
+            <div class="flex items-center p-0.5 rounded-full bg-[#F2F2F5] border border-black/[0.04]">
+              <button
+                type="button"
+                @click="inspectorTab = 'observer'"
+                class="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium transition"
+                :class="
+                  inspectorTab === 'observer'
+                    ? 'bg-[#1D1D1F] text-white shadow-xs'
+                    : 'text-slate-600 hover:text-[#1D1D1F]'
+                "
+              >
+                <Telescope class="w-3.5 h-3.5" />
+                <span>观察舱</span>
+                <span
+                  v-if="(experiment?.observerNotes.length ?? 0) > 0"
+                  class="text-[10px] opacity-75 tabular-nums"
+                >
+                  ({{ experiment?.observerNotes.length }})
+                </span>
+              </button>
+              <button
+                type="button"
+                @click="inspectorTab = 'board'"
+                class="relative flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium transition"
+                :class="
+                  inspectorTab === 'board'
+                    ? 'bg-[#1D1D1F] text-white shadow-xs'
+                    : 'text-slate-600 hover:text-[#1D1D1F]'
+                "
+              >
+                <ClipboardList class="w-3.5 h-3.5" />
+                <span>共享白板</span>
+                <span
+                  v-if="pendingApproval"
+                  class="w-2 h-2 rounded-full bg-amber-500 animate-ping"
+                ></span>
+              </button>
+            </div>
+
+            <button
+              type="button"
+              @click="sheetInspectorOpen = false"
+              class="p-1.5 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition"
+              title="收起右侧面板"
+            >
+              <PanelRightClose class="w-4 h-4" />
+            </button>
+          </div>
+
+          <div class="flex-1 min-h-0 overflow-hidden">
+            <SharedBoardDrawer
+              v-show="inspectorTab === 'board'"
+              :open="true"
+              :embedded="true"
+              :board-content="displayBoardContent"
+              :board-prev-content="displayBoardPrevContent"
+              :approval-mode="experiment?.config.boardApprovalMode ?? 'auto'"
+              :last-actor="boardLastActor"
+              :last-reason="boardLastReason"
+              :read-only="replayActive"
+              @close="sheetInspectorOpen = false"
+              @save-board="handleSaveBoard"
+              @toggle-approval-mode="handleToggleApprovalMode"
+            />
+
+            <ObserverPanel
+              ref="observerPanelRef"
+              v-show="inspectorTab === 'observer'"
+              :notes="displayObserverNotes"
+              :observer-running="observerRunning"
+              :observer-interval="experiment?.config.observerInterval ?? 10"
+              :total-turns="replayActive ? replayCurrentTurn : (experiment?.totalTurns ?? 0)"
+              :has-observer-key="hasObserverKey"
+              :final-report="experiment?.finalReport ?? ''"
+              :generating-report="generatingReport"
+              :agents="experiment?.config.agents ?? []"
+              @jump-to-turn="handleJumpToTurn"
+              @trigger-now="triggerObserverNow"
+              @generate-report="handleGenerateReport"
+              @save-character-card="handleSaveCharacterCard"
+            />
+          </div>
+        </Sheet>
+
+        <!-- Mobile Full-Width Inspector Panel (< 768px) -->
+        <aside
+          v-else-if="mobileTab !== 'stream'"
+          class="flex-1 h-full flex flex-col bg-[#FAFAFC] overflow-hidden"
+        >
+          <div class="flex-1 min-h-0 overflow-hidden">
+            <SharedBoardDrawer
+              v-show="mobileTab === 'board'"
+              :open="true"
+              :embedded="true"
+              :board-content="displayBoardContent"
+              :board-prev-content="displayBoardPrevContent"
+              :approval-mode="experiment?.config.boardApprovalMode ?? 'auto'"
+              :last-actor="boardLastActor"
+              :last-reason="boardLastReason"
+              :read-only="replayActive"
+              @close="mobileTab = 'stream'"
+              @save-board="handleSaveBoard"
+              @toggle-approval-mode="handleToggleApprovalMode"
+            />
+
+            <ObserverPanel
+              ref="observerPanelRef"
+              v-show="mobileTab === 'observer'"
+              :notes="displayObserverNotes"
+              :observer-running="observerRunning"
+              :observer-interval="experiment?.config.observerInterval ?? 10"
+              :total-turns="replayActive ? replayCurrentTurn : (experiment?.totalTurns ?? 0)"
+              :has-observer-key="hasObserverKey"
+              :final-report="experiment?.finalReport ?? ''"
+              :generating-report="generatingReport"
+              :agents="experiment?.config.agents ?? []"
+              @jump-to-turn="handleJumpToTurn"
+              @trigger-now="triggerObserverNow"
+              @generate-report="handleGenerateReport"
+              @save-character-card="handleSaveCharacterCard"
+            />
+          </div>
+        </aside>
+      </template>
     </main>
+    </div>
 
     <!-- Floating Apple-style Toast -->
     <Transition
@@ -968,15 +1537,48 @@ async function handleJumpToTurn(turnNumber: number) {
       </div>
     </Transition>
 
+    <!-- Narrative Finale Prompt Banner -->
+    <Transition
+      enter-active-class="transition duration-200 ease-out"
+      enter-from-class="opacity-0 -translate-y-2"
+      enter-to-class="opacity-100 translate-y-0"
+      leave-active-class="transition duration-150 ease-in"
+      leave-from-class="opacity-100 translate-y-0"
+      leave-to-class="opacity-0 -translate-y-2"
+    >
+      <div
+        v-if="finalePromptVisible"
+        class="fixed top-28 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2 rounded-full bg-white/95 backdrop-blur-xl border border-black/[0.08] shadow-[0_12px_36px_rgba(0,0,0,0.14)] text-xs"
+      >
+        <span class="font-medium text-[#1D1D1F]">🎭 本局已达目标轮数自然落幕</span>
+        <button
+          type="button"
+          @click="openFinaleReport"
+          class="px-3 py-1 rounded-full bg-[#007AFF] hover:bg-[#0062CC] text-white font-medium transition"
+        >
+          生成结案复盘简报
+        </button>
+        <button
+          type="button"
+          @click="finalePromptVisible = false"
+          class="p-1 rounded-full hover:bg-slate-100 text-slate-400"
+        >
+          <X class="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </Transition>
+
     <SettingsDrawer
       :open="settingsOpen"
       :config="experiment?.config ?? null"
       :presets="presets"
+      :character-cards="characterCards"
       @close="settingsOpen = false"
       @save="saveConfig"
       @save-preset="handleSavePreset"
       @reset-preset="handleResetPreset"
       @delete-preset="handleDeletePreset"
+      @delete-character-card="handleDeleteCharacterCard"
       @notify="showToast"
     />
 
@@ -984,9 +1586,113 @@ async function handleJumpToTurn(turnNumber: number) {
       :open="newExpOpen"
       :presets="presets"
       :current-config="experiment?.config ?? null"
+      :character-cards="characterCards"
       @close="newExpOpen = false"
       @create="createNewExperiment"
       @save-preset="handleSavePreset"
+      @delete-preset="handleDeletePreset"
     />
+
+    <!-- Raw Prompt Inspector Adaptive Modal -->
+    <AdaptiveModal
+      :open="promptModalOpen"
+      title="本轮完整提示词"
+      max-width-class="max-w-3xl"
+      @close="promptModalOpen = false"
+    >
+      <template #header>
+        <div class="px-5 py-3.5 border-b border-black/[0.06] flex items-center justify-between gap-2 bg-[#FAFAFC] shrink-0">
+          <div class="flex items-center gap-2 min-w-0">
+            <div class="w-7 h-7 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+              <Code2 class="w-4 h-4" />
+            </div>
+            <div class="min-w-0">
+              <h3 class="text-xs font-semibold text-[#1D1D1F] truncate">本轮完整提示词</h3>
+              <p v-if="promptModalParsed" class="text-[10.5px] text-slate-400 truncate font-mono">
+                {{ promptModalParsed.model }} · temp {{ promptModalParsed.temperature }}
+                <template v-if="promptModalParsed.reasoning_effort"> · effort {{ promptModalParsed.reasoning_effort }}</template>
+                · {{ promptModalParsed.messages?.length ?? 0 }} 条上下文消息
+              </p>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              @click="copyRawPrompt"
+              class="flex items-center gap-1 px-3 py-1.5 rounded-full text-[11px] font-medium bg-[#F2F2F5] hover:bg-[#E5E5EA] text-slate-700 transition"
+            >
+              <Check v-if="promptCopied" class="w-3.5 h-3.5 text-emerald-600" />
+              <Copy v-else class="w-3.5 h-3.5" />
+              <span>{{ promptCopied ? "已复制 JSON" : "一键复制" }}</span>
+            </button>
+            <button
+              type="button"
+              @click="promptModalOpen = false"
+              class="p-1.5 rounded-full hover:bg-slate-200/70 text-slate-400 hover:text-slate-700 transition"
+            >
+              <X class="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <div class="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3 bg-[#F6F6F8]">
+        <template v-if="promptModalParsed?.messages">
+          <div
+            v-for="(msg, idx) in promptModalParsed.messages"
+            :key="idx"
+            class="rounded-2xl border overflow-hidden bg-white"
+            :class="
+              msg.role === 'system'
+                ? 'border-indigo-200/90'
+                : msg.role === 'assistant'
+                  ? 'border-emerald-200/90'
+                  : 'border-black/[0.07]'
+            "
+          >
+            <div
+              class="px-3.5 py-1.5 text-[10.5px] font-mono font-semibold uppercase tracking-wider border-b flex items-center justify-between"
+              :class="
+                msg.role === 'system'
+                  ? 'bg-indigo-50/80 text-indigo-700 border-indigo-100'
+                  : msg.role === 'assistant'
+                    ? 'bg-emerald-50/80 text-emerald-700 border-emerald-100'
+                    : 'bg-slate-50 text-slate-600 border-black/[0.05]'
+              "
+            >
+              <span>#{{ idx + 1 }} · {{ msg.role }}</span>
+              <span class="text-[10px] font-normal opacity-75">{{ (msg.content ?? "").length }} chars</span>
+            </div>
+            <pre class="p-3.5 text-xs leading-relaxed text-[#1D1D1F] whitespace-pre-wrap break-words font-mono overflow-x-auto">{{ msg.content ?? "" }}</pre>
+          </div>
+
+          <div
+            v-if="promptModalParsed.private_note !== undefined && promptModalParsed.private_note !== null"
+            class="rounded-2xl border border-violet-200/80 bg-white overflow-hidden"
+          >
+            <div class="px-3.5 py-1.5 text-[10.5px] font-mono font-semibold uppercase tracking-wider bg-violet-50/80 text-violet-800 border-b border-violet-100 flex items-center justify-between">
+              <span>角色私密备忘（仅本人可见）</span>
+              <span class="text-[10px] font-normal opacity-75">{{ promptModalParsed.private_note.length }} chars</span>
+            </div>
+            <pre class="p-3.5 text-xs leading-relaxed text-[#1D1D1F] whitespace-pre-wrap break-words font-mono overflow-x-auto">{{ promptModalParsed.private_note || "（当前私有便签为空）" }}</pre>
+          </div>
+
+          <div
+            v-if="promptModalParsed.tools"
+            class="rounded-2xl border border-amber-200/80 bg-white overflow-hidden"
+          >
+            <div class="px-3.5 py-1.5 text-[10.5px] font-mono font-semibold uppercase tracking-wider bg-amber-50/80 text-amber-800 border-b border-amber-100">
+              本轮可用工具
+            </div>
+            <pre class="p-3.5 text-[11px] leading-relaxed text-slate-700 whitespace-pre-wrap break-words font-mono overflow-x-auto">{{ JSON.stringify(promptModalParsed.tools, null, 2) }}</pre>
+          </div>
+        </template>
+        <pre
+          v-else
+          class="p-4 rounded-2xl bg-white border border-black/[0.06] text-xs font-mono whitespace-pre-wrap break-words text-slate-700"
+        >{{ promptModalRaw }}</pre>
+      </div>
+    </AdaptiveModal>
   </div>
 </template>

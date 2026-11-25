@@ -9,6 +9,35 @@ use crate::sanitizer::strip_think_tags;
 pub const KEEP_RECENT_TURNS: usize = 7;
 pub const MIN_RECENT_CONV_MESSAGES: usize = 8;
 
+/// 记忆压缩防抖动熔断器：防止上下文预算过小导致连续轮次反复触发压缩死循环。
+#[derive(Debug, Clone, Default)]
+pub struct CompactionGuard {
+    recent_compaction_turns: Vec<u32>,
+}
+
+impl CompactionGuard {
+    /// 记录一次压缩发生的轮次。若连续 3 轮内（最大轮次与最小轮次差值 <= 2）累计触发 3 次压缩，则返回 true 表示需要熔断暂停。
+    pub fn record_and_check(&mut self, turn_number: u32) -> bool {
+        self.recent_compaction_turns.push(turn_number);
+        if self.recent_compaction_turns.len() > 3 {
+            let drain_n = self.recent_compaction_turns.len() - 3;
+            self.recent_compaction_turns.drain(0..drain_n);
+        }
+        if self.recent_compaction_turns.len() == 3 {
+            let first = self.recent_compaction_turns[0];
+            let last = self.recent_compaction_turns[2];
+            if last.saturating_sub(first) <= 2 {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn reset(&mut self) {
+        self.recent_compaction_turns.clear();
+    }
+}
+
 /// 快速估算单段文本 Token 数（兼容中英文混合文本）。
 /// - ASCII 字符约 3.3 chars/token
 /// - 非 ASCII（汉字/标点等）约 1.35 tokens/char
@@ -91,7 +120,9 @@ pub fn split_compactable_messages<'a>(
     let conv_msgs: Vec<&TimelineMessage> = uncompacted
         .iter()
         .copied()
-        .filter(|m| matches!(m.role, SpeakerRole::Ai | SpeakerRole::GodPublic))
+        .filter(|m| {
+            m.room_id == "main" && matches!(m.role, SpeakerRole::Ai | SpeakerRole::GodPublic)
+        })
         .collect();
 
     if conv_msgs.len() <= MIN_RECENT_CONV_MESSAGES {
@@ -156,6 +187,10 @@ pub async fn maybe_compact_history(
 
     let mut transcript = String::new();
     for m in &to_compact {
+        // 空间隔离最高优先级仲裁铁律：全局记忆压缩器必须严格跳过非 "main" 房间的私密对话
+        if m.room_id != "main" {
+            continue;
+        }
         let clean = strip_think_tags(&m.content);
         let label = match m.role {
             SpeakerRole::Ai => format!(
@@ -259,6 +294,7 @@ mod tests {
             turn_number: turn,
             role,
             agent_id: Some("AiA".to_string()),
+            room_id: "main".to_string(),
             reasoning_content: String::new(),
             content: format!("content-{seq}"),
             model_name: "test".to_string(),
@@ -291,5 +327,39 @@ mod tests {
         assert!(until_seq <= 12);
         assert_eq!(to_compact.last().unwrap().seq, until_seq);
         assert!(msgs.len() - to_compact.len() >= MIN_RECENT_CONV_MESSAGES);
+    }
+
+    #[test]
+    fn test_compaction_guard_trips_on_three_within_three_turns() {
+        let mut guard = CompactionGuard::default();
+        assert!(!guard.record_and_check(10));
+        assert!(!guard.record_and_check(11));
+        assert!(guard.record_and_check(12));
+
+        guard.reset();
+        assert!(!guard.record_and_check(10));
+        assert!(!guard.record_and_check(11));
+        assert!(!guard.record_and_check(13));
+        assert!(!guard.record_and_check(15));
+        assert!(guard.record_and_check(15));
+    }
+
+    #[test]
+    fn test_compactor_skips_private_room_messages() {
+        let mut msgs = Vec::new();
+        for i in 1..=12 {
+            let mut m = mk(i, i as u32, SpeakerRole::Ai);
+            if i == 3 || i == 4 {
+                m.room_id = "room-secret".to_string();
+            }
+            msgs.push(m);
+        }
+        let (to_compact, _) = split_compactable_messages(&msgs, 0).unwrap();
+        let main_only: Vec<_> = to_compact
+            .into_iter()
+            .filter(|m| m.room_id == "main")
+            .collect();
+        assert!(main_only.iter().all(|m| m.room_id == "main"));
+        assert!(!main_only.iter().any(|m| m.seq == 3 || m.seq == 4));
     }
 }

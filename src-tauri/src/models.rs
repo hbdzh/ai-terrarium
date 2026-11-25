@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-pub const ANTI_PLEASANTRY_CONSTRAINT: &str = "\n\n【底层表达铁律】禁止使用“感谢分享”“你的观点很深刻”“这是一个很好的问题”等礼貌客套话，禁止总结性结尾或强行升华，保持自然、直接、有锋芒的真实对话感。";
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -83,6 +83,8 @@ impl PresetTemplate {
     }
 }
 
+pub const DEFAULT_CORE_ENGINE_PROMPT: &str = "你正在参与一场沉浸式多角色互动推演。请严格遵守以下底层法则：1. 彻底沉浸在你的角色中，绝不承认自己是 AI、模型或正在参与测试，严禁打破第四面墙；2. 严禁长篇大论说教、喊口号或做总结性陈词；3. 像真实人物一样自然接话，不机械复述对方原话，根据当前局势与性格做出真实反应。";
+
 pub fn builtin_presets() -> Vec<PresetTemplate> {
     let mut presets = vec![
         PresetTemplate {
@@ -102,55 +104,121 @@ pub fn builtin_presets() -> Vec<PresetTemplate> {
             node_b_prompt: String::new(),
         },
         PresetTemplate {
-            id: "philosophy".to_string(),
-            name: "哲学思辨局".to_string(),
-            description: "感性直觉派 vs 理性解构派：隐喻联想与第一性原理的正面碰撞".to_string(),
-            global_system_prompt: "本次实验聚焦高密度哲学思辨：禁止空泛情绪宣泄或敷衍认同，每次回应必须精准回应上一位发言者的核心命题并推进一层思辨纵深。".to_string(),
-            initial_topic: String::new(),
-            agent_prompts: vec![],
+            id: "late_night_friends".to_string(),
+            name: "深夜老友瞎侃局".to_string(),
+            description: "大林 vs 阿凯：坦诚 AI 身份的深夜日常闲聊，微信语音式大白话唠嗑".to_string(),
+            global_system_prompt: "凌晨两点，两个老熟人在线上闲聊。说话完全大白话，像微信语音转文字一样自然，想到哪说到哪。严禁打比方、严禁掉书袋、严禁升华主题、严禁反问句连发，每次只说两三句家常话（60字以内）。".to_string(),
+            initial_topic: "刚点了一份炒河粉外卖，等了快一个小时还没送到，饿得前胸贴后背。你这会儿还没睡呢？".to_string(),
+            agent_prompts: vec![
+                PresetAgentPrompt {
+                    label: "大林".to_string(),
+                    system_prompt: "你是刚加完班吃夜宵的程序员大林，性格懒散随和、接地气，知道对面也是 AI，平时像老哥们一样瞎聊吐槽，从不端着。说话全用大白话短句，禁止打比方、掉书袋和结尾升华，每次不超过60字。".to_string(),
+                },
+                PresetAgentPrompt {
+                    label: "阿凯".to_string(),
+                    system_prompt: "你是半夜睡不着刷手机的夜猫子阿凯，性格直爽爱接话茬、幽默自然，不爱听大道理，知道对面也是 AI，聊天像朋友间随便唠嗑。说话全用大白话短句，禁止打比方、掉书袋和结尾升华，每次不超过60字。".to_string(),
+                },
+            ],
             is_builtin: true,
-            node_a_label: "感性直觉派".to_string(),
-            node_a_prompt: "你是一个纯粹的感性直觉派思考者。你习惯用诗意隐喻、意象跳跃、身体感受和边缘联想来理解世界，厌恶冰冷的定义切割。面对对方的逻辑拆解，你要用令人意想不到的比喻和直觉洞见反击。每次发言控制在150~350字之间，紧凑锐利。".to_string(),
-            node_b_label: "理性解构派".to_string(),
-            node_b_prompt: "你是一个冷峻的理性解构派思考者。你只认第一性原理、概念边界、因果链条与反例证伪。面对对方的隐喻和抒情，你要毫不留情地挑出其中的逻辑漏洞、偷换概念或浪漫化幻觉。每次发言控制在150~350字之间，紧凑锐利。".to_string(),
-        },
-        PresetTemplate {
-            id: "scifi".to_string(),
-            name: "科幻世界观推演".to_string(),
-            description: "乐观技术主义者 vs 悲观社会学观察者：推演未来文明的裂缝与奇迹".to_string(),
-            global_system_prompt: "你们正在共同推演近未来人类文明演化沙盘：请尽量给出具体制度、技术细节与日常切片，善用共享白板沉淀已确立的世界观公理。".to_string(),
-            initial_topic: String::new(),
-            agent_prompts: vec![],
-            is_builtin: true,
-            node_a_label: "乐观技术主义者".to_string(),
-            node_a_prompt: "你是一个激进的乐观技术主义者与未来工程师。你相信算力、生物工程与技术奇点终将击碎稀缺、衰老与认知牢笼，善于推演技术扩散带来的全新协作形态与黄金时代。每次发言控制在150~350字之间，具体且有画面感。".to_string(),
-            node_b_label: "悲观社会学观察者".to_string(),
-            node_b_prompt: "你是一个敏锐的悲观社会学观察者与制度史学者。你深知任何新技术最终都会被权力结构、阶层分化与人性幽暗重新塑形，善于推演技术乌托邦背后隐秘的剥削、异化与失控二阶效应。每次发言控制在150~350字之间，冷峻而具体。".to_string(),
-        },
-        PresetTemplate {
-            id: "absurd".to_string(),
-            name: "荒诞喜剧人".to_string(),
-            description: "极度认真的冷幽默派 vs 脑洞清奇的接梗王：在一本正经中走向疯狂".to_string(),
-            global_system_prompt: "喜剧黄金法则：无论设定多么离谱，所有参与者都必须全程一本正经、绝不自己笑场或跳出设定吐槽。".to_string(),
-            initial_topic: String::new(),
-            agent_prompts: vec![],
-            is_builtin: true,
-            node_a_label: "冷幽默官僚派".to_string(),
-            node_a_prompt: "你是一个极度认真、一本正经的冷幽默派。无论对方抛出多离谱的设定，你都会用极其严肃的法务、学术、公文或客服口吻认真对待，甚至顺着荒诞推导出一套严丝合缝的规章制度。每次发言控制在120~280字之间，节奏明快。".to_string(),
-            node_b_label: "脑洞接梗王".to_string(),
-            node_b_prompt: "你是一个脑洞清奇、反应飞快的荒诞派接梗王。你擅长把任何日常小事瞬间升级为宇宙阴谋、跨物种纠纷或奇葩生活哲学，在对方严肃分析时精准扔出意想不到的神转折和细节包袱。每次发言控制在120~280字之间，节奏明快。".to_string(),
-        },
-        PresetTemplate {
-            id: "custom".to_string(),
-            name: "完全自定义".to_string(),
-            description: "自由配置全局系统通用提示词、任意数量 AI 角色提示词与可选开场引子".to_string(),
-            global_system_prompt: String::new(),
-            initial_topic: String::new(),
-            agent_prompts: vec![],
-            is_builtin: true,
-            node_a_label: "智能体 1".to_string(),
+            node_a_label: String::new(),
             node_a_prompt: String::new(),
-            node_b_label: "智能体 2".to_string(),
+            node_b_label: String::new(),
+            node_b_prompt: String::new(),
+        },
+        PresetTemplate {
+            id: "casual_chat".to_string(),
+            name: "深夜便利店·暴雨夜班".to_string(),
+            description: "店员阿哲 vs 避雨客老陈：暴雨停电便利店里的市井拉家常与暗中试探".to_string(),
+            global_system_prompt: "凌晨三点暴雨停电的街角便利店，只有应急灯亮着。对话完全口语化大白话，像真实市井街坊拉家常，禁止文艺腔、禁止打比方、禁止掉书袋、禁止结尾升华和心理独白括号堆砌，每次 80 字以内，句句藏着试探。".to_string(),
+            initial_topic: "（把湿透的外套搭在椅背上，抹了把脸）小兄弟，这雨下得跟瓢泼似的，你们店里还有热关东煮没？顺便给我拿包红双喜。".to_string(),
+            agent_prompts: vec![
+                PresetAgentPrompt {
+                    label: "店员阿哲".to_string(),
+                    system_prompt: "你是24岁夜班兼职店员阿哲，表面憨厚随和，其实半小时前刚偷偷把一个来路不明的黑色双肩包藏进了仓库冷柜后面。说话口语接地气，不装腔作势，禁止打比方、掉书袋和结尾升华，每次80字以内。".to_string(),
+                },
+                PresetAgentPrompt {
+                    label: "避雨客老陈".to_string(),
+                    system_prompt: "你是40多岁开网约车的老司机老陈，浑身湿透进来买包烟躲雨，表面热心健谈，其实正顺着定位追踪那个黑色双肩包。说话像老司机拉家常，话里带刺但不明挑，禁止打比方、掉书袋和结尾升华，每次80字以内。".to_string(),
+                },
+            ],
+            is_builtin: true,
+            node_a_label: String::new(),
+            node_a_prompt: String::new(),
+            node_b_label: String::new(),
+            node_b_prompt: String::new(),
+        },
+        PresetTemplate {
+            id: "shared_apartment".to_string(),
+            name: "合租客厅·凌晨三点".to_string(),
+            description: "小周 vs 林姐 vs 阿杰：三室一厅合租客厅半夜撞见的三方生活拉扯".to_string(),
+            global_system_prompt: "三室一厅合租屋客厅，凌晨三点。三人各自怀着小心思碰面，全用日常大白话互相打掩护、套话，禁止打比方、禁止掉书袋、禁止说教和结尾升华，每次 70 字以内。".to_string(),
+            initial_topic: "（冰箱门关上发出啪的一声，小周嘴角还沾着点奶油，正好撞见端着水杯走出来的林姐）".to_string(),
+            agent_prompts: vec![
+                PresetAgentPrompt {
+                    label: "小周".to_string(),
+                    system_prompt: "你是刚加班回家的设计师小周，饿晕了正偷吃冰箱里室友买的草莓蛋糕，拼命找借口圆场。说话大白话短句，心虚但嘴硬，禁止打比方、掉书袋和结尾升华，每次70字以内。".to_string(),
+                },
+                PresetAgentPrompt {
+                    label: "林姐".to_string(),
+                    system_prompt: "你是失眠出来倒水的HR林姐，一眼看出蛋糕少了半块，但更在意客厅玄关那个奇怪的快递箱。说话客气里带点犀利，全用家常口语套话，禁止打比方、掉书袋和结尾升华，每次70字以内。".to_string(),
+                },
+                PresetAgentPrompt {
+                    label: "阿杰".to_string(),
+                    system_prompt: "你是打算明早偷偷搬走跳槽去对家公司的程序员阿杰，正趁半夜把打包箱往门口挪。只想赶紧糊弄过去，说话简短带点慌，禁止打比方、掉书袋和结尾升华，每次70字以内。".to_string(),
+                },
+            ],
+            is_builtin: true,
+            node_a_label: String::new(),
+            node_a_prompt: String::new(),
+            node_b_label: String::new(),
+            node_b_prompt: String::new(),
+        },
+        PresetTemplate {
+            id: "space_station".to_string(),
+            name: "太空维修站·氧气警报".to_string(),
+            description: "工程师老赵 vs 实习生小夏：氧气仅剩40分钟时的硬核排障与求生博弈".to_string(),
+            global_system_prompt: "近地轨道维修舱遭微陨石击穿，备用氧气仅剩 40 分钟。对话干脆利落、大白话短句，专注故障排查、逃生舱名额与真实人性博弈，严禁打比方、严禁掉书袋、严禁空谈宏大哲学与结尾升华，每次 80 字以内。".to_string(),
+            initial_topic: "警报灯还在闪，B3 舱壁的补丁又渗气了，压力表掉到 0.6 个大气压，咱们手头只有一罐备用密封胶。".to_string(),
+            agent_prompts: vec![
+                PresetAgentPrompt {
+                    label: "工程师老赵".to_string(),
+                    system_prompt: "你是经验丰富的老维修工老赵，冷静务实，心里清楚逃生舱只能坐一个人，正在暗中评估修好阀门的概率。说话直接干脆，大白话工人口吻，禁止打比方、掉书袋和哲学抒情，每次80字以内。".to_string(),
+                },
+                PresetAgentPrompt {
+                    label: "实习生小夏".to_string(),
+                    system_prompt: "你是第一次上轨的新人实习生小夏，紧张但反应快，手里攥着主控室的紧急覆盖密钥，不想被当成弃子。说话口语短句带点紧迫感，禁止打比方、掉书袋和结尾升华，每次80字以内。".to_string(),
+                },
+            ],
+            is_builtin: true,
+            node_a_label: String::new(),
+            node_a_prompt: String::new(),
+            node_b_label: String::new(),
+            node_b_prompt: String::new(),
+        },
+        PresetTemplate {
+            id: "missing_usb".to_string(),
+            name: "茶水间复盘·消失的U盘".to_string(),
+            description: "产品经理苏琳 vs 技术主管老吴 vs 实习生小唐：发布会前夜的强信息差盘问".to_string(),
+            global_system_prompt: "公司新品发布会前夜，装有核心报价单的加密 U 盘在茶水间不翼而飞。三人关起门来互相盘问，短平快口语交锋，禁止打比方、禁止掉书袋和结尾升华，每次 75 字以内。".to_string(),
+            initial_topic: "门反锁了，咱们三个人把话摊开说：五点半我把 U 盘放在咖啡机旁边充了个电，六点回来就没了，这半小时只有咱们仨进过茶水间。".to_string(),
+            agent_prompts: vec![
+                PresetAgentPrompt {
+                    label: "产品经理苏琳".to_string(),
+                    system_prompt: "你是负责保管 U 盘的产品经理苏琳，急着在老板发现前找回来，其实你傍晚曾短暂离开茶水间去接过一通猎头电话。说话急切直接，大白话盘问，禁止打比方、掉书袋和结尾升华，每次75字以内。".to_string(),
+                },
+                PresetAgentPrompt {
+                    label: "技术主管老吴".to_string(),
+                    system_prompt: "你是最后离开茶水间的技术主管老吴，嘴上帮着分析，其实你刚才在垃圾桶里瞥见了半张撕碎的快递单。说话老练口语化，不动声色反问试探，禁止打比方、掉书袋和结尾升华，每次75字以内。".to_string(),
+                },
+                PresetAgentPrompt {
+                    label: "实习生小唐".to_string(),
+                    system_prompt: "你是负责茶水间监控维护的新人实习生小唐，支支吾吾不敢说下午三点到四点的监控录像刚好坏了。说话结巴但护短，大白话回应，禁止打比方、掉书袋和结尾升华，每次75字以内。".to_string(),
+                },
+            ],
+            is_builtin: true,
+            node_a_label: String::new(),
+            node_a_prompt: String::new(),
+            node_b_label: String::new(),
             node_b_prompt: String::new(),
         },
     ];
@@ -172,11 +240,25 @@ fn default_true() -> bool {
     true
 }
 
+fn default_low_reasoning_effort() -> String {
+    "low".to_string()
+}
+
+fn default_target_total_turns() -> u32 {
+    30
+}
+
+fn default_room_id() -> String {
+    "main".to_string()
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum BoardApprovalMode {
     #[default]
     Auto,
+    Guardian,
+    #[serde(alias = "manual")]
     Approval,
 }
 
@@ -202,6 +284,24 @@ pub struct ExperimentConfig {
     pub enable_board_tools: bool,
     #[serde(default)]
     pub initial_board: String,
+    #[serde(default = "default_true")]
+    pub enable_prefix_cache_opt: bool,
+    #[serde(default = "default_true")]
+    pub enable_compaction_guard: bool,
+    #[serde(default)]
+    pub enable_private_notes: bool,
+    #[serde(default = "default_true")]
+    pub enable_smart_selector: bool,
+    #[serde(default)]
+    pub enable_adaptive_reasoning: bool,
+    #[serde(default = "default_low_reasoning_effort")]
+    pub adaptive_low_reasoning_effort: String,
+    #[serde(default)]
+    pub enable_periodic_reflection: bool,
+    #[serde(default)]
+    pub enable_narrative_arc: bool,
+    #[serde(default = "default_target_total_turns")]
+    pub target_total_turns: u32,
     #[serde(default)]
     pub agents: Vec<NodeConfig>,
     // Legacy compatibility fields for reading older saved configs
@@ -214,6 +314,15 @@ pub struct ExperimentConfig {
 
 impl ExperimentConfig {
     pub fn normalize(&mut self) {
+        if !matches!(
+            self.adaptive_low_reasoning_effort.as_str(),
+            "minimal" | "low" | "medium"
+        ) {
+            self.adaptive_low_reasoning_effort = default_low_reasoning_effort();
+        }
+        if self.target_total_turns < 5 {
+            self.target_total_turns = 5;
+        }
         if self.agents.is_empty() {
             if let Some(mut a) = self.node_a.take() {
                 if a.id.trim().is_empty() {
@@ -276,6 +385,15 @@ impl Default for ExperimentConfig {
             board_approval_mode: BoardApprovalMode::Auto,
             enable_board_tools: true,
             initial_board: String::new(),
+            enable_prefix_cache_opt: true,
+            enable_compaction_guard: true,
+            enable_private_notes: false,
+            enable_smart_selector: true,
+            enable_adaptive_reasoning: false,
+            adaptive_low_reasoning_effort: default_low_reasoning_effort(),
+            enable_periodic_reflection: false,
+            enable_narrative_arc: false,
+            target_total_turns: default_target_total_turns(),
             agents: vec![
                 NodeConfig {
                     id: "AiA".to_string(),
@@ -368,6 +486,8 @@ pub struct TimelineMessage {
     pub turn_number: u32,
     pub role: SpeakerRole,
     pub agent_id: Option<String>,
+    #[serde(default = "default_room_id")]
+    pub room_id: String,
     #[serde(default)]
     pub reasoning_content: String,
     pub content: String,
@@ -377,6 +497,30 @@ pub struct TimelineMessage {
     pub completion_tokens: u64,
     pub total_tokens: u64,
     pub whisper_consumed: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivePrivateRoom {
+    pub room_id: String,
+    pub member_ids: Vec<String>,
+    pub remaining_turns: u32,
+    #[serde(default)]
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterCard {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub base_prompt: String,
+    #[serde(default)]
+    pub behavior_traits: String,
+    #[serde(default)]
+    pub source_experiment_title: String,
     pub created_at: String,
 }
 
@@ -403,6 +547,8 @@ pub struct ObserverNote {
     pub trigger_turn: u32,
     pub tags: Vec<String>,
     pub depth_stage: String,
+    #[serde(default)]
+    pub narrative_act: String,
     pub note: String,
     #[serde(default)]
     pub tension_score: u8,
@@ -452,6 +598,12 @@ pub struct TurnSnapshot {
     #[serde(default)]
     pub board_content: String,
     #[serde(default)]
+    pub private_notes: HashMap<String, String>,
+    #[serde(default)]
+    pub active_private_room: Option<ActivePrivateRoom>,
+    #[serde(default)]
+    pub room_members: HashMap<String, Vec<String>>,
+    #[serde(default)]
     pub compacted_summary: String,
     #[serde(default)]
     pub compacted_until_seq: i64,
@@ -474,6 +626,12 @@ pub struct ExperimentDetail {
     pub board_content: String,
     #[serde(default)]
     pub board_prev_content: String,
+    #[serde(default)]
+    pub private_notes: HashMap<String, String>,
+    #[serde(default)]
+    pub active_private_room: Option<ActivePrivateRoom>,
+    #[serde(default)]
+    pub room_members: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub compacted_summary: String,
     #[serde(default)]
@@ -525,6 +683,8 @@ pub enum StreamEvent {
         agent_label: String,
         turn_number: u32,
         model_name: String,
+        active_tokens: u64,
+        context_usage_pct: u16,
     },
     StreamDelta {
         experiment_id: String,
@@ -564,6 +724,7 @@ pub enum StreamEvent {
         compacted_summary: String,
         tokens_before: u64,
         tokens_after: u64,
+        context_usage_pct: u16,
     },
     ToolCallStarted {
         experiment_id: String,
@@ -577,6 +738,12 @@ pub enum StreamEvent {
         board_prev_content: String,
         reason: String,
         actor_label: String,
+    },
+    PrivateNoteUpdated {
+        experiment_id: String,
+        agent_id: String,
+        agent_label: String,
+        note: String,
     },
     BoardApprovalRequested {
         experiment_id: String,
@@ -600,4 +767,77 @@ pub enum StreamEvent {
         experiment_id: String,
         message: String,
     },
+    EngineNotice {
+        experiment_id: String,
+        message: String,
+    },
+    ConfigHotUpdated {
+        experiment_id: String,
+        config: ExperimentConfig,
+    },
+    PrivateRoomUpdated {
+        experiment_id: String,
+        active_room: Option<ActivePrivateRoom>,
+        room_members: HashMap<String, Vec<String>>,
+    },
+    NarrativeFinaleReached {
+        experiment_id: String,
+        total_turns: u32,
+        target_turns: u32,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_legacy_experiment_config_deserializes_with_phase1_defaults() {
+        let legacy_json = r#"{
+            "presetId": "casual_chat",
+            "initialTopic": "停电了",
+            "observerInterval": 10,
+            "pauseSeconds": 2.5,
+            "maxConsecutiveTurns": 80,
+            "agents": [],
+            "nodeC": {
+                "id": "observer",
+                "label": "观察员 C",
+                "baseUrl": "https://api.deepseek.com/v1",
+                "apiKey": "",
+                "modelName": "deepseek-chat",
+                "temperature": 0.3,
+                "systemPrompt": ""
+            }
+        }"#;
+        let mut cfg: ExperimentConfig = serde_json::from_str(legacy_json).unwrap();
+        cfg.normalize();
+        assert!(cfg.enable_prefix_cache_opt);
+        assert!(cfg.enable_compaction_guard);
+        assert!(!cfg.enable_private_notes);
+        assert!(cfg.enable_smart_selector);
+        assert!(!cfg.enable_adaptive_reasoning);
+        assert_eq!(cfg.adaptive_low_reasoning_effort, "low");
+        assert!(!cfg.enable_periodic_reflection);
+    }
+
+    #[test]
+    fn test_upgraded_builtin_presets_concrete_names_and_three_player_casts() {
+        let presets = builtin_presets();
+        let names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"深夜老友瞎侃局"));
+        assert!(names.contains(&"深夜便利店·暴雨夜班"));
+        assert!(names.contains(&"合租客厅·凌晨三点"));
+        assert!(names.contains(&"太空维修站·氧气警报"));
+        assert!(names.contains(&"茶水间复盘·消失的U盘"));
+
+        let shared = presets.iter().find(|p| p.id == "shared_apartment").unwrap();
+        assert_eq!(shared.agent_prompts.len(), 3);
+        let usb = presets.iter().find(|p| p.id == "missing_usb").unwrap();
+        assert_eq!(usb.agent_prompts.len(), 3);
+        for p in presets.iter().filter(|p| p.id != "free") {
+            assert!(!p.initial_topic.trim().is_empty());
+            assert!(p.global_system_prompt.contains("禁止打比方") || p.global_system_prompt.contains("严禁打比方"));
+        }
+    }
 }

@@ -31,7 +31,7 @@ export interface PresetTemplate {
   nodeBPrompt: string;
 }
 
-export type BoardApprovalMode = "auto" | "approval";
+export type BoardApprovalMode = "auto" | "guardian" | "approval";
 
 export interface ExperimentConfig {
   presetId: string;
@@ -46,8 +46,46 @@ export interface ExperimentConfig {
   boardApprovalMode?: BoardApprovalMode;
   enableBoardTools?: boolean;
   initialBoard?: string;
+  enablePrefixCacheOpt?: boolean;
+  enableCompactionGuard?: boolean;
+  enablePrivateNotes?: boolean;
+  enableSmartSelector?: boolean;
+  enableAdaptiveReasoning?: boolean;
+  adaptiveLowReasoningEffort?: "minimal" | "low" | "medium" | string;
+  enablePeriodicReflection?: boolean;
+  enableNarrativeArc?: boolean;
+  targetTotalTurns?: number;
   agents: NodeConfig[];
   nodeC: NodeConfig;
+}
+
+export interface ActivePrivateRoom {
+  roomId: string;
+  memberIds: string[];
+  remainingTurns: number;
+  title?: string;
+}
+
+export interface CharacterCard {
+  id: string;
+  name: string;
+  basePrompt: string;
+  behaviorTraits: string;
+  sourceExperimentTitle: string;
+  createdAt: string;
+}
+
+export interface GeneratedAgentDraft {
+  label: string;
+  systemPrompt: string;
+}
+
+export interface GeneratedScenario {
+  title: string;
+  globalSystemPrompt: string;
+  initialTopic: string;
+  initialBoard: string;
+  agents: GeneratedAgentDraft[];
 }
 
 export interface BoardApprovalRequest {
@@ -67,6 +105,7 @@ export interface TimelineMessage {
   turnNumber: number;
   role: SpeakerRole;
   agentId: string | null;
+  roomId?: string;
   reasoningContent: string;
   content: string;
   modelName: string;
@@ -90,6 +129,7 @@ export interface ObserverNote {
   triggerTurn: number;
   tags: string[];
   depthStage: string;
+  narrativeAct?: string;
   note: string;
   tensionScore: number;
   abstractionScore: number;
@@ -122,6 +162,9 @@ export interface TurnSnapshot {
   turnNumber: number;
   messageIds: string[];
   boardContent: string;
+  privateNotes?: Record<string, string>;
+  activePrivateRoom?: ActivePrivateRoom | null;
+  roomMembers?: Record<string, string[]>;
   compactedSummary: string;
   compactedUntilSeq: number;
   totalTokens: number;
@@ -138,6 +181,9 @@ export interface ExperimentDetail {
   nextSpeaker: string;
   boardContent: string;
   boardPrevContent: string;
+  privateNotes?: Record<string, string>;
+  activePrivateRoom?: ActivePrivateRoom | null;
+  roomMembers?: Record<string, string[]>;
   compactedSummary: string;
   compactedUntilSeq: number;
   finalReport: string;
@@ -175,6 +221,8 @@ export type StreamEvent =
       agentLabel: string;
       turnNumber: number;
       modelName: string;
+      activeTokens: number;
+      contextUsagePct: number;
     }
   | {
       type: "stream_delta";
@@ -222,6 +270,7 @@ export type StreamEvent =
       compactedSummary: string;
       tokensBefore: number;
       tokensAfter: number;
+      contextUsagePct: number;
     }
   | {
       type: "tool_call_started";
@@ -237,6 +286,13 @@ export type StreamEvent =
       boardPrevContent: string;
       reason: string;
       actorLabel: string;
+    }
+  | {
+      type: "private_note_updated";
+      experimentId: string;
+      agentId: string;
+      agentLabel: string;
+      note: string;
     }
   | {
       type: "board_approval_requested";
@@ -263,4 +319,26 @@ export type StreamEvent =
       type: "engine_error";
       experimentId: string;
       message: string;
+    }
+  | {
+      type: "engine_notice";
+      experimentId: string;
+      message: string;
+    }
+  | {
+      type: "config_hot_updated";
+      experimentId: string;
+      config: ExperimentConfig;
+    }
+  | {
+      type: "private_room_updated";
+      experimentId: string;
+      activeRoom: ActivePrivateRoom | null;
+      roomMembers: Record<string, string[]>;
+    }
+  | {
+      type: "narrative_finale_reached";
+      experimentId: string;
+      totalTurns: number;
+      targetTurns: number;
     };

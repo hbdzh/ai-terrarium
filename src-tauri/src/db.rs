@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -7,9 +8,43 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::models::{
-    builtin_presets, BoardApprovalMode, CrisisCard, ExperimentConfig, ExperimentDetail,
-    ExperimentSummary, ObserverNote, PresetTemplate, SpeakerRole, TimelineMessage, TurnSnapshot,
+    builtin_presets, ActivePrivateRoom, BoardApprovalMode, CharacterCard, CrisisCard,
+    ExperimentConfig, ExperimentDetail, ExperimentSummary, ObserverNote, PresetTemplate,
+    SpeakerRole, TimelineMessage, TurnSnapshot, DEFAULT_CORE_ENGINE_PROMPT,
 };
+
+const CORE_ENGINE_PROMPT_KEY: &str = "core_engine_prompt";
+const BUILTIN_PRESETS_VERSION_KEY: &str = "builtin_presets_version";
+const CURRENT_BUILTIN_PRESETS_VERSION: &str = "3";
+
+fn is_legacy_unmodified_builtin(p: &PresetTemplate) -> bool {
+    match p.id.as_str() {
+        "casual_chat" => {
+            p.global_system_prompt
+                == "你们正在一间深夜便利店里对话。请像真人发微信一样自然口语化，每次严格 3～5 句话（不超过 120 字），适当带动作括号描写（如（拧开瓶盖）（瞥了一眼门外）），禁止引文挑刺、禁止学术黑话、禁止客套说教与总结升华。"
+                || p.global_system_prompt.starts_with("【场景背景】深夜暴雨停电的街角便利店。")
+        }
+        "philosophy" => {
+            (p.global_system_prompt
+                == "本次实验聚焦高密度哲学思辨：禁止空泛情绪宣泄或敷衍认同，每次回应必须精准回应上一位发言者的核心命题并推进一层思辨纵深。"
+                || p.global_system_prompt.starts_with("【场景背景】高密度哲学思辨圆桌。"))
+                && p.initial_topic.is_empty()
+        }
+        "scifi" => {
+            (p.global_system_prompt
+                == "你们正在共同推演近未来人类文明演化沙盘：请尽量给出具体制度、技术细节与日常切片，善用共享白板沉淀已确立的世界观公理。"
+                || p.global_system_prompt.starts_with("【场景背景】近未来人类文明演化沙盘推演。"))
+                && p.initial_topic.is_empty()
+        }
+        "absurd" => {
+            (p.global_system_prompt
+                == "喜剧黄金法则：无论设定多么离谱，所有参与者都必须全程一本正经、绝不自己笑场或跳出设定吐槽。"
+                || p.global_system_prompt.starts_with("【场景背景】严肃荒诞喜剧现场。"))
+                && p.initial_topic.is_empty()
+        }
+        _ => false,
+    }
+}
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -118,18 +153,104 @@ impl Database {
                 data_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS character_cards (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                base_prompt TEXT NOT NULL DEFAULT '',
+                behavior_traits TEXT NOT NULL DEFAULT '',
+                source_experiment_title TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             ",
         )?;
 
-        // Seed built-in presets if not yet persisted
         let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES (?1, ?2, ?3)",
+            params![CORE_ENGINE_PROMPT_KEY, DEFAULT_CORE_ENGINE_PROMPT, now],
+        )?;
+
+        let preset_version: Option<String> = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                params![BUILTIN_PRESETS_VERSION_KEY],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if preset_version.as_deref() != Some(CURRENT_BUILTIN_PRESETS_VERSION) {
+            for obsolete_id in ["philosophy", "scifi", "absurd"] {
+                let existing_obsolete: Option<String> = conn
+                    .query_row(
+                        "SELECT data_json FROM preset_templates WHERE id = ?1",
+                        params![obsolete_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(old_json) = existing_obsolete {
+                    if let Ok(old_preset) = serde_json::from_str::<PresetTemplate>(&old_json) {
+                        if is_legacy_unmodified_builtin(&old_preset) {
+                            conn.execute(
+                                "DELETE FROM preset_templates WHERE id = ?1",
+                                params![obsolete_id],
+                            )?;
+                        }
+                    }
+                }
+            }
+            conn.execute(
+                "INSERT INTO app_settings (key, value, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at",
+                params![BUILTIN_PRESETS_VERSION_KEY, CURRENT_BUILTIN_PRESETS_VERSION, now],
+            )?;
+        }
+
+        // Seed built-in presets if not yet persisted, or upgrade unmodified legacy built-in presets
         for (idx, preset) in builtin_presets().into_iter().enumerate() {
             let data_json = serde_json::to_string(&preset)?;
-            conn.execute(
-                "INSERT OR IGNORE INTO preset_templates (id, sort_order, data_json, updated_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![preset.id, idx as i64, data_json, now],
-            )?;
+            let existing: Option<String> = conn
+                .query_row(
+                    "SELECT data_json FROM preset_templates WHERE id = ?1",
+                    params![preset.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+
+            match existing {
+                None => {
+                    conn.execute(
+                        "INSERT INTO preset_templates (id, sort_order, data_json, updated_at)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![preset.id, idx as i64, data_json, now],
+                    )?;
+                }
+                Some(old_json) => {
+                    if let Ok(old_preset) = serde_json::from_str::<PresetTemplate>(&old_json) {
+                        if is_legacy_unmodified_builtin(&old_preset) {
+                            conn.execute(
+                                "UPDATE preset_templates
+                                 SET sort_order = ?1, data_json = ?2, updated_at = ?3
+                                 WHERE id = ?4",
+                                params![idx as i64, data_json, now, preset.id],
+                            )?;
+                        } else {
+                            conn.execute(
+                                "UPDATE preset_templates SET sort_order = ?1 WHERE id = ?2",
+                                params![idx as i64, preset.id],
+                            )?;
+                        }
+                    }
+                }
+            }
         }
 
         // Migrate older databases lacking messages.agent_id or messages.reasoning_content
@@ -147,6 +268,18 @@ impl Database {
         if !cols.iter().any(|c| c == "reasoning_content") {
             conn.execute(
                 "ALTER TABLE messages ADD COLUMN reasoning_content TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !cols.iter().any(|c| c == "raw_prompt_json") {
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN raw_prompt_json TEXT",
+                [],
+            )?;
+        }
+        if !cols.iter().any(|c| c == "room_id") {
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN room_id TEXT NOT NULL DEFAULT 'main'",
                 [],
             )?;
         }
@@ -187,6 +320,48 @@ impl Database {
                 [],
             )?;
         }
+        if !exp_cols.iter().any(|c| c == "private_notes_json") {
+            conn.execute(
+                "ALTER TABLE experiments ADD COLUMN private_notes_json TEXT NOT NULL DEFAULT '{}'",
+                [],
+            )?;
+        }
+        if !exp_cols.iter().any(|c| c == "active_room_json") {
+            conn.execute(
+                "ALTER TABLE experiments ADD COLUMN active_room_json TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !exp_cols.iter().any(|c| c == "room_members_json") {
+            conn.execute(
+                "ALTER TABLE experiments ADD COLUMN room_members_json TEXT NOT NULL DEFAULT '{}'",
+                [],
+            )?;
+        }
+
+        let mut snap_stmt = conn.prepare("PRAGMA table_info(turn_snapshots)")?;
+        let snap_cols: Vec<String> = snap_stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        if !snap_cols.iter().any(|c| c == "private_notes_json") {
+            conn.execute(
+                "ALTER TABLE turn_snapshots ADD COLUMN private_notes_json TEXT NOT NULL DEFAULT '{}'",
+                [],
+            )?;
+        }
+        if !snap_cols.iter().any(|c| c == "active_room_json") {
+            conn.execute(
+                "ALTER TABLE turn_snapshots ADD COLUMN active_room_json TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !snap_cols.iter().any(|c| c == "room_members_json") {
+            conn.execute(
+                "ALTER TABLE turn_snapshots ADD COLUMN room_members_json TEXT NOT NULL DEFAULT '{}'",
+                [],
+            )?;
+        }
 
         // Migrate older databases lacking observer_notes.tension_score / abstraction_score / crisis_cards_json
         let mut obs_cols_stmt = conn.prepare("PRAGMA table_info(observer_notes)")?;
@@ -212,7 +387,44 @@ impl Database {
                 [],
             )?;
         }
+        if !obs_cols.iter().any(|c| c == "narrative_act") {
+            conn.execute(
+                "ALTER TABLE observer_notes ADD COLUMN narrative_act TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
         Ok(())
+    }
+
+    pub fn get_core_engine_prompt(&self) -> Result<String> {
+        let conn = self.conn.lock().unwrap();
+        let val: Option<String> = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                params![CORE_ENGINE_PROMPT_KEY],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(val.unwrap_or_else(|| DEFAULT_CORE_ENGINE_PROMPT.to_string()))
+    }
+
+    pub fn save_core_engine_prompt(&self, prompt: &str) -> Result<String> {
+        let now = Utc::now().to_rfc3339();
+        let trimmed = prompt.trim().to_string();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at",
+            params![CORE_ENGINE_PROMPT_KEY, trimmed, now],
+        )?;
+        Ok(trimmed)
+    }
+
+    pub fn reset_core_engine_prompt(&self) -> Result<String> {
+        self.save_core_engine_prompt(DEFAULT_CORE_ENGINE_PROMPT)
     }
 
     pub fn list_presets(&self) -> Result<Vec<PresetTemplate>> {
@@ -355,7 +567,8 @@ impl Database {
             .query_row(
                 "SELECT id, title, config_json, total_turns, total_tokens, next_speaker,
                         board_content, board_prev_content, compacted_summary, compacted_until_seq,
-                        final_report, created_at, updated_at
+                        final_report, created_at, updated_at, private_notes_json,
+                        active_room_json, room_members_json
                  FROM experiments WHERE id = ?1",
                 params![id],
                 |row| {
@@ -373,18 +586,31 @@ impl Database {
                         row.get::<_, String>(10)?,
                         row.get::<_, String>(11)?,
                         row.get::<_, String>(12)?,
+                        row.get::<_, String>(13)?,
+                        row.get::<_, String>(14)?,
+                        row.get::<_, String>(15)?,
                     ))
                 },
             )
             .optional()?
             .context("experiment not found")?;
 
+        let private_notes: HashMap<String, String> =
+            serde_json::from_str(&row.13).unwrap_or_default();
+        let active_private_room: Option<ActivePrivateRoom> = if row.14.trim().is_empty() {
+            None
+        } else {
+            serde_json::from_str(&row.14).ok()
+        };
+        let room_members: HashMap<String, Vec<String>> =
+            serde_json::from_str(&row.15).unwrap_or_default();
+
         let mut config: ExperimentConfig = serde_json::from_str(&row.2).unwrap_or_default();
         config.normalize();
 
         let mut msg_stmt = conn.prepare(
             "SELECT id, experiment_id, seq, turn_number, role, agent_id, reasoning_content, content, model_name, duration_ms,
-                    prompt_tokens, completion_tokens, total_tokens, whisper_consumed, created_at
+                    prompt_tokens, completion_tokens, total_tokens, whisper_consumed, created_at, room_id
              FROM messages
              WHERE experiment_id = ?1
              ORDER BY seq ASC",
@@ -393,6 +619,12 @@ impl Database {
             let role_str: String = r.get(4)?;
             let agent_id_col: String = r.get(5)?;
             let (role, agent_id) = SpeakerRole::from_db(&role_str, &agent_id_col);
+            let room_col: String = r.get(15)?;
+            let room_id = if room_col.trim().is_empty() {
+                "main".to_string()
+            } else {
+                room_col
+            };
             Ok(TimelineMessage {
                 id: r.get(0)?,
                 experiment_id: r.get(1)?,
@@ -400,6 +632,7 @@ impl Database {
                 turn_number: r.get(3)?,
                 role,
                 agent_id,
+                room_id,
                 reasoning_content: r.get(6)?,
                 content: r.get(7)?,
                 model_name: r.get(8)?,
@@ -419,7 +652,7 @@ impl Database {
         let mut obs_stmt = conn.prepare(
             "SELECT id, experiment_id, trigger_turn, tags_json, depth_stage, note,
                     tension_score, abstraction_score, stagnation_index, perturbation_injected,
-                    crisis_cards_json, created_at
+                    crisis_cards_json, created_at, narrative_act
              FROM observer_notes
              WHERE experiment_id = ?1
              ORDER BY trigger_turn DESC, created_at DESC",
@@ -435,6 +668,7 @@ impl Database {
                 trigger_turn: r.get(2)?,
                 tags,
                 depth_stage: r.get(4)?,
+                narrative_act: r.get(12)?,
                 note: r.get(5)?,
                 tension_score: r.get::<_, i64>(6)?.clamp(0, 100) as u8,
                 abstraction_score: r.get::<_, i64>(7)?.clamp(0, 100) as u8,
@@ -458,6 +692,9 @@ impl Database {
             next_speaker: row.5,
             board_content: row.6,
             board_prev_content: row.7,
+            private_notes,
+            active_private_room,
+            room_members,
             compacted_summary: row.8,
             compacted_until_seq: row.9,
             final_report: row.10,
@@ -465,6 +702,111 @@ impl Database {
             observer_notes,
             created_at: row.11,
             updated_at: row.12,
+        })
+    }
+
+    pub fn get_total_turns(&self, experiment_id: &str) -> Result<u32> {
+        let conn = self.conn.lock().unwrap();
+        let turns: u32 = conn
+            .query_row(
+                "SELECT total_turns FROM experiments WHERE id = ?1",
+                params![experiment_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("experiment not found")?;
+        Ok(turns)
+    }
+
+    pub fn get_board_content(&self, experiment_id: &str) -> Result<String> {
+        let conn = self.conn.lock().unwrap();
+        let board: String = conn
+            .query_row(
+                "SELECT board_content FROM experiments WHERE id = ?1",
+                params![experiment_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("experiment not found")?;
+        Ok(board)
+    }
+
+    pub fn get_experiment_header(&self, experiment_id: &str) -> Result<(ExperimentConfig, String)> {
+        let conn = self.conn.lock().unwrap();
+        let (cfg_json, board): (String, String) = conn
+            .query_row(
+                "SELECT config_json, board_content FROM experiments WHERE id = ?1",
+                params![experiment_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .context("experiment not found")?;
+        let mut config: ExperimentConfig = serde_json::from_str(&cfg_json).unwrap_or_default();
+        config.normalize();
+        Ok((config, board))
+    }
+
+    pub fn get_snapshot_source(
+        &self,
+        experiment_id: &str,
+        turn_number: u32,
+    ) -> Result<TurnSnapshot> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT board_content, private_notes_json, active_room_json, room_members_json,
+                        compacted_summary, compacted_until_seq, total_tokens, next_speaker
+                 FROM experiments WHERE id = ?1",
+                params![experiment_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, i64>(5)?,
+                        r.get::<_, u64>(6)?,
+                        r.get::<_, String>(7)?,
+                    ))
+                },
+            )
+            .optional()?
+            .context("experiment not found")?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id FROM messages WHERE experiment_id = ?1 AND turn_number <= ?2 ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map(params![experiment_id, turn_number], |r| r.get::<_, String>(0))?;
+        let mut message_ids = Vec::new();
+        for r in rows {
+            message_ids.push(r?);
+        }
+
+        let private_notes: HashMap<String, String> =
+            serde_json::from_str(&row.1).unwrap_or_default();
+        let active_private_room: Option<ActivePrivateRoom> = if row.2.trim().is_empty() {
+            None
+        } else {
+            serde_json::from_str(&row.2).ok()
+        };
+        let room_members: HashMap<String, Vec<String>> =
+            serde_json::from_str(&row.3).unwrap_or_default();
+
+        Ok(TurnSnapshot {
+            id: Uuid::new_v4().to_string(),
+            experiment_id: experiment_id.to_string(),
+            turn_number,
+            message_ids,
+            board_content: row.0,
+            private_notes,
+            active_private_room,
+            room_members,
+            compacted_summary: row.4,
+            compacted_until_seq: row.5,
+            total_tokens: row.6,
+            next_speaker: row.7,
+            created_at: Utc::now().to_rfc3339(),
         })
     }
 
@@ -483,7 +825,10 @@ impl Database {
 
     pub fn delete_experiment(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM experiments WHERE id = ?1", params![id])?;
+        let deleted = conn.execute("DELETE FROM experiments WHERE id = ?1", params![id])?;
+        if deleted > 0 {
+            let _ = conn.execute_batch("VACUUM;");
+        }
         Ok(())
     }
 
@@ -499,12 +844,17 @@ impl Database {
 
     pub fn append_message(&self, msg: &TimelineMessage) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        let room_id = if msg.room_id.trim().is_empty() {
+            "main"
+        } else {
+            msg.room_id.trim()
+        };
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO messages (
-                id, experiment_id, seq, turn_number, role, agent_id, reasoning_content, content, model_name, duration_ms,
+                id, experiment_id, seq, turn_number, role, agent_id, room_id, reasoning_content, content, model_name, duration_ms,
                 prompt_tokens, completion_tokens, total_tokens, whisper_consumed, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 msg.id,
                 msg.experiment_id,
@@ -512,6 +862,7 @@ impl Database {
                 msg.turn_number,
                 msg.role.as_str(),
                 msg.agent_id.as_deref().unwrap_or(""),
+                room_id,
                 msg.reasoning_content,
                 msg.content,
                 msg.model_name,
@@ -530,6 +881,27 @@ impl Database {
         Ok(())
     }
 
+    pub fn save_message_raw_prompt(&self, message_id: &str, raw_prompt_json: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE messages SET raw_prompt_json = ?1 WHERE id = ?2",
+            params![raw_prompt_json, message_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_message_raw_prompt(&self, message_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let res: Option<Option<String>> = conn
+            .query_row(
+                "SELECT raw_prompt_json FROM messages WHERE id = ?1",
+                params![message_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(res.flatten())
+    }
+
     pub fn update_experiment_state_for_fork(
         &self,
         experiment_id: &str,
@@ -537,22 +909,35 @@ impl Database {
         total_tokens: u64,
         next_speaker: &str,
         board_content: &str,
+        private_notes: &HashMap<String, String>,
+        active_private_room: &Option<ActivePrivateRoom>,
+        room_members: &HashMap<String, Vec<String>>,
         compacted_summary: &str,
         compacted_until_seq: i64,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        let private_notes_json = serde_json::to_string(private_notes)?;
+        let active_room_json = match active_private_room {
+            Some(r) => serde_json::to_string(r)?,
+            None => String::new(),
+        };
+        let room_members_json = serde_json::to_string(room_members)?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE experiments
              SET total_turns = ?1, total_tokens = ?2, next_speaker = ?3,
                  board_content = ?4, board_prev_content = ?4,
-                 compacted_summary = ?5, compacted_until_seq = ?6, updated_at = ?7
-             WHERE id = ?8",
+                 private_notes_json = ?5, active_room_json = ?6, room_members_json = ?7,
+                 compacted_summary = ?8, compacted_until_seq = ?9, updated_at = ?10
+             WHERE id = ?11",
             params![
                 total_turns,
                 total_tokens,
                 next_speaker,
                 board_content,
+                private_notes_json,
+                active_room_json,
+                room_members_json,
                 compacted_summary,
                 compacted_until_seq,
                 now,
@@ -564,16 +949,26 @@ impl Database {
 
     pub fn save_turn_snapshot(&self, snap: &TurnSnapshot) -> Result<()> {
         let ids_json = serde_json::to_string(&snap.message_ids)?;
+        let private_notes_json = serde_json::to_string(&snap.private_notes)?;
+        let active_room_json = match &snap.active_private_room {
+            Some(r) => serde_json::to_string(r)?,
+            None => String::new(),
+        };
+        let room_members_json = serde_json::to_string(&snap.room_members)?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO turn_snapshots (
-                id, experiment_id, turn_number, message_ids_json, board_content,
+                id, experiment_id, turn_number, message_ids_json, board_content, private_notes_json,
+                active_room_json, room_members_json,
                 compacted_summary, compacted_until_seq, total_tokens, next_speaker, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             ON CONFLICT(experiment_id, turn_number) DO UPDATE SET
                 id = excluded.id,
                 message_ids_json = excluded.message_ids_json,
                 board_content = excluded.board_content,
+                private_notes_json = excluded.private_notes_json,
+                active_room_json = excluded.active_room_json,
+                room_members_json = excluded.room_members_json,
                 compacted_summary = excluded.compacted_summary,
                 compacted_until_seq = excluded.compacted_until_seq,
                 total_tokens = excluded.total_tokens,
@@ -585,6 +980,9 @@ impl Database {
                 snap.turn_number,
                 ids_json,
                 snap.board_content,
+                private_notes_json,
+                active_room_json,
+                room_members_json,
                 snap.compacted_summary,
                 snap.compacted_until_seq,
                 snap.total_tokens,
@@ -598,7 +996,8 @@ impl Database {
     pub fn get_turn_snapshots(&self, experiment_id: &str) -> Result<Vec<TurnSnapshot>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, experiment_id, turn_number, message_ids_json, board_content,
+            "SELECT id, experiment_id, turn_number, message_ids_json, board_content, private_notes_json,
+                    active_room_json, room_members_json,
                     compacted_summary, compacted_until_seq, total_tokens, next_speaker, created_at
              FROM turn_snapshots
              WHERE experiment_id = ?1
@@ -607,17 +1006,32 @@ impl Database {
         let rows = stmt.query_map(params![experiment_id], |r| {
             let ids_str: String = r.get(3)?;
             let message_ids: Vec<String> = serde_json::from_str(&ids_str).unwrap_or_default();
+            let notes_str: String = r.get(5)?;
+            let private_notes: HashMap<String, String> =
+                serde_json::from_str(&notes_str).unwrap_or_default();
+            let active_str: String = r.get(6)?;
+            let active_private_room = if active_str.trim().is_empty() {
+                None
+            } else {
+                serde_json::from_str(&active_str).ok()
+            };
+            let members_str: String = r.get(7)?;
+            let room_members: HashMap<String, Vec<String>> =
+                serde_json::from_str(&members_str).unwrap_or_default();
             Ok(TurnSnapshot {
                 id: r.get(0)?,
                 experiment_id: r.get(1)?,
                 turn_number: r.get(2)?,
                 message_ids,
                 board_content: r.get(4)?,
-                compacted_summary: r.get(5)?,
-                compacted_until_seq: r.get(6)?,
-                total_tokens: r.get(7)?,
-                next_speaker: r.get(8)?,
-                created_at: r.get(9)?,
+                private_notes,
+                active_private_room,
+                room_members,
+                compacted_summary: r.get(8)?,
+                compacted_until_seq: r.get(9)?,
+                total_tokens: r.get(10)?,
+                next_speaker: r.get(11)?,
+                created_at: r.get(12)?,
             })
         })?;
         let mut items = Vec::new();
@@ -635,7 +1049,8 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let res = conn
             .query_row(
-                "SELECT id, experiment_id, turn_number, message_ids_json, board_content,
+                "SELECT id, experiment_id, turn_number, message_ids_json, board_content, private_notes_json,
+                        active_room_json, room_members_json,
                         compacted_summary, compacted_until_seq, total_tokens, next_speaker, created_at
                  FROM turn_snapshots
                  WHERE experiment_id = ?1 AND turn_number = ?2",
@@ -644,17 +1059,32 @@ impl Database {
                     let ids_str: String = r.get(3)?;
                     let message_ids: Vec<String> =
                         serde_json::from_str(&ids_str).unwrap_or_default();
+                    let notes_str: String = r.get(5)?;
+                    let private_notes: HashMap<String, String> =
+                        serde_json::from_str(&notes_str).unwrap_or_default();
+                    let active_str: String = r.get(6)?;
+                    let active_private_room = if active_str.trim().is_empty() {
+                        None
+                    } else {
+                        serde_json::from_str(&active_str).ok()
+                    };
+                    let members_str: String = r.get(7)?;
+                    let room_members: HashMap<String, Vec<String>> =
+                        serde_json::from_str(&members_str).unwrap_or_default();
                     Ok(TurnSnapshot {
                         id: r.get(0)?,
                         experiment_id: r.get(1)?,
                         turn_number: r.get(2)?,
                         message_ids,
                         board_content: r.get(4)?,
-                        compacted_summary: r.get(5)?,
-                        compacted_until_seq: r.get(6)?,
-                        total_tokens: r.get(7)?,
-                        next_speaker: r.get(8)?,
-                        created_at: r.get(9)?,
+                        private_notes,
+                        active_private_room,
+                        room_members,
+                        compacted_summary: r.get(8)?,
+                        compacted_until_seq: r.get(9)?,
+                        total_tokens: r.get(10)?,
+                        next_speaker: r.get(11)?,
+                        created_at: r.get(12)?,
                     })
                 },
             )
@@ -700,6 +1130,115 @@ impl Database {
             params![prev, new_content, now, experiment_id],
         )?;
         Ok((prev, new_content.to_string()))
+    }
+
+    pub fn update_active_room(
+        &self,
+        experiment_id: &str,
+        active_room: &Option<ActivePrivateRoom>,
+        room_members: &HashMap<String, Vec<String>>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let active_room_json = match active_room {
+            Some(r) => serde_json::to_string(r)?,
+            None => String::new(),
+        };
+        let room_members_json = serde_json::to_string(room_members)?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE experiments SET active_room_json = ?1, room_members_json = ?2, updated_at = ?3
+             WHERE id = ?4",
+            params![active_room_json, room_members_json, now, experiment_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_character_cards(&self) -> Result<Vec<CharacterCard>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, base_prompt, behavior_traits, source_experiment_title, created_at
+             FROM character_cards
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(CharacterCard {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                base_prompt: r.get(2)?,
+                behavior_traits: r.get(3)?,
+                source_experiment_title: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        })?;
+        let mut items = Vec::new();
+        for r in rows {
+            items.push(r?);
+        }
+        Ok(items)
+    }
+
+    pub fn save_character_card(&self, card: &CharacterCard) -> Result<Vec<CharacterCard>> {
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO character_cards (id, name, base_prompt, behavior_traits, source_experiment_title, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    base_prompt = excluded.base_prompt,
+                    behavior_traits = excluded.behavior_traits,
+                    source_experiment_title = excluded.source_experiment_title",
+                params![
+                    card.id,
+                    card.name,
+                    card.base_prompt,
+                    card.behavior_traits,
+                    card.source_experiment_title,
+                    card.created_at,
+                ],
+            )?;
+        }
+        self.list_character_cards()
+    }
+
+    pub fn delete_character_card(&self, id: &str) -> Result<Vec<CharacterCard>> {
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute("DELETE FROM character_cards WHERE id = ?1", params![id])?;
+        }
+        self.list_character_cards()
+    }
+
+    pub fn update_agent_private_note(
+        &self,
+        experiment_id: &str,
+        agent_id: &str,
+        note: &str,
+    ) -> Result<(String, HashMap<String, String>)> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        let raw_json: String = conn
+            .query_row(
+                "SELECT private_notes_json FROM experiments WHERE id = ?1",
+                params![experiment_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("experiment not found")?;
+        let mut map: HashMap<String, String> =
+            serde_json::from_str(&raw_json).unwrap_or_default();
+        let trimmed: String = note.trim().chars().take(150).collect();
+        if trimmed.is_empty() {
+            map.remove(agent_id);
+        } else {
+            map.insert(agent_id.to_string(), trimmed.clone());
+        }
+        let updated_json = serde_json::to_string(&map)?;
+        conn.execute(
+            "UPDATE experiments SET private_notes_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![updated_json, now, experiment_id],
+        )?;
+        Ok((trimmed, map))
     }
 
     pub fn set_board_approval_mode(
@@ -758,16 +1297,17 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO observer_notes (
-                id, experiment_id, trigger_turn, tags_json, depth_stage, note,
+                id, experiment_id, trigger_turn, tags_json, depth_stage, narrative_act, note,
                 tension_score, abstraction_score, stagnation_index, perturbation_injected,
                 crisis_cards_json, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 note.id,
                 note.experiment_id,
                 note.trigger_turn,
                 tags_json,
                 note.depth_stage,
+                note.narrative_act,
                 note.note,
                 note.tension_score as i64,
                 note.abstraction_score as i64,
@@ -919,6 +1459,7 @@ mod tests {
             turn_number: 1,
             role: SpeakerRole::Ai,
             agent_id: Some("AiA".to_string()),
+            room_id: "main".to_string(),
             reasoning_content: "先构思一个流动的意象。".to_string(),
             content: "时间是一条不回头的河。".to_string(),
             model_name: "deepseek-chat".to_string(),
@@ -938,6 +1479,7 @@ mod tests {
             trigger_turn: 1,
             tags: vec!["时间".to_string(), "隐喻".to_string()],
             depth_stage: "破冰试探".to_string(),
+            narrative_act: "起".to_string(),
             note: "开局直接抛出了强意象。".to_string(),
             tension_score: 45,
             abstraction_score: 70,
@@ -957,7 +1499,74 @@ mod tests {
             .create_experiment("测试实验2", &ExperimentConfig::default())
             .unwrap();
         assert_eq!(db.list_experiments().unwrap().len(), 2);
+
+        // Private notes persistence & 150-char clamp
+        let long_note = "记".repeat(170);
+        let (saved_note, map) = db
+            .update_agent_private_note(&exp.id, "AiA", &long_note)
+            .unwrap();
+        assert_eq!(saved_note.chars().count(), 150);
+        assert_eq!(map.get("AiA").unwrap().chars().count(), 150);
+        let reloaded = db.get_experiment_detail(&exp.id).unwrap();
+        assert_eq!(reloaded.private_notes.get("AiA").unwrap().chars().count(), 150);
+
+        // Character cards CRUD
+        let card = CharacterCard {
+            id: "card-1".to_string(),
+            name: "阿哲".to_string(),
+            base_prompt: "便利店夜班店员".to_string(),
+            behavior_traits: "嘴硬心细、善于反套话".to_string(),
+            source_experiment_title: exp.title.clone(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let cards = db.save_character_card(&card).unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].name, "阿哲");
+        let after_del = db.delete_character_card("card-1").unwrap();
+        assert!(after_del.is_empty());
+
         db.delete_experiment(&exp2.id).unwrap();
         assert_eq!(db.list_experiments().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_legacy_v2_builtin_presets_migrate_cleanly_to_v3() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("DELETE FROM preset_templates", []).unwrap();
+            conn.execute(
+                "DELETE FROM app_settings WHERE key = ?1",
+                params![BUILTIN_PRESETS_VERSION_KEY],
+            )
+            .unwrap();
+            let old_philosophy = PresetTemplate {
+                id: "philosophy".to_string(),
+                name: "哲学思辨局".to_string(),
+                description: "old".to_string(),
+                global_system_prompt: "【场景背景】高密度哲学思辨圆桌。\nold".to_string(),
+                initial_topic: String::new(),
+                agent_prompts: vec![],
+                is_builtin: true,
+                node_a_label: "感性直觉派".to_string(),
+                node_a_prompt: "old".to_string(),
+                node_b_label: "理性解构派".to_string(),
+                node_b_prompt: "old".to_string(),
+            };
+            conn.execute(
+                "INSERT INTO preset_templates (id, sort_order, data_json, updated_at)
+                 VALUES (?1, 2, ?2, '2026-01-01T00:00:00Z')",
+                params!["philosophy", serde_json::to_string(&old_philosophy).unwrap()],
+            )
+            .unwrap();
+        }
+
+        db.init_schema().unwrap();
+        let migrated = db.list_presets().unwrap();
+        assert!(!migrated.iter().any(|p| p.id == "philosophy"));
+        assert!(migrated.iter().any(|p| p.id == "late_night_friends"));
+        assert!(migrated.iter().any(|p| p.id == "shared_apartment"));
+        assert!(migrated.iter().any(|p| p.id == "space_station"));
+        assert!(migrated.iter().any(|p| p.id == "missing_usb"));
     }
 }

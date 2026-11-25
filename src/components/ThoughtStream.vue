@@ -27,6 +27,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   fork: [turnNumber: number];
   editAndReplay: [payload: { messageId: string; turnNumber: number; content: string }];
+  inspectPrompt: [messageId: string];
 }>();
 
 const summaryOpen = ref(false);
@@ -185,11 +186,11 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
       <button
         type="button"
         @click="summaryOpen = !summaryOpen"
-        class="w-full px-4 py-2.5 flex items-center gap-2 text-xs text-slate-600 hover:bg-slate-200/50 transition text-left"
+        class="w-full px-4 py-2.5 flex items-center gap-2 text-xs text-slate-600 hover:bg-slate-200/50 transition text-left min-w-0"
       >
         <Archive class="w-3.5 h-3.5 text-[#007AFF] shrink-0" />
-        <span class="font-semibold text-[#1D1D1F]">历史纪要与已确认事实</span>
-        <span class="text-[11px] text-slate-400">早期对话已自动无损折叠</span>
+        <span class="font-semibold text-[#1D1D1F] truncate">历史纪要与已确认事实</span>
+        <span class="hidden sm:inline text-[11px] text-slate-400 shrink-0">早期对话已自动无损折叠</span>
         <component
           :is="summaryOpen ? ChevronDown : ChevronRight"
           class="w-3.5 h-3.5 text-slate-400 ml-auto shrink-0"
@@ -239,6 +240,7 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
         :turn-number="msg.turnNumber"
         :agent-label="agentLabel(msg.agentId)"
         :model-name="msg.modelName"
+        :room-id="msg.roomId"
         :duration-ms="msg.durationMs"
         :reasoning-content="msg.reasoningContent ?? ''"
         :content="msg.content"
@@ -248,6 +250,7 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
         :can-branch="canBranch"
         @fork="emit('fork', $event)"
         @edit-and-replay="emit('editAndReplay', $event)"
+        @inspect-prompt="emit('inspectPrompt', $event)"
       />
 
       <!-- God Intervention Divider -->
@@ -264,7 +267,7 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
             <component :is="godMeta(msg.role, msg.agentId).icon" class="w-3 h-3" />
             <span>{{ godMeta(msg.role, msg.agentId).label }}</span>
           </div>
-          <div class="text-xs leading-relaxed font-normal whitespace-pre-wrap">
+          <div class="text-xs leading-relaxed font-normal whitespace-pre-wrap break-words">
             {{ msg.content }}
           </div>
         </div>

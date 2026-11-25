@@ -44,6 +44,14 @@
   background: rgba(15, 23, 42, 0.25);
 }
 
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 /* Markdown prose styling inside dialogue bubbles */
 .terrarium-prose {
   font-size: 15px;

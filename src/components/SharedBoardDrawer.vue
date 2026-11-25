@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import {
   ClipboardList,
   X,
+  Shield,
   ShieldCheck,
   ShieldAlert,
   Pencil,
@@ -16,6 +17,7 @@ import { computeLineDiff } from "../utils/diff";
 
 const props = defineProps<{
   open: boolean;
+  embedded?: boolean;
   boardContent: string;
   boardPrevContent: string;
   approvalMode: BoardApprovalMode;
@@ -62,15 +64,29 @@ function commitEdit() {
   emit("saveBoard", draftText.value);
   viewMode.value = "rendered";
 }
+
+function cycleApprovalMode() {
+  const next: BoardApprovalMode =
+    props.approvalMode === "auto"
+      ? "guardian"
+      : props.approvalMode === "guardian"
+        ? "approval"
+        : "auto";
+  emit("toggleApprovalMode", next);
+}
 </script>
 
 <template>
   <aside
     v-if="open"
-    class="h-full w-full md:w-[320px] lg:w-[360px] shrink-0 flex flex-col bg-[#FAFAFC] border-l border-black/[0.06] overflow-hidden z-10"
+    class="h-full w-full flex flex-col bg-[#FAFAFC] overflow-hidden"
+    :class="embedded ? '' : 'md:w-[320px] lg:w-[360px] shrink-0 border-l border-black/[0.06] z-10'"
   >
-    <!-- Header -->
-    <div class="px-4 py-3 border-b border-black/[0.06] bg-white/85 flex items-center justify-between gap-2">
+    <!-- Header (hidden when embedded in desktop Inspector, shown on mobile or standalone) -->
+    <div
+      class="px-4 py-2.5 border-b border-black/[0.06] bg-white/85 flex items-center justify-between gap-2"
+      :class="embedded ? 'md:hidden' : ''"
+    >
       <div class="flex items-center gap-2 min-w-0">
         <div class="w-7 h-7 rounded-xl bg-[#007AFF]/10 text-[#007AFF] flex items-center justify-center shrink-0">
           <ClipboardList class="w-4 h-4" />
@@ -95,12 +111,12 @@ function commitEdit() {
     </div>
 
     <!-- Approval Mode & View Switcher -->
-    <div class="px-4 py-2 border-b border-black/[0.05] bg-white/60 flex flex-wrap items-center justify-between gap-2">
-      <div class="flex items-center gap-1 p-0.5 rounded-full bg-[#F2F2F5] border border-black/[0.04]">
+    <div class="px-3 py-2 border-b border-black/[0.05] bg-white/60 flex items-center justify-between gap-1.5 shrink-0">
+      <div class="flex items-center gap-0.5 p-0.5 rounded-full bg-[#F2F2F5] border border-black/[0.04]">
         <button
           type="button"
           @click="viewMode = 'rendered'"
-          class="flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium transition"
+          class="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-medium transition whitespace-nowrap"
           :class="viewMode === 'rendered' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
         >
           <Eye class="w-3 h-3" />
@@ -109,7 +125,7 @@ function commitEdit() {
         <button
           type="button"
           @click="viewMode = 'diff'"
-          class="flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium transition"
+          class="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-medium transition whitespace-nowrap"
           :class="viewMode === 'diff' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
         >
           <GitCompare class="w-3 h-3" />
@@ -120,7 +136,7 @@ function commitEdit() {
           v-if="!readOnly"
           type="button"
           @click="startEdit"
-          class="flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium transition"
+          class="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-medium transition whitespace-nowrap"
           :class="viewMode === 'edit' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
         >
           <Pencil class="w-3 h-3" />
@@ -131,22 +147,33 @@ function commitEdit() {
       <button
         v-if="!readOnly"
         type="button"
-        @click="emit('toggleApprovalMode', approvalMode === 'approval' ? 'auto' : 'approval')"
-        class="flex items-center gap-1 px-2.5 py-1 rounded-full text-[10.5px] font-medium border transition"
+        @click="cycleApprovalMode"
+        class="flex items-center gap-1 px-2 py-1 rounded-full text-[10.5px] font-medium border transition whitespace-nowrap shrink-0"
         :class="
           approvalMode === 'approval'
             ? 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100/70'
-            : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100/70'
+            : approvalMode === 'guardian'
+              ? 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100/70'
+              : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100/70'
         "
         :title="
           approvalMode === 'approval'
-            ? '当前：AI 修改白板需造物主审批放行（点击切换为自动放行）'
-            : '当前：AI 修改白板自动放行（点击切换为需造物主审批）'
+            ? '当前：人工审批（点击切换为自动放行）'
+            : approvalMode === 'guardian'
+              ? '当前：防泄密审核（点击切换为人工审批）'
+              : '当前：自动放行（点击切换为防泄密审核）'
         "
       >
         <ShieldAlert v-if="approvalMode === 'approval'" class="w-3 h-3" />
+        <Shield v-else-if="approvalMode === 'guardian'" class="w-3 h-3" />
         <ShieldCheck v-else class="w-3 h-3" />
-        <span>{{ approvalMode === "approval" ? "需造物主审批" : "自动放行" }}</span>
+        <span>{{
+          approvalMode === "approval"
+            ? "人工审批"
+            : approvalMode === "guardian"
+              ? "防泄密审核"
+              : "自动放行"
+        }}</span>
       </button>
     </div>
 
@@ -207,7 +234,7 @@ function commitEdit() {
           class="rounded-2xl border border-dashed border-slate-200 p-6 text-center text-xs text-slate-400 leading-relaxed"
         >
           共享白板当前为空。<br />
-          参与对话的 AI 可通过 <code class="px-1 py-0.5 bg-slate-100 rounded text-[11px]">read_board</code> /
+          白板内容已实时注入 AI 系统提示词，参与者可通过
           <code class="px-1 py-0.5 bg-slate-100 rounded text-[11px]">update_board</code> 工具共同维护此空间。
         </div>
         <div

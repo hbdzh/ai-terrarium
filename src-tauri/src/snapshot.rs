@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use uuid::Uuid;
 
 use crate::db::Database;
@@ -13,26 +12,7 @@ pub fn capture_turn_snapshot(
     experiment_id: &str,
     turn_number: u32,
 ) -> Result<TurnSnapshot> {
-    let detail = db.get_experiment_detail(experiment_id)?;
-    let message_ids: Vec<String> = detail
-        .messages
-        .iter()
-        .filter(|m| m.turn_number <= turn_number)
-        .map(|m| m.id.clone())
-        .collect();
-
-    let snap = TurnSnapshot {
-        id: Uuid::new_v4().to_string(),
-        experiment_id: experiment_id.to_string(),
-        turn_number,
-        message_ids,
-        board_content: detail.board_content,
-        compacted_summary: detail.compacted_summary,
-        compacted_until_seq: detail.compacted_until_seq,
-        total_tokens: detail.total_tokens,
-        next_speaker: detail.next_speaker,
-        created_at: Utc::now().to_rfc3339(),
-    };
+    let snap = db.get_snapshot_source(experiment_id, turn_number)?;
     db.save_turn_snapshot(&snap)?;
     Ok(snap)
 }
@@ -110,6 +90,17 @@ pub fn fork_experiment_at_turn(
         .as_ref()
         .map(|s| s.board_content.clone())
         .unwrap_or_else(|| source.board_content.clone());
+    let private_notes = target_snap
+        .as_ref()
+        .map(|s| s.private_notes.clone())
+        .unwrap_or_default();
+    let active_private_room = target_snap
+        .as_ref()
+        .and_then(|s| s.active_private_room.clone());
+    let room_members = target_snap
+        .as_ref()
+        .map(|s| s.room_members.clone())
+        .unwrap_or_else(|| source.room_members.clone());
     let compacted_summary = target_snap
         .as_ref()
         .map(|s| s.compacted_summary.clone())
@@ -165,6 +156,9 @@ pub fn fork_experiment_at_turn(
         total_tokens,
         &next_speaker,
         &board_content,
+        &private_notes,
+        &active_private_room,
+        &room_members,
         &compacted_summary,
         compacted_until_seq,
     )?;
@@ -213,6 +207,7 @@ fn compute_next_speaker_from_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use crate::models::{ExperimentConfig, TimelineMessage};
 
     #[test]
@@ -230,6 +225,7 @@ mod tests {
                 turn_number: i as u32,
                 role: SpeakerRole::Ai,
                 agent_id: Some(aid.to_string()),
+                room_id: "main".to_string(),
                 reasoning_content: "思考".to_string(),
                 content: format!("发言 {i}"),
                 model_name: "test".to_string(),
@@ -262,5 +258,52 @@ mod tests {
         assert_eq!(forked.total_tokens, 40);
         let snaps = db.get_turn_snapshots(&forked.id).unwrap();
         assert_eq!(snaps.len(), 2);
+    }
+
+    #[test]
+    fn test_fork_without_snapshot_isolates_private_notes_and_room() {
+        let db = Database::open_in_memory().unwrap();
+        let exp = db.create_experiment("无快照测试", &ExperimentConfig::default()).unwrap();
+
+        let msg1 = TimelineMessage {
+            id: "m1".to_string(),
+            experiment_id: exp.id.clone(),
+            seq: 1,
+            turn_number: 1,
+            role: SpeakerRole::Ai,
+            agent_id: Some("AiA".to_string()),
+            room_id: "main".to_string(),
+            reasoning_content: String::new(),
+            content: "第1轮".to_string(),
+            model_name: "test".to_string(),
+            duration_ms: 50,
+            prompt_tokens: 10,
+            completion_tokens: 10,
+            total_tokens: 20,
+            whisper_consumed: false,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        db.append_message(&msg1).unwrap();
+
+        // 模拟后续轮次写入了私密备忘（但第1轮没有快照）
+        let mut notes = HashMap::new();
+        notes.insert("AiA".to_string(), "未来轮次的秘密".to_string());
+        db.update_experiment_state_for_fork(
+            &exp.id,
+            2,
+            40,
+            "AiB",
+            "",
+            &notes,
+            &None,
+            &HashMap::new(),
+            "",
+            0,
+        )
+        .unwrap();
+
+        let forked = fork_experiment_at_turn(&db, &exp.id, 1, None).unwrap();
+        assert!(forked.private_notes.is_empty());
+        assert!(forked.active_private_room.is_none());
     }
 }

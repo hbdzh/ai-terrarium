@@ -1,5 +1,14 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { useMediaQuery } from "@vueuse/core";
+import {
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuPortal,
+  DropdownMenuRoot,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "reka-ui";
 import {
   ChevronDown,
   ChevronRight,
@@ -8,6 +17,8 @@ import {
   Pencil,
   Check,
   X,
+  Code2,
+  MoreHorizontal,
 } from "lucide-vue-next";
 import { renderMarkdown } from "../utils/markdown";
 
@@ -22,6 +33,7 @@ const props = defineProps<{
   turnNumber: number;
   agentLabel: string;
   modelName: string;
+  roomId?: string;
   durationMs?: number;
   reasoningContent: string;
   content: string;
@@ -36,11 +48,13 @@ const props = defineProps<{
 const emit = defineEmits<{
   fork: [turnNumber: number];
   editAndReplay: [payload: { messageId: string; turnNumber: number; content: string }];
+  inspectPrompt: [messageId: string];
 }>();
 
 const reasoningOpen = ref(false);
 const editing = ref(false);
 const draftContent = ref("");
+const isTouchOrNarrow = useMediaQuery("(hover: none), (max-width: 767px)");
 
 const hasReasoning = computed(() => props.reasoningContent.trim().length > 0);
 const isActivelyThinking = computed(
@@ -97,51 +111,117 @@ function submitEditReplay() {
         isStreaming ? 'shadow-[0_4px_18px_rgba(0,0,0,0.04)]' : '',
       ]"
     >
-      <!-- Desktop Hover Branch & Replay Actions -->
+      <!-- Desktop Hover Branch, Inspect & Replay Actions -->
       <div
-        v-if="canBranch && !isStreaming && !editing"
-        class="hidden md:flex opacity-0 group-hover:opacity-100 focus-within:opacity-100 absolute -top-3 right-3 items-center gap-1 px-1.5 py-0.5 rounded-full bg-white/95 backdrop-blur-md border border-black/[0.08] shadow-sm transition-opacity z-10"
+        v-if="!isTouchOrNarrow && !isStreaming && !editing && (canBranch || messageId)"
+        class="hidden md:flex opacity-0 group-hover:opacity-100 focus-within:opacity-100 absolute top-2 right-3 items-center gap-1 px-1.5 py-0.5 rounded-full bg-white/95 backdrop-blur-md border border-black/[0.08] shadow-sm transition-opacity z-10"
       >
         <button
+          v-if="messageId"
           type="button"
-          @click="emit('fork', turnNumber)"
-          class="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-medium text-slate-600 hover:text-[#007AFF] hover:bg-blue-50/80 transition"
-          title="从本轮分叉创建平行宇宙分支"
+          @click="emit('inspectPrompt', messageId)"
+          class="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-medium text-slate-600 hover:text-indigo-700 hover:bg-indigo-50/80 transition"
+          title="查看本轮发给模型的完整提示词"
         >
-          <GitBranch class="w-3 h-3" />
-          <span>从此轮分叉</span>
+          <Code2 class="w-3 h-3" />
+          <span>查看完整提示词</span>
         </button>
-        <div class="w-px h-3 bg-black/[0.08]"></div>
-        <button
-          type="button"
-          @click="startEdit"
-          class="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-medium text-slate-600 hover:text-amber-700 hover:bg-amber-50/80 transition"
-          title="改写此轮发言内容并开启新分支重演"
-        >
-          <Pencil class="w-3 h-3" />
-          <span>改写重演</span>
-        </button>
+        <template v-if="canBranch">
+          <div v-if="messageId" class="w-px h-3 bg-black/[0.08]"></div>
+          <button
+            type="button"
+            @click="emit('fork', turnNumber)"
+            class="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-medium text-slate-600 hover:text-[#007AFF] hover:bg-blue-50/80 transition"
+            title="从本轮分叉创建平行宇宙分支"
+          >
+            <GitBranch class="w-3 h-3" />
+            <span>从此轮分叉</span>
+          </button>
+          <div class="w-px h-3 bg-black/[0.08]"></div>
+          <button
+            type="button"
+            @click="startEdit"
+            class="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-medium text-slate-600 hover:text-amber-700 hover:bg-amber-50/80 transition"
+            title="改写此轮发言内容并开启新分支重演"
+          >
+            <Pencil class="w-3 h-3" />
+            <span>改写重演</span>
+          </button>
+        </template>
       </div>
 
       <!-- Header -->
-      <div class="flex items-center gap-2 text-[11px] text-slate-500 mb-2 select-none">
+      <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-500 mb-2 select-none min-w-0">
         <span class="w-2 h-2 rounded-full shrink-0" :class="palette.dot"></span>
-        <span class="font-semibold" :class="palette.label">
+        <span class="font-semibold truncate max-w-[140px] sm:max-w-[200px]" :class="palette.label">
           {{ agentLabel }}
         </span>
-        <span class="text-slate-300">·</span>
-        <span class="font-mono text-[10.5px] text-slate-400">{{ modelName }}</span>
-        <span class="text-slate-300">·</span>
+        <span
+          v-if="roomId && roomId !== 'main'"
+          class="px-1.5 py-0.2 rounded-md bg-violet-100/90 text-violet-700 text-[9.5px] font-medium shrink-0"
+          title="仅该私密房间成员互相可见"
+        >
+          里屋私聊
+        </span>
+        <span class="text-slate-300 shrink-0">·</span>
+        <span class="font-mono text-[10.5px] text-slate-400 truncate max-w-[140px] sm:max-w-[220px]">{{ modelName }}</span>
+        <span class="text-slate-300 shrink-0">·</span>
         <template v-if="isStreaming">
-          <span class="inline-flex items-center gap-1 text-[#007AFF] font-medium">
+          <span class="inline-flex items-center gap-1 text-[#007AFF] font-medium shrink-0">
             <span class="w-1.5 h-1.5 rounded-full bg-[#007AFF] animate-ping"></span>
             {{ isActivelyThinking ? "思考中" : "生成中" }}
           </span>
         </template>
         <template v-else-if="durationMs !== undefined">
-          <span class="tabular-nums">{{ (durationMs / 1000).toFixed(1) }}s</span>
+          <span class="tabular-nums shrink-0">{{ (durationMs / 1000).toFixed(1) }}s</span>
         </template>
-        <span class="ml-auto text-[10px] text-slate-400 tabular-nums">#{{ turnNumber }}</span>
+        <span class="ml-auto text-[10px] text-slate-400 tabular-nums shrink-0">#{{ turnNumber }}</span>
+
+        <!-- Touch / Narrow Screen Compact Action Menu -->
+        <DropdownMenuRoot v-if="isTouchOrNarrow && !isStreaming && !editing && (canBranch || messageId)">
+          <DropdownMenuTrigger as-child>
+            <button
+              type="button"
+              class="ml-0.5 p-1 -mr-1 rounded-full text-slate-400 hover:text-slate-700 hover:bg-black/[0.05] active:scale-95 transition shrink-0"
+              aria-label="更多操作"
+            >
+              <MoreHorizontal class="w-4 h-4" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuPortal>
+            <DropdownMenuContent
+              align="end"
+              :side-offset="4"
+              class="z-50 min-w-[164px] rounded-2xl bg-white/95 backdrop-blur-2xl border border-black/[0.08] shadow-[0_12px_36px_rgba(0,0,0,0.16)] p-1.5 text-xs text-slate-700 outline-none"
+            >
+              <DropdownMenuItem
+                v-if="messageId"
+                @select="emit('inspectPrompt', messageId)"
+                class="flex items-center gap-2 px-2.5 py-2 rounded-xl cursor-pointer outline-none hover:bg-indigo-50 hover:text-indigo-700 focus:bg-indigo-50 focus:text-indigo-700"
+              >
+                <Code2 class="w-3.5 h-3.5" />
+                <span>查看完整提示词</span>
+              </DropdownMenuItem>
+              <template v-if="canBranch">
+                <DropdownMenuSeparator v-if="messageId" class="my-1 h-px bg-black/[0.06]" />
+                <DropdownMenuItem
+                  @select="emit('fork', turnNumber)"
+                  class="flex items-center gap-2 px-2.5 py-2 rounded-xl cursor-pointer outline-none hover:bg-blue-50 hover:text-[#007AFF] focus:bg-blue-50 focus:text-[#007AFF]"
+                >
+                  <GitBranch class="w-3.5 h-3.5" />
+                  <span>从此轮分叉</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  @select="startEdit"
+                  class="flex items-center gap-2 px-2.5 py-2 rounded-xl cursor-pointer outline-none hover:bg-amber-50 hover:text-amber-700 focus:bg-amber-50 focus:text-amber-700"
+                >
+                  <Pencil class="w-3.5 h-3.5" />
+                  <span>改写重演</span>
+                </DropdownMenuItem>
+              </template>
+            </DropdownMenuContent>
+          </DropdownMenuPortal>
+        </DropdownMenuRoot>
       </div>
 
       <!-- Collapsible Reasoning / Inner Monologue Card -->
@@ -214,28 +294,6 @@ function submitEditReplay() {
         <span class="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce [animation-delay:240ms]"></span>
       </div>
 
-      <!-- Mobile Touch-friendly Branch & Edit Footer -->
-      <div
-        v-if="canBranch && !isStreaming && !editing"
-        class="flex md:hidden items-center justify-end gap-2 mt-2.5 pt-2 border-t border-black/[0.05]"
-      >
-        <button
-          type="button"
-          @click="emit('fork', turnNumber)"
-          class="flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium text-slate-600 bg-white/80 border border-black/[0.06] active:scale-95 transition"
-        >
-          <GitBranch class="w-3 h-3" />
-          <span>从此轮分叉</span>
-        </button>
-        <button
-          type="button"
-          @click="startEdit"
-          class="flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium text-slate-600 bg-white/80 border border-black/[0.06] active:scale-95 transition"
-        >
-          <Pencil class="w-3 h-3" />
-          <span>改写重演</span>
-        </button>
-      </div>
     </div>
   </div>
 </template>

@@ -25,8 +25,8 @@ const emit = defineEmits<{
     <div
       class="max-w-3xl mx-auto rounded-2xl bg-[#1D1D1F]/95 backdrop-blur-xl text-white border border-white/10 shadow-[0_14px_40px_rgba(0,0,0,0.25)] px-3.5 sm:px-4 py-3 space-y-2.5"
     >
-      <div class="flex items-center justify-between gap-3">
-        <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex items-center gap-2 min-w-0">
           <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#007AFF]/25 text-blue-300 text-[11px] font-medium">
             <Film class="w-3 h-3" />
             剧场回放模式
