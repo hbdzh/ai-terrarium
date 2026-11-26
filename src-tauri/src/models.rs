@@ -46,12 +46,24 @@ pub fn normalize_thinking_level(raw: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiProfile {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeConfig {
     #[serde(default)]
     pub id: String,
     pub label: String,
+    #[serde(default)]
+    pub api_profile_id: Option<String>,
     pub base_url: String,
     pub api_key: String,
     pub model_name: String,
@@ -158,8 +170,8 @@ pub fn builtin_presets() -> Vec<PresetTemplate> {
     let mut presets = vec![
         PresetTemplate {
             id: "free".to_string(),
-            name: "自由漫谈（零预设）".to_string(),
-            description: "零提示词、无目标、无开场引子，在开启自然社交开关的零约束空间中自由对话".to_string(),
+            name: "自由漫谈".to_string(),
+            description: "无预设角色与剧情限制，适合自由对话测试".to_string(),
             global_system_prompt: String::new(),
             initial_topic: String::new(),
             tags: vec![],
@@ -751,7 +763,7 @@ impl ExperimentConfig {
                 trimmed.to_string()
             };
             if !seen.insert(effective.clone()) {
-                return Err(format!("角色名称「{}」存在重复，请修改名称以区分不同智能体", effective));
+                return Err(format!("角色名称「{}」存在重复，请修改后再保存", effective));
             }
         }
         Ok(())
@@ -792,9 +804,10 @@ impl Default for ExperimentConfig {
                 NodeConfig {
                     id: "AiA".to_string(),
                     label: preset.node_a_label,
-                    base_url: "https://api.deepseek.com/v1".to_string(),
+                    api_profile_id: None,
+                    base_url: "https://api.deepseek.com".to_string(),
                     api_key: String::new(),
-                    model_name: "deepseek-chat".to_string(),
+                    model_name: "deepseek-flash".to_string(),
                     temperature: 0.9,
                     thinking_level: default_thinking_level(),
                     system_prompt: preset.node_a_prompt,
@@ -802,9 +815,10 @@ impl Default for ExperimentConfig {
                 NodeConfig {
                     id: "AiB".to_string(),
                     label: preset.node_b_label,
-                    base_url: "https://api.deepseek.com/v1".to_string(),
+                    api_profile_id: None,
+                    base_url: "https://api.deepseek.com".to_string(),
                     api_key: String::new(),
-                    model_name: "deepseek-chat".to_string(),
+                    model_name: "deepseek-flash".to_string(),
                     temperature: 0.9,
                     thinking_level: default_thinking_level(),
                     system_prompt: preset.node_b_prompt,
@@ -814,13 +828,14 @@ impl Default for ExperimentConfig {
             node_b: None,
             node_c: NodeConfig {
                 id: "observer".to_string(),
-                label: "观察员 C".to_string(),
-                base_url: "https://api.deepseek.com/v1".to_string(),
+                label: "局势分析".to_string(),
+                api_profile_id: None,
+                base_url: "https://api.deepseek.com".to_string(),
                 api_key: String::new(),
-                model_name: "deepseek-chat".to_string(),
+                model_name: "deepseek-flash".to_string(),
                 temperature: 0.3,
                 thinking_level: default_thinking_level(),
-                system_prompt: "你是一个冷静、犀利的第三人称对话观察员，负责对多智能体对话进行阶段性诊断与深度评估。".to_string(),
+                system_prompt: "你负责从第三人称视角分析多角色对话的局势走向与关系变化。".to_string(),
             },
         }
     }
@@ -1047,7 +1062,7 @@ pub fn builtin_character_cards() -> Vec<CharacterCard> {
             base_prompt: (*base_prompt).to_string(),
             behavior_traits: (*traits).to_string(),
             memory_imprints: Vec::new(),
-            source_experiment_title: "内置灵魂角色库".to_string(),
+            source_experiment_title: "内置角色库".to_string(),
             is_builtin: true,
             created_at: created_at.clone(),
         })
@@ -1385,7 +1400,7 @@ mod tests {
         let presets = builtin_presets();
         assert_eq!(presets.len(), 12);
         let names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
-        assert!(names.contains(&"自由漫谈（零预设）"));
+        assert!(names.contains(&"自由漫谈"));
         assert!(names.contains(&"深夜老友瞎侃局"));
         assert!(names.contains(&"两个 AI 的深夜机房摸鱼夜"));
         assert!(names.contains(&"深夜便利店·暴雨夜班"));

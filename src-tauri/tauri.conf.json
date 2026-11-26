@@ -15,6 +15,10 @@
         "title": "AI 生态观察箱 · AI Terrarium",
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 14,
+          "y": 24.5
+        },
         "width": 1400,
         "height": 880,
         "minWidth": 1100,

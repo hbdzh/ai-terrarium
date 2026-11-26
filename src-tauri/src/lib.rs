@@ -431,6 +431,22 @@ fn save_ui_prefs(state: State<'_, AppState>, prefs: UiPrefs) -> Result<(), Strin
 }
 
 #[tauri::command]
+fn get_api_profiles(state: State<'_, AppState>) -> Result<Vec<crate::models::ApiProfile>, String> {
+    state.db.get_api_profiles().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_api_profiles(
+    state: State<'_, AppState>,
+    profiles: Vec<crate::models::ApiProfile>,
+) -> Result<Vec<crate::models::ApiProfile>, String> {
+    state
+        .db
+        .save_api_profiles(&profiles)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn fork_experiment(
     state: State<'_, AppState>,
     source_exp_id: String,
@@ -482,8 +498,8 @@ async fn update_shared_board(
             experiment_id,
             board_content: saved.clone(),
             board_prev_content: prev.clone(),
-            reason: "造物主手动编辑".to_string(),
-            actor_label: "造物主".to_string(),
+            reason: "主持人手动编辑".to_string(),
+            actor_label: "主持人".to_string(),
         })
         .await;
     Ok((prev, saved))
@@ -584,33 +600,49 @@ async fn import_scenario_package(
     if !pkg.initial_board.trim().is_empty() && pkg.config.initial_board.trim().is_empty() {
         pkg.config.initial_board = pkg.initial_board;
     }
-    // 若导入剧本中未附带 API Key，自动复用当前激活实验的同顺序节点或首节点 Key 方便直接开局
+    // 若导入剧本中未附带 API Key，优先使用全局 API 配置池，其次复用当前激活实验
+    let global_profiles = state.db.get_api_profiles().unwrap_or_default();
+    let default_profile = global_profiles.first();
     let active_id = state.engine.active_experiment_id.read().await.clone();
-    if let Ok(active) = state.db.get_experiment_detail(&active_id) {
-        let fallback_key = active
-            .config
-            .agents
-            .first()
-            .map(|a| a.api_key.clone())
-            .unwrap_or_default();
-        for (idx, a) in pkg.config.agents.iter_mut().enumerate() {
-            if a.api_key.trim().is_empty() {
-                a.api_key = active
-                    .config
-                    .agents
-                    .get(idx)
-                    .map(|x| x.api_key.clone())
-                    .filter(|k| !k.trim().is_empty())
-                    .unwrap_or_else(|| fallback_key.clone());
+    let active_detail = state.db.get_experiment_detail(&active_id).ok();
+    let fallback_key = default_profile
+        .map(|p| p.api_key.clone())
+        .filter(|k| !k.trim().is_empty())
+        .or_else(|| {
+            active_detail
+                .as_ref()
+                .and_then(|active| active.config.agents.first().map(|a| a.api_key.clone()))
+        })
+        .unwrap_or_default();
+    for (idx, a) in pkg.config.agents.iter_mut().enumerate() {
+        if let Some(pid) = a.api_profile_id.as_deref() {
+            if let Some(prof) = global_profiles.iter().find(|p| p.id == pid) {
+                a.base_url = prof.base_url.clone();
+                a.api_key = prof.api_key.clone();
+                a.model_name = prof.model_name.clone();
             }
         }
-        if pkg.config.node_c.api_key.trim().is_empty() {
-            pkg.config.node_c.api_key = if !active.config.node_c.api_key.trim().is_empty() {
-                active.config.node_c.api_key
-            } else {
-                fallback_key
-            };
+        if a.api_key.trim().is_empty() {
+            a.api_key = active_detail
+                .as_ref()
+                .and_then(|active| active.config.agents.get(idx).map(|x| x.api_key.clone()))
+                .filter(|k| !k.trim().is_empty())
+                .unwrap_or_else(|| fallback_key.clone());
         }
+    }
+    if let Some(pid) = pkg.config.node_c.api_profile_id.as_deref() {
+        if let Some(prof) = global_profiles.iter().find(|p| p.id == pid) {
+            pkg.config.node_c.base_url = prof.base_url.clone();
+            pkg.config.node_c.api_key = prof.api_key.clone();
+            pkg.config.node_c.model_name = prof.model_name.clone();
+        }
+    }
+    if pkg.config.node_c.api_key.trim().is_empty() {
+        pkg.config.node_c.api_key = active_detail
+            .as_ref()
+            .map(|active| active.config.node_c.api_key.clone())
+            .filter(|k| !k.trim().is_empty())
+            .unwrap_or(fallback_key);
     }
     let title = if pkg.title.trim().is_empty() {
         "导入剧本实验".to_string()
@@ -713,7 +745,7 @@ fn save_agent_to_character_library(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .or_else(|| agent.map(|a| a.label.clone()))
-        .ok_or_else(|| "未找到指定智能体".to_string())?;
+        .ok_or_else(|| "未找到指定角色".to_string())?;
     let base_prompt = prompt_override
         .or_else(|| agent.map(|a| a.system_prompt.clone()))
         .unwrap_or_default();
@@ -881,6 +913,17 @@ fn delete_character_card(
 }
 
 #[tauri::command]
+async fn fetch_provider_models(
+    state: State<'_, AppState>,
+    base_url: String,
+    api_key: String,
+) -> Result<Vec<crate::llm::RemoteModelInfo>, String> {
+    crate::llm::fetch_provider_models(&state.engine.client, &base_url, &api_key)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn show_main_window(window: tauri::Window) {
     if !window.is_visible().unwrap_or(false) {
         let _ = window.show();
@@ -984,6 +1027,8 @@ pub fn run() {
             compute_line_diff,
             get_ui_prefs,
             save_ui_prefs,
+            get_api_profiles,
+            save_api_profiles,
             fork_experiment,
             get_experiment_snapshots,
             update_shared_board,
@@ -1002,6 +1047,7 @@ pub fn run() {
             distill_memory_imprints_to_library,
             update_character_card_imprints,
             delete_character_card,
+            fetch_provider_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

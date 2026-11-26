@@ -16,39 +16,39 @@ export interface MechanicDescriptor {
 export const MECHANIC_DESCRIPTIONS: Record<MechanicKey, MechanicDescriptor> = {
   intuitiveFastReply: {
     key: "intuitiveFastReply",
-    title: "直觉快反应",
-    onEffect: "抑制长篇内心独白，强制第一反应大白话短句秒回（适合日常闲聊、快节奏互怼）",
-    offEffect: "允许模型在 <think> 中充分推演逻辑与潜台词（适合硬核物理/哲学研讨、悬疑推理）",
+    title: "快反应回复",
+    onEffect: "跳过冗长内心戏，用简短口语快速接话",
+    offEffect: "允许模型充分思考逻辑与潜台词后回复",
   },
   allowPassTurn: {
     key: "allowPassTurn",
-    title: "允许[PASS]跳过",
-    onEffect: "无话可说或插不上嘴时允许输出 [PASS] 跳过本轮，避免尬聊凑字数（推荐 3 人以上群聊开启）",
-    offEffect: "强制每轮轮到的角色必须开口发言（适合双人紧密对戏）",
+    title: "允许跳过发言",
+    onEffect: "无话可说时可跳过本轮，避免强行凑字数",
+    offEffect: "每轮轮到的角色都必须发言",
   },
   randomMoodDice: {
     key: "randomMoodDice",
-    title: "随机微情绪",
-    onEffect: "后台每数轮随机注入走神、犯困、想换话题等生活扰动，对话更像活人冲浪（易跑题，仅建议闲聊局开启）",
-    offEffect: "严格保持角色专注度与话题连贯性（推荐深度研讨、剧本推理关闭）",
+    title: "随机情绪扰动",
+    onEffect: "随机注入走神、换话题等状态，对话更随意",
+    offEffect: "保持角色专注度与主线连贯性",
   },
   enablePrivateNotes: {
     key: "enablePrivateNotes",
     title: "角色私密备忘",
-    onEffect: "允许 AI 维护仅自己可见的隐藏心计与怀疑笔记（易激发猜忌与暗中博弈，适合悬疑/宫斗/卧底局；学术局请关闭）",
-    offEffect: "所有角色坦诚公开思考，不搞暗中猜忌与狼人杀式盘问",
+    onEffect: "允许角色记录仅自己可见的判断与计划",
+    offEffect: "不记录私密备忘，全员公开对话",
   },
   enableBoardTools: {
     key: "enableBoardTools",
     title: "共享白板",
-    onEffect: "提供全员可见的公共黑板，引导 AI 实时记录共识、线索与核心分歧（强力锚定主线防跑题，适合研讨与推理）",
-    offEffect: "纯靠口头对话推进，不维护公共笔记（适合轻松日常闲聊）",
+    onEffect: "提供公共白板记录共识、线索与分歧",
+    offEffect: "纯对话推进，不维护公共记录",
   },
   enableSmartSelector: {
     key: "enableSmartSelector",
     title: "智能点名",
-    onEffect: "根据上文被点名或话题相关性动态决定下一位发言者，插话更自然",
-    offEffect: "严格按固定顺序轮流发言",
+    onEffect: "根据上下文相关性动态决定下一位发言者",
+    offEffect: "按固定顺序轮流发言",
   },
 };
 
@@ -59,41 +59,41 @@ export function summarizeActiveMechanics(state: Record<MechanicKey, boolean>): {
   if (state.randomMoodDice && state.enablePrivateNotes) {
     return {
       isCaution: true,
-      text: "提示：已同时开启「随机微情绪」与「角色私密备忘」，对话易跑题且容易衍生暗中猜忌；若用于严肃学术或推理局，建议关闭上述两项。",
+      text: "同时开启了「随机情绪扰动」与「角色私密备忘」，对话易发散且偏博弈；严肃讨论建议关闭。",
     };
   }
   if (state.randomMoodDice) {
     return {
       isCaution: true,
-      text: "提示：已开启「随机微情绪」，角色会随机走神或换话题（仅建议日常闲聊开启；深度研讨或剧本推理请关闭）。",
+      text: "已开启「随机情绪扰动」，角色会偶发走神或换话题；深度讨论或推理建议关闭。",
     };
   }
   if (state.enablePrivateNotes) {
     return {
       isCaution: true,
-      text: "提示：已开启「角色私密备忘」，角色会维护私下怀疑笔记并激发猜忌博弈（适合悬疑/卧底局；学术讨论请关闭）。",
+      text: "已开启「角色私密备忘」，角色会维护个人隐藏笔记，适合推理或阵营局。",
     };
   }
   if (state.intuitiveFastReply && state.enableBoardTools) {
     return {
       isCaution: false,
-      text: "当前已开启「共享白板」与「直觉快反应」：兼顾主线共识沉淀与口语短句互动（如需深入 <think> 推演可关闭直觉快反应）。",
+      text: "已开启「共享白板」与「快反应回复」，兼顾共识记录与短句节奏。",
     };
   }
   if (state.intuitiveFastReply) {
     return {
       isCaution: false,
-      text: "当前偏向轻松口语快反应节奏，适合日常闲聊或快节奏互怼；硬核物理/哲学推演建议关闭「直觉快反应」。",
+      text: "当前偏向轻松口语短句；需要深度推演时可关闭「快反应回复」。",
     };
   }
   if (state.enableBoardTools) {
     return {
       isCaution: false,
-      text: "当前偏向深度理性协作与推理模式（共享白板锚定主线、关闭情绪扰动与暗中备忘）；悬停上方开关可查看开/关对照。",
+      text: "当前偏向理性协作与推理，共享白板将持续记录关键信息。",
     };
   }
   return {
     isCaution: false,
-    text: "当前偏向纯粹严谨对话流（专注主题推演、不设白板与私密猜忌）；悬停上方任意开关可查看开/关对照。",
+    text: "当前为纯粹对话模式，悬停开关可查看各项规则说明。",
   };
 }

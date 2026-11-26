@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import {
-  Telescope,
   Sparkles,
   Zap,
   RefreshCw,
@@ -198,20 +197,16 @@ defineExpose({ openReportModal });
   <aside
     class="h-full flex flex-col bg-white overflow-y-auto md:overflow-hidden antialiased"
   >
-    <!-- Top Eco-Dashboard (clean hairline-separated surface, minimal borders) -->
-    <div class="p-3.5 md:p-4 border-b border-black/[0.05] bg-white space-y-3 shrink-0">
+    <!-- Top Eco-Dashboard -->
+    <div class="px-4 pt-3 pb-3.5 bg-white space-y-3.5 shrink-0 border-b border-[#ECECF0]">
       <!-- Top Header -->
       <div class="flex items-center justify-between gap-2">
-        <div class="flex items-center gap-2.5 min-w-0">
-          <div class="w-7 h-7 rounded-lg bg-[#1D1D1F] text-white flex items-center justify-center shrink-0">
-            <Telescope class="w-3.5 h-3.5" />
-          </div>
-          <div class="min-w-0">
-            <h3 class="text-[13.5px] font-semibold text-[#1D1D1F] truncate leading-snug">观察员视角</h3>
-            <p class="text-[11.5px] text-slate-400 truncate leading-snug">
-              每 {{ observerInterval }} 轮异步多维诊断
-            </p>
-          </div>
+        <div class="min-w-0">
+          <h3 class="text-[14.5px] font-semibold text-[#25262A] truncate leading-snug">局势概览</h3>
+          <p class="flex items-center gap-1.5 text-[11.5px] text-[#858A95] truncate leading-snug mt-0.5">
+            <span class="w-1.5 h-1.5 rounded-full bg-[#25A477] shrink-0"></span>
+            <span>每 {{ observerInterval }} 轮自动分析</span>
+          </p>
         </div>
 
         <div class="flex items-center gap-1.5 shrink-0">
@@ -219,56 +214,75 @@ defineExpose({ openReportModal });
             type="button"
             @click="openReportModal"
             :disabled="totalTurns === 0"
-            class="h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-[12px] font-medium text-slate-600 hover:text-[#1D1D1F] hover:bg-black/[0.05] transition-colors disabled:opacity-40"
-            title="生成或查看实验结案复盘简报"
+            class="w-8 h-8 flex items-center justify-center rounded-[8px] text-[#666B76] hover:text-[#25262A] hover:bg-[#EFEFF2] transition-colors disabled:opacity-40"
+            title="生成或查看复盘报告"
           >
-            <FileText class="w-3.5 h-3.5" />
-            <span>复盘简报</span>
+            <FileText class="w-4 h-4" />
           </button>
 
           <button
             type="button"
             @click="emit('triggerNow')"
             :disabled="observerRunning || totalTurns === 0 || !hasObserverKey"
-            class="h-8 flex items-center gap-1.5 px-3 rounded-full text-[12px] font-medium bg-[#1D1D1F] hover:bg-black text-white transition-colors disabled:opacity-40"
-            title="立即对当前对话执行一次观察分析"
+            class="h-8 flex items-center gap-1.5 px-3 rounded-[9px] text-[12px] font-medium border border-[#E5E5EA] bg-white hover:bg-[#F5F5F7] text-[#25262A] transition-colors disabled:opacity-40"
+            title="立即分析当前对话"
           >
             <RefreshCw
-              class="w-3 h-3"
+              class="w-3.5 h-3.5 text-[#666B76]"
               :class="{ 'animate-spin': observerRunning }"
             />
-            <span>{{ observerRunning ? "分析中" : "观察" }}</span>
+            <span>{{ observerRunning ? "分析中" : "分析" }}</span>
           </button>
         </div>
       </div>
 
-      <!-- 3-Metric Summary Tiles (borderless subtle tint pills) -->
-      <div v-if="latestNote" class="grid grid-cols-3 gap-2">
-        <div class="rounded-xl bg-black/[0.035] px-3 py-2 flex items-center justify-between">
-          <span class="text-[11.5px] text-slate-500">火药味</span>
-          <span class="text-[13.5px] font-semibold tabular-nums text-rose-600">{{ latestNote.tensionScore ?? 0 }}</span>
+      <!-- 3-Metric Summary Columns with thin progress bars (matching Screenshot 7) -->
+      <div v-if="latestNote" class="grid grid-cols-3 gap-3 pt-1">
+        <div class="space-y-1.5">
+          <div class="text-[11.5px] text-[#858A95]">冲突度</div>
+          <div class="flex items-baseline gap-0.5">
+            <span class="text-[22px] font-semibold tabular-nums leading-none text-[#D15B5B]">{{ latestNote.tensionScore ?? 0 }}</span>
+            <span class="text-[11px] text-[#969BA5]">/100</span>
+          </div>
+          <div class="h-1 rounded-full bg-[#EFEFF2] overflow-hidden">
+            <div class="h-full rounded-full bg-[#D15B5B] transition-all duration-300" :style="{ width: `${Math.min(100, Math.max(0, latestNote.tensionScore ?? 0))}%` }"></div>
+          </div>
         </div>
-        <div class="rounded-xl bg-black/[0.035] px-3 py-2 flex items-center justify-between">
-          <span class="text-[11.5px] text-slate-500">抽象度</span>
-          <span class="text-[13.5px] font-semibold tabular-nums text-[#007AFF]">{{ latestNote.abstractionScore ?? 0 }}</span>
+
+        <div class="space-y-1.5 pl-2 border-l border-[#ECECF0]">
+          <div class="text-[11.5px] text-[#858A95]">抽象度</div>
+          <div class="flex items-baseline gap-0.5">
+            <span class="text-[22px] font-semibold tabular-nums leading-none text-[#7965CC]">{{ latestNote.abstractionScore ?? 0 }}</span>
+            <span class="text-[11px] text-[#969BA5]">/100</span>
+          </div>
+          <div class="h-1 rounded-full bg-[#EFEFF2] overflow-hidden">
+            <div class="h-full rounded-full bg-[#7965CC] transition-all duration-300" :style="{ width: `${Math.min(100, Math.max(0, latestNote.abstractionScore ?? 0))}%` }"></div>
+          </div>
         </div>
-        <div class="rounded-xl bg-black/[0.035] px-3 py-2 flex items-center justify-between">
-          <span class="text-[11.5px] text-slate-500">僵化度</span>
-          <span class="text-[13.5px] font-semibold tabular-nums" :class="stagnationTextColor">{{ latestNote.stagnationIndex ?? 0 }}</span>
+
+        <div class="space-y-1.5 pl-2 border-l border-[#ECECF0]">
+          <div class="text-[11.5px] text-[#858A95]">僵化度</div>
+          <div class="flex items-baseline gap-0.5">
+            <span class="text-[22px] font-semibold tabular-nums leading-none text-[#25A477]">{{ latestNote.stagnationIndex ?? 0 }}</span>
+            <span class="text-[11px] text-[#969BA5]">/100</span>
+          </div>
+          <div class="h-1 rounded-full bg-[#EFEFF2] overflow-hidden">
+            <div class="h-full rounded-full bg-[#25A477] transition-all duration-300" :style="{ width: `${Math.min(100, Math.max(0, latestNote.stagnationIndex ?? 0))}%` }"></div>
+          </div>
         </div>
       </div>
 
       <!-- Collapsible Multi-Dimensional Evolution Curves (SVG) -->
-      <div class="rounded-xl bg-white/80 border border-black/[0.045] px-3 py-2">
+      <div class="rounded-xl bg-black/[0.03] px-3 py-2">
         <div class="flex items-center justify-between gap-2">
           <button
             type="button"
             @click="chartExpanded = !chartExpanded"
             class="w-full flex items-center justify-between gap-2 text-[12px] font-medium text-slate-600 hover:text-[#1D1D1F] transition-colors"
           >
-            <span>认知演化曲线</span>
+            <span>趋势曲线</span>
             <span class="text-[11.5px] font-medium text-[#007AFF]">
-              {{ chartExpanded ? "收起" : latestNote ? "展开轨迹" : "暂无轨迹" }}
+              {{ chartExpanded ? "收起" : latestNote ? "展开" : "暂无数据" }}
             </span>
           </button>
         </div>
@@ -282,7 +296,7 @@ defineExpose({ openReportModal });
               :class="showTension ? 'bg-rose-50 text-rose-700 border-rose-200' : 'text-slate-400 border-transparent opacity-50'"
             >
               <span class="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
-              火药味
+              冲突度
             </button>
             <button
               type="button"
@@ -305,7 +319,7 @@ defineExpose({ openReportModal });
           </div>
 
           <div v-if="chartPoints.length === 0" class="py-3 text-center text-[11px] text-slate-400">
-            暂无评分轨迹，等待首次观察触发
+            暂无评分记录，等待触发分析
           </div>
 
           <div v-else class="relative">
@@ -409,17 +423,17 @@ defineExpose({ openReportModal });
               v-if="hoveredTurn"
               class="mt-1 px-2 py-1 rounded-lg bg-white border border-black/[0.06] text-[10.5px] text-slate-600 flex items-center justify-between"
             >
-              <span class="font-semibold text-[#1D1D1F]">第 {{ hoveredTurn.triggerTurn }} 轮 (点击定位)</span>
+              <span class="font-semibold text-[#1D1D1F]">第 {{ hoveredTurn.triggerTurn }} 轮（跳转）</span>
               <span class="tabular-nums">
-                火 {{ hoveredTurn.tensionScore }} · 抽 {{ hoveredTurn.abstractionScore }} · 僵 {{ hoveredTurn.stagnationIndex }}
+                冲突 {{ hoveredTurn.tensionScore }} · 抽象 {{ hoveredTurn.abstractionScore }} · 僵化 {{ hoveredTurn.stagnationIndex }}
               </span>
             </div>
           </div>
         </template>
       </div>
 
-      <!-- Collapsible Relationship Tension Network (暗涌关系网) -->
-      <div class="rounded-xl bg-white/80 border border-black/[0.045] px-3 py-2">
+      <!-- Collapsible Relationship Network -->
+      <div class="rounded-xl bg-black/[0.03] px-3 py-2">
         <button
           type="button"
           @click="networkExpanded = !networkExpanded"
@@ -427,16 +441,16 @@ defineExpose({ openReportModal });
         >
           <span class="flex items-center gap-1.5">
             <Network class="w-3.5 h-3.5 text-slate-500" />
-            <span>暗涌关系网</span>
+            <span>角色关系</span>
           </span>
           <span class="text-[11.5px] font-medium text-[#007AFF]">
             {{
               blindGuessMode
-                ? "盲猜遮蔽中"
+                ? "已隐藏"
                 : networkExpanded
                   ? "收起"
                   : latestNote?.relationshipMatrix?.length
-                    ? `${latestNote.relationshipMatrix.length} 条暗流`
+                    ? `${latestNote.relationshipMatrix.length} 条关系`
                     : "暂无数据"
             }}
           </span>
@@ -448,13 +462,13 @@ defineExpose({ openReportModal });
             class="mt-2 py-2.5 px-3 rounded-lg bg-[#F5F5F7] text-[11px] text-slate-500 flex items-center gap-1.5"
           >
             <EyeOff class="w-3.5 h-3.5 text-slate-400 shrink-0" />
-            <span>盲猜模式已开启，人物信任温度与心理定性已遮蔽</span>
+            <span>盲猜模式已隐藏人物信任度与态度</span>
           </div>
           <div
             v-else-if="!latestNote?.relationshipMatrix || latestNote.relationshipMatrix.length === 0"
             class="py-2.5 text-center text-[11px] text-slate-400"
           >
-            等待观察员诊断后自动生成角色实时信任温度
+            等待分析后生成角色关系
           </div>
           <div v-else class="mt-2 space-y-2">
             <div
@@ -533,7 +547,7 @@ defineExpose({ openReportModal });
               <span
                 v-if="latestNote?.narrativeAct"
                 class="px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 font-semibold shrink-0 leading-normal antialiased"
-                title="三幕式导演节拍器当前幕次"
+                title="三幕式当前幕次"
               >
                 {{ latestNote.narrativeAct }}
               </span>
@@ -547,7 +561,7 @@ defineExpose({ openReportModal });
                 class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-rose-50 text-rose-600 text-[10px] font-medium"
               >
                 <Zap class="w-2.5 h-2.5" />
-                破局扰动
+                话题破局
               </span>
               <span class="font-semibold tabular-nums" :class="stagnationTextColor">
                 僵化 {{ latestNote?.stagnationIndex ?? 0 }}/100
@@ -565,37 +579,41 @@ defineExpose({ openReportModal });
       </div>
     </div>
 
-    <!-- Bottom Observer Notes Timeline (reverse chronological) -->
-    <div class="md:flex-1 md:overflow-y-auto p-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] md:pb-5 space-y-3 antialiased">
+    <!-- Bottom Observer Notes Timeline (reverse chronological, soft top fade on scroll) -->
+    <div class="relative md:flex-1 md:min-h-0 flex flex-col">
+      <div
+        class="pointer-events-none hidden md:block absolute inset-x-0 top-0 h-5 z-10 bg-gradient-to-b from-white via-white/80 to-transparent"
+      ></div>
+      <div class="md:flex-1 md:overflow-y-auto px-3.5 md:px-4 pt-3 pb-[calc(1.25rem+env(safe-area-inset-bottom))] md:pb-5 space-y-3 antialiased">
       <div class="flex items-center justify-between px-0.5">
         <span class="text-[12.5px] md:text-[12px] font-semibold text-slate-500 leading-relaxed">
-          观察手记时间轴 ({{ notes.length }})
+          分析笔记 ({{ notes.length }})
         </span>
-        <span class="text-[11px] text-slate-400 leading-relaxed">点击轮次定位原文</span>
+        <span class="text-[11px] text-slate-400 leading-relaxed">点击轮次跳转</span>
       </div>
 
       <div
         v-if="notes.length === 0"
-        class="rounded-2xl border border-dashed border-slate-200 bg-white/60 p-6 text-center text-[13px] md:text-xs text-slate-400 leading-relaxed"
+        class="rounded-2xl border border-black/[0.03] bg-black/[0.025] p-6 text-center text-[13px] md:text-xs text-slate-400 leading-relaxed"
       >
         <Sparkles class="w-5 h-5 mx-auto mb-2 text-slate-300" />
         <span v-if="!hasObserverKey">
-          请先在「模型与设置」中配置观察员 C 的 API Key。
+          请先在「设置 → 局势分析」中配置 API Key。
         </span>
         <span v-else>
-          对话推进满 {{ observerInterval }} 轮后，观察员将在此留下多维评分、犀利手记与转折事件卡。
+          对话推进满 {{ observerInterval }} 轮后将自动生成评分与分析笔记。
         </span>
       </div>
 
-      <div v-else class="relative pl-4 border-l-2 border-slate-200/80 space-y-3 ml-1.5">
+      <div v-else class="relative pl-4 border-l border-black/[0.06] space-y-2.5 ml-1.5">
         <div
           v-for="(item, idx) in notes"
           :key="item.id"
-          class="relative w-full text-left rounded-2xl bg-white p-4 border border-black/[0.06] shadow-[0_1px_3px_rgba(0,0,0,0.03)] hover:border-[#007AFF]/40 transition-colors antialiased"
+          class="relative w-full text-left rounded-2xl bg-[#F7F7F9]/85 p-3.5 border border-transparent hover:border-[#007AFF]/35 transition-colors antialiased"
         >
           <!-- Timeline dot -->
           <span
-            class="absolute -left-[22px] top-4 w-2.5 h-2.5 rounded-full ring-4 ring-white"
+            class="absolute -left-[21.5px] top-4 w-2.5 h-2.5 rounded-full ring-4 ring-white"
             :class="idx === 0 ? 'bg-[#007AFF]' : 'bg-slate-300'"
           ></span>
 
@@ -605,7 +623,7 @@ defineExpose({ openReportModal });
                 type="button"
                 @click="emit('jumpToTurn', item.triggerTurn)"
                 class="px-2.5 py-1 rounded-full text-[11.5px] leading-none font-semibold bg-[#F2F2F7] text-[#1D1D1F] hover:bg-[#007AFF]/15 hover:text-[#0062CC] transition-colors tabular-nums shrink-0 cursor-pointer"
-                title="点击定位到该轮对话"
+                title="跳转到该轮对话"
               >
                 第 {{ item.triggerTurn }} 轮 ↗
               </button>
@@ -620,7 +638,7 @@ defineExpose({ openReportModal });
               </span>
             </div>
             <span class="text-[11px] text-slate-400 tabular-nums shrink-0">
-              火{{ item.tensionScore ?? 0 }} · 抽{{ item.abstractionScore ?? 0 }} · 僵{{ item.stagnationIndex }}
+              冲突{{ item.tensionScore ?? 0 }} · 抽象{{ item.abstractionScore ?? 0 }} · 僵化{{ item.stagnationIndex }}
             </span>
           </div>
 
@@ -632,7 +650,7 @@ defineExpose({ openReportModal });
             <span
               v-for="t in item.tags"
               :key="t"
-              class="px-2.5 py-0.5 rounded-full bg-[#F5F5F7] text-slate-600 text-[11.5px] border border-black/[0.04] antialiased"
+              class="px-2.5 py-0.5 rounded-full bg-black/[0.045] text-slate-600 text-[11.5px] antialiased"
             >
               # {{ t }}
             </span>
@@ -640,17 +658,18 @@ defineExpose({ openReportModal });
               v-if="item.perturbationInjected"
               class="ml-auto text-[11px] font-medium text-rose-600"
             >
-              ⚡ 自动扰动
+              ⚡ 已注入破局
             </span>
           </div>
         </div>
+      </div>
       </div>
     </div>
 
     <!-- Final Report Modal -->
     <AdaptiveModal
       :open="reportModalOpen"
-      title="实验结案复盘简报"
+      title="推演复盘报告"
       max-width-class="max-w-2xl"
       mobile-presentation="fullscreen"
       @close="reportModalOpen = false"
@@ -659,7 +678,7 @@ defineExpose({ openReportModal });
         <div class="px-5 sm:px-6 py-3.5 sm:py-4 border-b border-black/[0.06] flex flex-wrap items-center justify-between gap-2 shrink-0">
           <div class="flex items-center gap-2">
             <FileText class="w-4 h-4 text-[#007AFF]" />
-            <h2 class="text-sm font-semibold text-[#1D1D1F]">实验结案复盘简报</h2>
+            <h2 class="text-sm font-semibold text-[#1D1D1F]">推演复盘报告</h2>
           </div>
           <div class="flex flex-wrap items-center gap-1.5">
             <button
@@ -667,11 +686,11 @@ defineExpose({ openReportModal });
               @click="emit('distillImprints')"
               :disabled="distillingImprints || totalTurns === 0"
               class="flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium bg-indigo-50 hover:bg-indigo-100/80 text-indigo-700 transition disabled:opacity-40"
-              title="调用观察员 C 提炼本局角色高浓度经历，写入灵魂角色库"
+              title="提取本局角色经历并存入角色库"
             >
               <RefreshCw v-if="distillingImprints" class="w-3.5 h-3.5 animate-spin" />
               <Sparkles v-else class="w-3.5 h-3.5" />
-              <span>{{ distillingImprints ? "提炼中..." : "提炼本局经历写入灵魂库" }}</span>
+              <span>{{ distillingImprints ? "总结中..." : "总结经历到角色库" }}</span>
             </button>
             <button
               type="button"
@@ -711,7 +730,7 @@ defineExpose({ openReportModal });
         >
           <div class="flex items-center gap-2 min-w-0 flex-wrap">
             <GitCompare class="w-4 h-4 text-violet-600 shrink-0" />
-            <span class="text-[12px] font-medium text-[#1D1D1F]">同源平行世界线对照：</span>
+            <span class="text-[12px] font-medium text-[#1D1D1F]">世界线对照：</span>
             <select
               v-model="selectedCompareBranchId"
               class="h-7 rounded-lg border border-black/[0.08] bg-white px-2 text-[11.5px] text-[#1D1D1F] outline-none max-w-[200px]"
@@ -729,7 +748,7 @@ defineExpose({ openReportModal });
                 class="px-2.5 py-0.5 rounded-full text-[11px] font-medium transition"
                 :class="reportViewTab === 'final' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
               >
-                结案简报
+                复盘报告
               </button>
               <button
                 type="button"
@@ -737,7 +756,7 @@ defineExpose({ openReportModal });
                 class="px-2.5 py-0.5 rounded-full text-[11px] font-medium transition"
                 :class="reportViewTab === 'comparison' ? 'bg-violet-600 text-white' : 'text-slate-600'"
               >
-                分歧对照
+                世界线对比
               </button>
             </div>
             <button
@@ -748,7 +767,7 @@ defineExpose({ openReportModal });
             >
               <RefreshCw v-if="generatingComparison" class="w-3 h-3 animate-spin" />
               <GitCompare v-else class="w-3 h-3" />
-              <span>{{ generatingComparison ? "比对中..." : "生成世界线分歧对照报告" }}</span>
+              <span>{{ generatingComparison ? "比对中..." : "世界线分歧对照" }}</span>
             </button>
           </div>
         </div>
@@ -759,13 +778,13 @@ defineExpose({ openReportModal });
             class="py-16 text-center text-xs text-slate-400 space-y-2"
           >
             <RefreshCw class="w-6 h-6 mx-auto animate-spin text-violet-600" />
-            <div>观察员 C 正在对照两条平行宇宙的时间线分歧与蝴蝶效应...</div>
+            <div>正在比对两条世界线分歧...</div>
           </div>
           <div
             v-else-if="!(comparisonReport ?? '').trim()"
             class="py-12 text-center text-xs text-slate-400"
           >
-            点击上方「生成世界线分歧对照报告」即可对比分叉点后的关键转折与结局差异。
+            选择关联分支并生成世界线分歧对照报告。
           </div>
           <div
             v-else
@@ -780,13 +799,13 @@ defineExpose({ openReportModal });
             class="py-16 text-center text-xs text-slate-400 space-y-2"
           >
             <RefreshCw class="w-6 h-6 mx-auto animate-spin text-[#007AFF]" />
-            <div>观察员 C 正在研读全量演化档案并撰写结案复盘简报...</div>
+            <div>正在分析对话并生成复盘报告...</div>
           </div>
           <div
             v-else-if="!finalReport.trim()"
             class="py-12 text-center text-xs text-slate-400"
           >
-            点击右上角「重新生成」即可总结核心转折点、高光金句 Top 3 与智能体行为画像。
+            点击「重新生成」汇总核心转折、精彩发言与角色表现。
           </div>
           <div
             v-else
@@ -797,7 +816,7 @@ defineExpose({ openReportModal });
               class="p-3 rounded-2xl bg-[#FAFAFC] border border-black/[0.06] flex flex-wrap items-center justify-between gap-2"
             >
               <span class="text-[11px] font-medium text-slate-600">
-                存入跨世界灵魂角色库（提取基础人设与博弈特质）：
+                保存到角色库：
               </span>
               <div class="flex flex-wrap items-center gap-1.5">
                 <button

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 import { useMediaQuery } from "@vueuse/core";
 import {
   Play,
@@ -9,14 +9,13 @@ import {
   AlertCircle,
   Film,
   PanelLeft,
-  PanelLeftClose,
   PanelRight,
-  PanelRightClose,
   UserCheck,
   MoreHorizontal,
   SlidersHorizontal,
   Eye,
   EyeOff,
+  ScrollText,
 } from "lucide-vue-next";
 import {
   DropdownMenuContent,
@@ -27,7 +26,7 @@ import {
   DropdownMenuTrigger,
 } from "reka-ui";
 import type { EngineState, ExperimentDetail } from "../types";
-import { isMacOS, isWindows, isMobileOS } from "../utils/platform";
+import { isMacOS, isMobileOS } from "../utils/platform";
 import { triggerHaptic } from "../utils/native";
 
 const props = defineProps<{
@@ -38,7 +37,9 @@ const props = defineProps<{
   replayActive?: boolean;
   sidebarOpen?: boolean;
   trafficLightClearance?: boolean;
+  hideSidebarToggle?: boolean;
   inspectorOpen?: boolean;
+  hideInspectorToggle?: boolean;
   hasPendingApproval?: boolean;
   contextUsagePct?: number | null;
   contextActiveTokens?: number;
@@ -51,6 +52,7 @@ const emit = defineEmits<{
   pause: [];
   step: [targetAgentId?: string | null];
   openSettings: [];
+  openScript: [];
   renameExperiment: [title: string];
   toggleReplay: [];
   toggleSidebar: [];
@@ -60,6 +62,7 @@ const emit = defineEmits<{
 
 const editingTitle = ref(false);
 const draftTitle = ref("");
+const titleInputRef = ref<HTMLInputElement | null>(null);
 const stepMenuOpen = ref(false);
 const fallbackDesktop = useMediaQuery("(min-width: 768px)");
 const isDesktopOrWideTablet = computed(() =>
@@ -75,15 +78,15 @@ const statusInfo = computed(() => {
   switch (props.engineState) {
     case "running":
       return {
-        label: "演化中",
-        fullLabel: "自主演化中",
+        label: "进行中",
+        fullLabel: "自动推演中",
         dotClass: "bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.65)]",
         pillClass: "bg-emerald-50 text-emerald-700 border-emerald-200/80",
       };
     case "stepping":
       return {
-        label: "推演中",
-        fullLabel: "单步推演中",
+        label: "单步中",
+        fullLabel: "单轮生成中",
         dotClass: "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.65)]",
         pillClass: "bg-amber-50 text-amber-700 border-amber-200/80",
       };
@@ -125,6 +128,9 @@ function startRename() {
   if (!props.experiment) return;
   draftTitle.value = props.experiment.title;
   editingTitle.value = true;
+  nextTick(() => {
+    titleInputRef.value?.focus();
+  });
 }
 
 function commitRename() {
@@ -140,6 +146,25 @@ function triggerStep(agentId?: string | null) {
   stepMenuOpen.value = false;
   emit("step", agentId ?? null);
 }
+
+const headerHorizontalPadding = computed(() => {
+  const pl = props.hideSidebarToggle
+    ? !props.sidebarOpen
+      ? isMacOS
+        ? "pl-[118px]"
+        : "pl-[50px]"
+      : "pl-3 md:pl-4"
+    : props.trafficLightClearance
+      ? "pl-[80px]"
+      : "pl-3 md:pl-4";
+
+  const pr =
+    props.hideInspectorToggle && !props.inspectorOpen
+      ? "pr-[52px]"
+      : "pr-3 md:pr-4";
+
+  return `${pl} ${pr}`;
+});
 </script>
 
 <template>
@@ -149,43 +174,54 @@ function triggerStep(agentId?: string | null) {
     :class="[
       isDesktopOrWideTablet
         ? isMobileOS
-          ? 'pt-[var(--safe-top,env(safe-area-inset-top))] min-h-[calc(46px+var(--safe-top,0px))] border-b border-black/[0.05]'
-          : isWindows
-            ? 'h-[46px]'
-            : 'h-[46px] border-b border-black/[0.05]'
-        : 'min-h-[52px] pt-[calc(0.35rem+var(--safe-top,env(safe-area-inset-top)))] pb-1.5 border-b border-black/[0.05]',
-      trafficLightClearance ? 'pl-[78px] pr-3 md:pr-4' : 'px-3 md:px-4',
+          ? 'pt-[var(--safe-top,env(safe-area-inset-top))] min-h-[calc(46px+var(--safe-top,0px))]'
+          : 'h-[46px]'
+        : 'min-h-[52px] pt-[calc(0.35rem+var(--safe-top,env(safe-area-inset-top)))] pb-1.5',
+      headerHorizontalPadding,
     ]"
   >
     <!-- Left: Sidebar toggle + title block -->
     <div :data-tauri-drag-region="isMacOS ? '' : undefined" class="flex items-center gap-2 min-w-0 flex-1">
       <button
+        v-if="!hideSidebarToggle"
         type="button"
         @click="triggerHaptic('light'); emit('toggleSidebar')"
         class="shrink-0 w-9 h-9 md:w-8 md:h-8 flex items-center justify-center rounded-xl md:rounded-lg text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.05] active:bg-black/[0.08] transition-colors"
-        title="展开/收起左侧实验档案栏 (Ctrl+B)"
+        title="展开/收起左侧边栏 (Ctrl+B)"
       >
-        <PanelLeftClose v-if="sidebarOpen" class="w-[18px] h-[18px] md:w-4 md:h-4" />
-        <PanelLeft v-else class="w-[18px] h-[18px] md:w-4 md:h-4" />
+        <PanelLeft class="w-[18px] h-[18px] md:w-4 md:h-4 stroke-[1.75]" />
       </button>
 
       <!-- Editable current title + compact mobile subtitle -->
-      <div class="min-w-0 flex-1 max-w-[280px]">
-        <input
+      <div
+        :data-tauri-drag-region="isMacOS ? '' : undefined"
+        class="min-w-0 max-w-[280px]"
+      >
+        <div
           v-if="editingTitle"
-          v-model="draftTitle"
-          @blur="commitRename"
-          @keydown.enter="commitRename"
-          @keydown.esc="editingTitle = false"
-          autofocus
-          class="text-[14px] font-semibold text-[#1D1D1F] bg-slate-100 px-2.5 py-1 md:py-0.5 rounded-lg outline-none ring-2 ring-[#007AFF]/30 w-full max-w-[240px]"
-        />
+          class="inline-grid items-center max-w-full align-middle"
+        >
+          <span
+            aria-hidden="true"
+            class="col-start-1 row-start-1 invisible whitespace-pre overflow-hidden pl-2 pr-2.5 py-1 md:py-0.5 text-[15px] md:text-[13.5px] font-semibold leading-tight"
+          >{{ draftTitle || " " }}</span>
+          <input
+            ref="titleInputRef"
+            v-model="draftTitle"
+            size="1"
+            @blur="commitRename"
+            @keydown.enter="commitRename"
+            @keydown.esc="editingTitle = false"
+            autofocus
+            class="col-start-1 row-start-1 w-full min-w-0 text-[15px] md:text-[13.5px] font-semibold leading-tight text-[#1D1D1F] bg-slate-100 px-2 py-1 md:py-0.5 rounded-lg outline-none ring-2 ring-[#007AFF]/30"
+          />
+        </div>
         <button
           v-else
           type="button"
           @click="startRename"
           class="min-w-0 max-w-full text-left block group"
-          :title="experiment?.title ? `${experiment.title}（点击重命名）` : '点击重命名实验'"
+          :title="experiment?.title ? `${experiment.title}（点击重命名）` : '点击重命名'"
         >
           <span class="flex items-center gap-2 min-w-0">
             <span class="text-[15px] md:text-[13.5px] font-semibold text-[#1D1D1F] group-hover:text-[#007AFF] truncate leading-tight transition-colors">
@@ -263,18 +299,18 @@ function triggerStep(agentId?: string | null) {
         @click="triggerHaptic('medium'); emit('start')"
         :disabled="isStepping"
         class="flex items-center gap-1.5 h-9 md:h-7 px-3.5 md:px-3 rounded-full bg-[#1D1D1F] hover:bg-black active:scale-[0.98] text-white text-[12.5px] md:text-[12px] font-medium transition disabled:opacity-50"
-        title="开始演化"
+        title="开始自动推演"
       >
         <Play class="w-3 h-3 fill-current" />
-        <span class="hidden min-[380px]:inline md:hidden">演化</span>
-        <span class="hidden md:@[520px]:inline">开始演化</span>
+        <span class="hidden min-[380px]:inline md:hidden">开始</span>
+        <span class="hidden md:@[520px]:inline">开始</span>
       </button>
       <button
         v-else
         type="button"
         @click="triggerHaptic('medium'); emit('pause')"
         class="flex items-center gap-1.5 h-9 md:h-7 px-3.5 md:px-3 rounded-full bg-amber-500 hover:bg-amber-600 active:scale-[0.98] text-white text-[12.5px] md:text-[12px] font-medium transition"
-        title="暂停演化"
+        title="暂停"
       >
         <Pause class="w-3 h-3 fill-current" />
         <span>暂停</span>
@@ -294,10 +330,10 @@ function triggerStep(agentId?: string | null) {
             @click="triggerHaptic('light'); triggerStep(null)"
             :disabled="isRunning || isStepping"
             class="flex items-center gap-1 h-full px-2.5 md:px-2 text-[12.5px] md:text-[12px] font-medium text-[#1D1D1F] active:bg-black/10 transition-colors disabled:opacity-40"
-            title="按顺序单步推进一轮对话"
+            title="按顺序推进下一轮"
           >
             <StepForward class="w-3.5 h-3.5 text-slate-600" />
-            <span class="hidden md:@[580px]:inline text-slate-700">单步</span>
+            <span class="hidden md:@[580px]:inline text-slate-700">下一轮</span>
           </button>
           <button
             v-if="isDesktopOrWideTablet"
@@ -305,7 +341,7 @@ function triggerStep(agentId?: string | null) {
             @click="stepMenuOpen = !stepMenuOpen"
             :disabled="isRunning || isStepping || agents.length === 0"
             class="flex items-center h-full px-1.5 text-slate-500 hover:text-[#1D1D1F] active:bg-black/10 transition-colors disabled:opacity-40"
-            title="点名指定角色发言"
+            title="指定角色发言"
           >
             <ChevronDown class="w-3.5 h-3.5" />
           </button>
@@ -322,13 +358,13 @@ function triggerStep(agentId?: string | null) {
           >
             <span class="flex items-center gap-2">
               <StepForward class="w-3.5 h-3.5 text-slate-500" />
-              <span>顺位单步</span>
+              <span>顺位下一轮</span>
             </span>
             <span class="text-[11px] text-slate-400">默认</span>
           </button>
           <div class="my-1 border-t border-black/[0.06]"></div>
           <div class="px-3 py-1 text-[11px] font-semibold text-slate-400">
-            点名指定发言角色
+            指定发言角色
           </div>
           <button
             v-for="ag in agents"
@@ -370,12 +406,23 @@ function triggerStep(agentId?: string | null) {
             class="z-50 min-w-[184px] rounded-2xl bg-white/95 backdrop-blur-2xl border border-black/[0.08] shadow-[0_14px_38px_rgba(0,0,0,0.16)] p-1.5 text-[13px] text-[#1D1D1F] outline-none"
           >
             <DropdownMenuItem
+              @select="emit('openScript')"
+              class="flex items-center justify-between gap-2.5 px-3 py-2.5 rounded-xl cursor-pointer outline-none hover:bg-black/[0.05]"
+            >
+              <span class="flex items-center gap-2.5">
+                <ScrollText class="w-4 h-4 text-[#007AFF]" />
+                <span>本局剧本与角色</span>
+              </span>
+              <span class="text-[11px] text-slate-400 tabular-nums">{{ agents.length }} 位</span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator class="my-1 h-px bg-black/[0.06]" />
+            <DropdownMenuItem
               @select="emit('toggleBlindGuess')"
               class="flex items-center gap-2.5 px-3 py-2.5 rounded-xl cursor-pointer outline-none hover:bg-black/[0.05]"
             >
               <EyeOff v-if="blindGuessMode" class="w-4 h-4 text-violet-600" />
               <Eye v-else class="w-4 h-4 text-slate-600" />
-              <span>{{ blindGuessMode ? "退出盲猜模式（揭晓底牌）" : "盲猜模式（遮蔽思考与密谈）" }}</span>
+              <span>{{ blindGuessMode ? "退出盲猜（显示底牌）" : "盲猜模式（隐藏思考与私聊）" }}</span>
             </DropdownMenuItem>
             <DropdownMenuItem
               :disabled="isRunning || isStepping || (experiment?.messages.length ?? 0) === 0"
@@ -383,12 +430,12 @@ function triggerStep(agentId?: string | null) {
               class="flex items-center gap-2.5 px-3 py-2.5 rounded-xl cursor-pointer outline-none hover:bg-black/[0.05] data-[disabled]:opacity-40"
             >
               <Film class="w-4 h-4 text-[#007AFF]" />
-              <span>{{ replayActive ? "退出剧场回放" : "剧场回放模式" }}</span>
+              <span>{{ replayActive ? "退出回放" : "回放" }}</span>
             </DropdownMenuItem>
             <template v-if="agents.length > 0">
               <DropdownMenuSeparator class="my-1 h-px bg-black/[0.06]" />
               <div class="px-3 py-1 text-[11px] font-semibold text-slate-400">
-                点名指定角色发言
+                指定发言角色
               </div>
               <DropdownMenuItem
                 v-for="ag in agents"
@@ -415,7 +462,7 @@ function triggerStep(agentId?: string | null) {
               class="flex items-center gap-2.5 px-3 py-2.5 rounded-xl cursor-pointer outline-none hover:bg-black/[0.05]"
             >
               <SlidersHorizontal class="w-4 h-4 text-slate-600" />
-              <span>模型与生态设置</span>
+              <span>设置</span>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenuPortal>
@@ -425,6 +472,17 @@ function triggerStep(agentId?: string | null) {
       <template v-if="isDesktopOrWideTablet">
         <button
           type="button"
+          @click="triggerHaptic('light'); emit('openScript')"
+          class="h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-[12px] font-medium text-slate-600 hover:text-[#1D1D1F] hover:bg-black/[0.05] transition-colors outline-none"
+          :title="`编辑本局剧本、标签与角色设定（${agents.length} 位）`"
+        >
+          <ScrollText class="w-3.5 h-3.5 text-slate-500" />
+          <span class="hidden @[560px]:inline">剧本与角色</span>
+          <span class="hidden @[720px]:inline text-[11px] text-slate-400 tabular-nums">({{ agents.length }})</span>
+        </button>
+
+        <button
+          type="button"
           @click="triggerHaptic('light'); emit('toggleBlindGuess')"
           class="h-8 flex items-center gap-1 px-2.5 rounded-lg text-[12px] font-medium transition-colors outline-none"
           :class="
@@ -432,7 +490,7 @@ function triggerStep(agentId?: string | null) {
               ? 'bg-violet-50 text-violet-700'
               : 'text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.05]'
           "
-          :title="blindGuessMode ? '盲猜模式已开启（点击揭晓全员思考、私密备忘与里屋密谈）' : '开启盲猜模式（遮蔽幕后思考、私密里屋与暗涌关系）'"
+          :title="blindGuessMode ? '盲猜模式已开启，点击显示思考与私聊' : '隐藏角色思考、私聊与关系分析'"
         >
           <EyeOff v-if="blindGuessMode" class="w-3.5 h-3.5" />
           <Eye v-else class="w-3.5 h-3.5" />
@@ -449,12 +507,13 @@ function triggerStep(agentId?: string | null) {
               ? 'bg-[#007AFF]/12 text-[#007AFF]'
               : 'text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.05]'
           "
-          :title="replayActive ? '退出剧场回放' : '剧场回放模式'"
+          :title="replayActive ? '退出回放' : '回放'"
         >
           <Film class="w-4 h-4" />
         </button>
 
         <button
+          v-if="!hideInspectorToggle"
           type="button"
           @click="triggerHaptic('light'); emit('toggleInspector')"
           class="relative w-8 h-8 flex items-center justify-center rounded-lg transition-colors outline-none"
@@ -463,10 +522,9 @@ function triggerStep(agentId?: string | null) {
               ? 'bg-black/[0.06] text-[#1D1D1F]'
               : 'text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.05]'
           "
-          title="展开/收起右侧观察舱与共享白板 (Ctrl+\)"
+          title="展开/收起右侧分析与白板 (Ctrl+\)"
         >
-          <PanelRightClose v-if="inspectorOpen" class="w-4 h-4" />
-          <PanelRight v-else class="w-4 h-4" />
+          <PanelRight class="w-4 h-4 stroke-[1.75]" />
           <span
             v-if="hasPendingApproval"
             class="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-500 animate-ping"

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ApiProfile,
   CharacterCard,
   EngineState,
   ExperimentDetail,
@@ -19,4 +20,5 @@ export const initialDataPromises = {
   presets: invoke<PresetTemplate[]>("get_presets"),
   characterCards: invoke<CharacterCard[]>("list_character_cards"),
   uiPrefs: invoke<UiPrefs>("get_ui_prefs"),
+  apiProfiles: invoke<ApiProfile[]>("get_api_profiles"),
 };

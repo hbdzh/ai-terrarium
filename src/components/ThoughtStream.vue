@@ -315,28 +315,28 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
   switch (role) {
     case "GodSystem":
       return {
-        label: "环境旁白 · 全知事件",
+        label: "场景事件",
         icon: Globe2,
         badgeClass: "terrarium-stay-dark bg-slate-900/90 text-white border-slate-700/50",
         lineClass: "via-slate-300",
       };
     case "GodWhisper":
       return {
-        label: `心灵低语 → ${agentLabel(agentId)}`,
+        label: `定向提示 → ${agentLabel(agentId)}`,
         icon: EyeOff,
         badgeClass: "bg-indigo-50 text-indigo-700 border-indigo-200/80",
         lineClass: "via-indigo-200",
       };
     case "GodPublic":
       return {
-        label: "路人降临 · 直接发言",
+        label: "外部插话",
         icon: MessageCircle,
         badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200/80",
         lineClass: "via-emerald-200",
       };
     default:
       return {
-        label: "造物主干预",
+        label: "主持人干预",
         icon: Sparkles,
         badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
         lineClass: "via-slate-200",
@@ -346,12 +346,18 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
 </script>
 
 <template>
-  <div
-    ref="containerRef"
-    @scroll="handleScroll"
-    class="flex-1 overflow-y-auto md:mr-1 px-3 sm:px-5 md:px-8 pt-4 sm:pt-6 pb-4"
-  >
-    <div class="max-w-[740px] mx-auto w-full space-y-4 md:space-y-5">
+  <div class="relative flex-1 min-h-0 flex flex-col">
+    <!-- Top soft fade when dialogue scrolls upward under header -->
+    <div
+      class="pointer-events-none absolute inset-x-0 top-0 h-7 z-10 bg-gradient-to-b from-white via-white/80 to-transparent"
+    ></div>
+
+    <div
+      ref="containerRef"
+      @scroll="handleScroll"
+      class="flex-1 overflow-y-auto md:mr-1 px-3 sm:px-5 md:px-8 pt-5 sm:pt-6 pb-6"
+    >
+      <div class="max-w-[740px] mx-auto w-full space-y-4 md:space-y-5">
       <!-- Compacted Memory Summary Banner -->
     <div
       v-if="compactedSummary && compactedSummary.trim().length > 0"
@@ -363,8 +369,8 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
         class="w-full px-4 py-2.5 flex items-center gap-2 text-xs text-slate-600 hover:bg-slate-200/50 transition text-left min-w-0"
       >
         <Archive class="w-3.5 h-3.5 text-[#007AFF] shrink-0" />
-        <span class="font-semibold text-[#1D1D1F] truncate">历史纪要与已确认事实</span>
-        <span class="hidden sm:inline text-[11px] text-slate-400 shrink-0">早期对话已自动无损折叠</span>
+        <span class="font-semibold text-[#1D1D1F] truncate">历史对话摘要</span>
+        <span class="hidden sm:inline text-[11px] text-slate-400 shrink-0">早期对话已自动折叠</span>
         <component
           :is="summaryOpen ? ChevronDown : ChevronRight"
           class="w-3.5 h-3.5 text-slate-400 ml-auto shrink-0"
@@ -389,19 +395,18 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
         <Sparkles class="w-6 h-6 text-[#007AFF]" />
       </div>
       <h2 class="text-base font-semibold text-[#1D1D1F] mb-1.5">
-        观察箱已就绪
+        沙盒已就绪
       </h2>
       <p class="text-xs text-slate-500 leading-relaxed">
-        当前生态包含
+        当前包含
         <span class="font-medium text-slate-700">{{ agentsList.length }}</span>
-        位 AI 参与者（<span class="font-medium text-slate-700">{{ agentsList.map((a) => a.label).join(" · ") }}</span>）。
-        点击右上角「开始演化」或「单步推进」即可开启自主对话。
+        位角色（<span class="font-medium text-slate-700">{{ agentsList.map((a) => a.label).join(" · ") }}</span>），点击右上角「开始」或「下一轮」开启对话。
       </p>
       <div
         v-if="config?.initialTopic"
         class="mt-4 px-4 py-2.5 rounded-2xl bg-white/80 border border-black/[0.06] text-xs text-slate-600 shadow-xs"
       >
-        <span class="text-slate-400 mr-1.5">开场引子:</span>
+        <span class="text-slate-400 mr-1.5">开场设定:</span>
         {{ config.initialTopic }}
       </div>
     </div>
@@ -426,7 +431,7 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
         <div class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-violet-50/80 border border-violet-200/80 text-[12px] text-violet-800 shadow-[0_1px_6px_rgba(139,92,246,0.06)]">
           <Lock class="w-3.5 h-3.5 text-violet-600 shrink-0" />
           <span>
-            🔒 {{ item.membersText }} 进入里屋密谈了 {{ item.turnCount }} 轮（盲猜模式已遮蔽具体内容）
+            {{ item.membersText }} 私下对话了 {{ item.turnCount }} 轮（盲猜模式已隐藏）
           </span>
         </div>
       </div>
@@ -477,7 +482,7 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
             v-if="blindGuessMode && item.msg.role === 'GodWhisper'"
             class="text-[12px] italic opacity-75 select-none"
           >
-            🔒 盲猜模式已遮蔽造物主心灵低语内容
+            盲猜模式已隐藏定向提示
           </div>
           <div
             v-else
@@ -501,7 +506,7 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
     >
       <div class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-violet-50/80 border border-violet-200/80 text-[12px] text-violet-800">
         <Lock class="w-3.5 h-3.5 text-violet-600 animate-pulse shrink-0" />
-        <span>🔒 {{ activeRoomMembersText }} 正在里屋密谈中（盲猜模式已遮蔽具体内容）</span>
+        <span>{{ activeRoomMembersText }} 正在私下对话（盲猜模式已隐藏）</span>
       </div>
     </div>
     <MessageBubble
@@ -518,6 +523,12 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
       :blind-guess-mode="blindGuessMode"
       :is-touch-or-narrow="isTouchOrNarrow"
     />
+      </div>
     </div>
+
+    <!-- Bottom soft fade into floating composer -->
+    <div
+      class="pointer-events-none absolute inset-x-0 bottom-0 h-5 z-10 bg-gradient-to-t from-white via-white/80 to-transparent"
+    ></div>
   </div>
 </template>

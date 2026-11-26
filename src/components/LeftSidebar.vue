@@ -135,7 +135,7 @@ function requestDelete(id: string) {
     :class="
       isWindows && !inSheet
         ? 'bg-transparent'
-        : 'bg-[#F9F9FB] border-r border-black/[0.06]'
+        : 'bg-[#F9F9FB] border-r border-black/[0.035]'
     "
   >
     <!-- Windows Frameless Integrated Top Brand Drag Area (matches 36px WindowsTitleBar height seamlessly with zero horizontal line) -->
@@ -156,7 +156,7 @@ function requestDelete(id: string) {
       class="shrink-0 px-3 md:px-2.5 pb-2 space-y-2 md:space-y-1.5"
       :class="
         isMacOS && !inSheet
-          ? 'pt-10'
+          ? 'pt-12'
           : isWindows && !inSheet
             ? 'pt-1'
             : inSheet
@@ -171,17 +171,17 @@ function requestDelete(id: string) {
         @click="emit('openNewExperiment')"
         class="w-full h-10 md:h-9 flex items-center gap-2.5 px-3 md:px-2.5 rounded-xl md:rounded-[10px] text-[14px] md:text-[13px] font-medium text-[#1D1D1F] hover:bg-black/[0.045] active:bg-black/[0.07] transition-colors"
         :class="inSheet ? 'bg-white border border-black/[0.06] shadow-[0_1px_2px_rgba(0,0,0,0.02)]' : ''"
-        title="新建实验 (Ctrl+N)"
+        title="新建推演 (Ctrl+N)"
       >
         <SquarePen class="w-4 h-4 text-slate-600 shrink-0" />
-        <span>新建实验</span>
+        <span>新建推演</span>
       </button>
 
       <div class="relative flex items-center">
         <Search class="w-3.5 h-3.5 text-slate-400 absolute left-3 md:left-2.5 pointer-events-none" />
         <input
           v-model="searchQuery"
-          placeholder="搜索实验存档"
+          placeholder="搜索推演记录"
           class="w-full pl-8.5 md:pl-8 pr-7 py-2 md:py-1.5 text-[13.5px] md:text-[13px] text-[#1D1D1F] placeholder:text-slate-400 outline-none transition-all"
           :class="
             inSheet
@@ -201,10 +201,15 @@ function requestDelete(id: string) {
     </div>
 
     <!-- Middle History Experiments List (Single-line minimal items on desktop, rich on touch sheet) -->
-    <div class="flex-1 min-h-0 overflow-y-auto px-2.5 py-1 space-y-0.5">
+    <div class="relative flex-1 min-h-0 flex flex-col">
+      <div
+        v-if="!(isWindows && !inSheet)"
+        class="pointer-events-none absolute inset-x-0 top-0 h-3.5 z-10 bg-gradient-to-b from-[#F9F9FB] via-[#F9F9FB]/80 to-transparent"
+      ></div>
+      <div class="flex-1 min-h-0 overflow-y-auto px-2.5 py-1.5 space-y-0.5">
       <div class="px-2.5 pt-1.5 pb-1 flex items-center justify-between">
         <span class="text-[11px] font-medium text-slate-400">
-          实验档案
+          推演记录
         </span>
       </div>
 
@@ -212,7 +217,7 @@ function requestDelete(id: string) {
         v-if="filteredExperiments.length === 0"
         class="py-10 text-center text-[13px] text-slate-400"
       >
-        无匹配实验存档
+        无匹配记录
       </div>
 
       <div
@@ -233,7 +238,7 @@ function requestDelete(id: string) {
             <GitBranch
               v-if="isDerivedBranch(item)"
               class="w-3.5 h-3.5 md:w-3 md:h-3 shrink-0 text-violet-500"
-              title="平行宇宙派生分支"
+              title="世界线派生分支"
             />
             <span
               class="text-[14px] md:text-[13px] truncate leading-snug"
@@ -263,30 +268,35 @@ function requestDelete(id: string) {
           <Trash2 v-else class="w-4 h-4 md:w-3.5 md:h-3.5" />
         </button>
       </div>
+      </div>
+      <div
+        v-if="!(isWindows && !inSheet)"
+        class="pointer-events-none absolute inset-x-0 bottom-0 h-4 z-10 bg-gradient-to-t from-[#F9F9FB] via-[#F9F9FB]/85 to-transparent"
+      ></div>
     </div>
 
     <!-- Bottom Fixed Action Area -->
     <div
-      class="relative shrink-0 px-2.5 pt-2 border-t border-black/[0.05] space-y-0.5"
+      class="relative shrink-0 px-2.5 pt-1.5 space-y-0.5"
       :class="[
         isWindows && !inSheet ? 'bg-transparent' : 'bg-[#F9F9FB]',
         isMobileOS ? 'pb-[calc(0.65rem+var(--safe-bottom,env(safe-area-inset-bottom)))]' : 'pb-2.5',
       ]"
     >
-      <!-- Distill Memory Imprints to Soul Library -->
+      <!-- Distill Memory Imprints to Character Library -->
       <button
         type="button"
         @click="emit('distillImprints')"
         :disabled="(currentTotalTurns ?? 0) === 0 || distillingImprints"
         class="w-full h-10 md:h-9 flex items-center gap-2.5 px-2.5 rounded-xl text-[13.5px] md:text-[12.5px] font-medium text-slate-700 hover:bg-black/[0.045] active:bg-black/[0.08] hover:text-[#1D1D1F] transition-colors disabled:opacity-40"
-        title="调用观察员 C 提炼本局角色高浓度经历，持久化追加至灵魂角色库"
+        title="提取本局角色经历并存入角色库"
       >
         <RefreshCw v-if="distillingImprints" class="w-4 h-4 text-indigo-600 animate-spin shrink-0" />
         <Sparkles v-else class="w-4 h-4 text-indigo-600 shrink-0" />
-        <span class="truncate">{{ distillingImprints ? "提炼经历中..." : "提炼本局经历写入灵魂库" }}</span>
+        <span class="truncate">{{ distillingImprints ? "总结经历中..." : "总结经历到角色库" }}</span>
       </button>
 
-      <!-- Soul Character Library -->
+      <!-- Character Library -->
       <button
         type="button"
         @click="cardModalOpen = true"
@@ -294,7 +304,7 @@ function requestDelete(id: string) {
       >
         <span class="flex items-center gap-2.5 min-w-0">
           <BookUser class="w-4 h-4 text-indigo-600 shrink-0" />
-          <span class="truncate">灵魂角色库</span>
+          <span class="truncate">角色库</span>
         </span>
         <span class="px-2 py-0.5 rounded-full bg-black/[0.055] text-[11px] font-semibold text-slate-600 tabular-nums">
           {{ characterCards.length }}
@@ -334,12 +344,12 @@ function requestDelete(id: string) {
             class="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] md:text-[12.5px] text-slate-700 hover:bg-black/[0.05] transition-colors text-left"
           >
             <Download class="w-4 h-4 md:w-3.5 md:h-3.5 text-slate-500 shrink-0" />
-            <span>导出完整档案 (.md)</span>
+            <span>导出完整记录 (.md)</span>
           </button>
 
           <div class="my-1 border-t border-black/[0.06]"></div>
           <div class="px-3 py-1 text-[10.5px] font-semibold text-slate-400">
-            纯享剧本导出（隐藏思考过程）
+            剧本导出（隐藏思考过程）
           </div>
           <button
             type="button"
@@ -347,7 +357,7 @@ function requestDelete(id: string) {
             class="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-xl text-[12.5px] text-slate-700 hover:bg-black/[0.05] transition-colors text-left"
           >
             <FileText class="w-3.5 h-3.5 text-slate-500 shrink-0" />
-            <span>纯享 Markdown (.md)</span>
+            <span>剧本 Markdown (.md)</span>
           </button>
           <button
             type="button"
@@ -355,7 +365,7 @@ function requestDelete(id: string) {
             class="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-xl text-[12.5px] text-slate-700 hover:bg-black/[0.05] transition-colors text-left"
           >
             <ImageIcon class="w-3.5 h-3.5 text-slate-500 shrink-0" />
-            <span>纯享长图 (.png)</span>
+            <span>剧本长图 (.png)</span>
           </button>
           <button
             type="button"
@@ -363,7 +373,7 @@ function requestDelete(id: string) {
             class="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-xl text-[12.5px] text-slate-700 hover:bg-black/[0.05] transition-colors text-left"
           >
             <Printer class="w-3.5 h-3.5 text-slate-500 shrink-0" />
-            <span>纯享 PDF (.pdf)</span>
+            <span>剧本 PDF (.pdf)</span>
           </button>
         </div>
 
@@ -390,11 +400,11 @@ function requestDelete(id: string) {
           type="button"
           @click="emit('openSettings')"
           class="w-full h-10 md:h-9 flex items-center justify-between px-2.5 rounded-xl text-[13.5px] md:text-[12.5px] font-medium text-slate-700 hover:bg-black/[0.05] active:bg-black/[0.08] hover:text-[#1D1D1F] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-[#007AFF]/30"
-          :title="isMacOS ? '模型、API 与观察员设置 (⌘,)' : isDesktopOS ? '模型、API 与观察员设置 (Ctrl+,)' : '模型、API 与观察员设置'"
+          :title="isMacOS ? '模型、接口与系统设置 (⌘,)' : isDesktopOS ? '模型、接口与系统设置 (Ctrl+,)' : '模型、接口与系统设置'"
         >
           <span class="flex items-center gap-2.5">
             <Settings class="w-4 h-4 text-slate-500 shrink-0" />
-            <span>模型与生态设置</span>
+            <span>设置</span>
           </span>
           <kbd v-if="isDesktopOS" class="px-1.5 py-0.5 rounded bg-black/[0.05] text-[10.5px] font-sans text-slate-500">
             {{ isMacOS ? "⌘," : "Ctrl+," }}
@@ -403,10 +413,10 @@ function requestDelete(id: string) {
       </div>
     </div>
 
-    <!-- Soul Character Library Management Modal -->
+    <!-- Character Library Management Modal -->
     <AdaptiveModal
       :open="cardModalOpen"
-      title="跨世界灵魂角色库"
+      title="角色库"
       max-width-class="max-w-xl"
       @close="cardModalOpen = false"
     >
@@ -415,7 +425,7 @@ function requestDelete(id: string) {
           <div class="flex items-center gap-2">
             <BookUser class="w-4 h-4 text-indigo-600" />
             <h3 class="text-[15px] md:text-sm font-semibold text-[#1D1D1F]">
-              跨世界灵魂角色库 ({{ characterCards.length }})
+              角色库 ({{ characterCards.length }})
             </h3>
           </div>
           <button
@@ -433,7 +443,7 @@ function requestDelete(id: string) {
           v-if="characterCards.length === 0"
           class="py-12 text-center text-[13px] md:text-xs text-slate-400"
         >
-          角色库暂无存档，可在《实验结案复盘简报》中将高光角色一键存入。
+          暂无角色存档，可在复盘报告中保存角色。
         </div>
         <div
           v-for="card in characterCards"
@@ -476,14 +486,14 @@ function requestDelete(id: string) {
             {{ card.behaviorTraits }}
           </p>
 
-          <!-- Cross-Universe Memory Imprints (View / Edit / Delete single imprint) -->
+          <!-- Cross-Session Memory Imprints (View / Edit / Delete single imprint) -->
           <div
             v-if="card.memoryImprints && card.memoryImprints.length > 0"
             class="pt-1 space-y-1.5"
           >
             <div class="text-[11px] font-semibold text-slate-500 flex items-center gap-1">
               <Sparkles class="w-3 h-3 text-indigo-500" />
-              <span>跨宇宙记忆烙印 ({{ card.memoryImprints.length }})</span>
+              <span>经历记忆 ({{ card.memoryImprints.length }})</span>
             </div>
             <div
               v-for="(imprint, impIdx) in card.memoryImprints"
@@ -501,7 +511,7 @@ function requestDelete(id: string) {
                   type="button"
                   @click="saveEditImprint(card, impIdx)"
                   class="p-1 rounded-md text-emerald-600 hover:bg-emerald-50"
-                  title="保存烙印"
+                  title="保存"
                 >
                   <Check class="w-3.5 h-3.5" />
                 </button>
@@ -512,7 +522,7 @@ function requestDelete(id: string) {
                   type="button"
                   @click="startEditImprint(card.id, impIdx, imprint)"
                   class="p-1 rounded-md text-slate-400 hover:text-[#007AFF] hover:bg-white opacity-70 group-hover/imp:opacity-100 transition shrink-0"
-                  title="编辑此条烙印"
+                  title="编辑"
                 >
                   <Pencil class="w-3 h-3" />
                 </button>
@@ -520,7 +530,7 @@ function requestDelete(id: string) {
                   type="button"
                   @click="deleteImprint(card, impIdx)"
                   class="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 opacity-70 group-hover/imp:opacity-100 transition shrink-0"
-                  title="删除此条烙印"
+                  title="删除"
                 >
                   <Trash2 class="w-3 h-3" />
                 </button>

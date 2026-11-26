@@ -1038,7 +1038,7 @@ impl TerrariumEngine {
             };
 
             if detail.config.agents.is_empty() {
-                self.pause(Some("请至少配置 1 个 AI 智能体".to_string()))
+                self.pause(Some("请至少配置 1 个角色".to_string()))
                     .await;
                 continue;
             }
@@ -1055,7 +1055,7 @@ impl TerrariumEngine {
                 })
                 .await;
                 self.pause(Some(format!(
-                    "已达到目标总轮数 {} 轮，故事自然落幕！可生成《实验结案复盘简报》。",
+                    "已达到目标总轮数 {} 轮，本局已收尾，可生成《复盘报告》。",
                     detail.config.target_total_turns
                 )))
                 .await;
@@ -1068,7 +1068,7 @@ impl TerrariumEngine {
                     >= detail.config.max_consecutive_turns
             {
                 self.pause(Some(format!(
-                    "已达到最大连续运行 {} 轮熔断上限，自动暂停以防额度耗尽",
+                    "连续运行已达 {} 轮上限，已自动暂停",
                     detail.config.max_consecutive_turns
                 )))
                 .await;
@@ -1077,7 +1077,7 @@ impl TerrariumEngine {
 
             if detail.config.token_budget > 0 && detail.total_tokens >= detail.config.token_budget {
                 self.pause(Some(format!(
-                    "已达到单局 Token 预算熔断上限 ({} / {})，自动暂停",
+                    "已达到单局 Token 上限 ({} / {})，自动暂停",
                     detail.total_tokens, detail.config.token_budget
                 )))
                 .await;
@@ -1278,7 +1278,7 @@ impl TerrariumEngine {
                         .await
                         .record_and_check(next_turn);
                     if tripped {
-                        let warn_msg = "记忆压缩防抖动熔断：连续 3 轮内触发 3 次记忆压缩，已自动暂停引擎防止死循环烧钱。请前往「设置 → 调度与安全阀」调大上下文预算窗口。".to_string();
+                        let warn_msg = "防循环自动暂停：连续 3 轮触发 3 次记忆压缩，已自动暂停。请前往「设置 → 外观与调度」调大上下文窗口。".to_string();
                         self.emit(StreamEvent::EngineError {
                             experiment_id: exp_id.clone(),
                             message: warn_msg.clone(),
@@ -2073,7 +2073,7 @@ impl TerrariumEngine {
                                 return Ok(serde_json::json!({
                                     "ok": false,
                                     "status": "rejected_by_creator",
-                                    "message": rej.unwrap_or_else(|| "造物主驳回了本次白板修改，请尊重现状并继续正常发言。".to_string()),
+                                    "message": rej.unwrap_or_else(|| "主持人驳回了本次白板修改，请按当前白板继续发言。".to_string()),
                                     "current_board": current_board,
                                 })
                                 .to_string());

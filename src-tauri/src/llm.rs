@@ -1161,6 +1161,140 @@ where
     })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteModelInfo {
+    pub id: String,
+    #[serde(default)]
+    pub owned_by: String,
+}
+
+pub fn resolve_models_url(base_url: &str) -> String {
+    let mut trimmed = base_url.trim().trim_end_matches('/');
+    if let Some(prefix) = trimmed.strip_suffix("/chat/completions") {
+        trimmed = prefix.trim_end_matches('/');
+    }
+    if trimmed.ends_with("/models") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/models")
+    }
+}
+
+pub fn parse_models_response(val: &Value, strip_google_prefix: bool) -> Vec<RemoteModelInfo> {
+    let items: Option<&Vec<Value>> = val
+        .get("data")
+        .and_then(|v| v.as_array())
+        .or_else(|| val.get("models").and_then(|v| v.as_array()))
+        .or_else(|| val.as_array());
+
+    let Some(arr) = items else {
+        return Vec::new();
+    };
+
+    let mut seen = HashSet::new();
+    let mut collected: Vec<(i64, RemoteModelInfo)> = Vec::new();
+
+    for item in arr {
+        let raw_id = if let Some(s) = item.as_str() {
+            s.trim()
+        } else {
+            item.get("id")
+                .or_else(|| item.get("name"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .unwrap_or("")
+        };
+        if raw_id.is_empty() {
+            continue;
+        }
+        let id = if strip_google_prefix {
+            raw_id.strip_prefix("models/").unwrap_or(raw_id).to_string()
+        } else {
+            raw_id.to_string()
+        };
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let owned_by = item
+            .get("owned_by")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let created = item.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
+        collected.push((created, RemoteModelInfo { id, owned_by }));
+    }
+
+    // Float newly released models (higher `created` timestamp) to the top when available.
+    if collected.iter().any(|(c, _)| *c > 0) {
+        collected.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+    }
+
+    collected.into_iter().map(|(_, info)| info).collect()
+}
+
+pub async fn fetch_provider_models(
+    client: &Client,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<RemoteModelInfo>> {
+    let trimmed_base = base_url.trim();
+    if trimmed_base.is_empty() {
+        return Err(anyhow!("请先填写 Base URL"));
+    }
+    if !trimmed_base.starts_with("http://") && !trimmed_base.starts_with("https://") {
+        return Err(anyhow!("Base URL 必须以 http:// 或 https:// 开头"));
+    }
+
+    let url = resolve_models_url(trimmed_base);
+    let lower_url = url.to_ascii_lowercase();
+    let mut req = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(15));
+
+    let key = api_key.trim();
+    if !key.is_empty() {
+        req = req.bearer_auth(key);
+        if lower_url.contains("anthropic.com") {
+            req = req
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01");
+        }
+    }
+
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("请求模型列表接口失败: {url}"))?;
+
+    let status = resp.status();
+    let body_text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let preview: String = body_text.chars().take(240).collect();
+        let hint = if status.as_u16() == 401 || status.as_u16() == 403 {
+            "（请检查 API Key 是否正确或已填写）"
+        } else {
+            ""
+        };
+        return Err(anyhow!(
+            "拉取模型列表失败 (HTTP {}){}: {}",
+            status.as_u16(),
+            hint,
+            preview.trim()
+        ));
+    }
+
+    let json_val: Value = serde_json::from_str(&body_text)
+        .with_context(|| "接口返回的不是有效的 JSON 格式".to_string())?;
+    let strip_google_prefix = lower_url.contains("generativelanguage.googleapis.com");
+    let models = parse_models_response(&json_val, strip_google_prefix);
+    if models.is_empty() {
+        return Err(anyhow!("接口返回成功，但未解析到可用模型列表"));
+    }
+    Ok(models)
+}
+
 fn estimate_usage(messages: &[ApiChatMessage], completion: &str, reasoning: &str) -> TokenUsage {
     let prompt_chars: usize = messages
         .iter()
@@ -1817,5 +1951,46 @@ mod tests {
 
         let fast_openai = resolve_thinking_params(&cfg, &openai_node, None);
         assert_eq!(fast_openai.reasoning_effort.as_deref(), Some("minimal"));
+    }
+
+    #[test]
+    fn test_resolve_models_url_and_parse_response() {
+        assert_eq!(
+            resolve_models_url("https://api.deepseek.com"),
+            "https://api.deepseek.com/models"
+        );
+        assert_eq!(
+            resolve_models_url("https://api.deepseek.com/v1/"),
+            "https://api.deepseek.com/v1/models"
+        );
+        assert_eq!(
+            resolve_models_url("https://api.openai.com/v1/chat/completions"),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(
+            resolve_models_url("https://open.bigmodel.cn/api/paas/v4/models"),
+            "https://open.bigmodel.cn/api/paas/v4/models"
+        );
+
+        let payload = serde_json::json!({
+            "object": "list",
+            "data": [
+                { "id": "old-model", "created": 1700000000, "owned_by": "vendor" },
+                { "id": "new-model", "created": 1790000000, "owned_by": "vendor" },
+                { "id": "new-model", "created": 1790000000, "owned_by": "vendor" }
+            ]
+        });
+        let parsed = parse_models_response(&payload, false);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, "new-model");
+        assert_eq!(parsed[1].id, "old-model");
+
+        let gemini_payload = serde_json::json!({
+            "data": [
+                { "id": "models/gemini-4-hydrogen", "owned_by": "google" }
+            ]
+        });
+        let parsed_gemini = parse_models_response(&gemini_payload, true);
+        assert_eq!(parsed_gemini[0].id, "gemini-4-hydrogen");
     }
 }

@@ -81,7 +81,7 @@ defineExpose({ refresh });
             class="my-4 p-3.5 rounded-xl bg-slate-50 border border-blue-200 break-inside-avoid"
           >
             <div class="text-[11px] font-semibold text-blue-700 mb-1">
-              🔭 观察员阶段手记 · {{ item.meta }}
+              分析笔记 · {{ item.meta }}
             </div>
             <div class="text-[12.5px] leading-relaxed text-slate-700">{{ item.content }}</div>
           </div>
@@ -96,7 +96,7 @@ defineExpose({ refresh });
             "
           >
             <div class="text-[11px] font-semibold opacity-80 mb-0.5">
-              {{ item.kind === "god_system" ? "🌐 环境旁白" : "👤 路人插话" }}
+              {{ item.kind === "god_system" ? "场景事件" : "外部插话" }}
             </div>
             <div class="text-[13px] leading-relaxed whitespace-pre-wrap">{{ item.content }}</div>
           </div>
@@ -139,7 +139,7 @@ defineExpose({ refresh });
       </main>
 
       <footer class="mt-8 pt-3 border-t border-slate-200 text-[11px] text-slate-400">
-        AI Terrarium · 纯享剧本模式存档
+        AI Terrarium · 剧本导出
       </footer>
     </template>
   </div>

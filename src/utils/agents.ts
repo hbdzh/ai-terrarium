@@ -2,23 +2,23 @@ import type { NodeConfig } from "../types";
 
 export function effectiveAgentLabel(agent: Pick<NodeConfig, "label">, idx: number): string {
   const trimmed = agent.label.trim();
-  return trimmed || `智能体 ${idx + 1}`;
+  return trimmed || `角色 ${idx + 1}`;
 }
 
 export function nextUniqueAgentLabel(agents: Pick<NodeConfig, "label">[]): string {
   const used = new Set(agents.map((a, idx) => effectiveAgentLabel(a, idx)));
   let n = agents.length + 1;
-  while (used.has(`智能体 ${n}`)) {
+  while (used.has(`角色 ${n}`)) {
     n += 1;
   }
   // Also fill gaps from 1 upwards if length+1 was already taken or start from 1?
   // Checking 1..N first gives intuitive numbering when gaps exist, fallback to next n:
   for (let i = 1; i <= agents.length + 1; i += 1) {
-    if (!used.has(`智能体 ${i}`)) {
-      return `智能体 ${i}`;
+    if (!used.has(`角色 ${i}`)) {
+      return `角色 ${i}`;
     }
   }
-  return `智能体 ${n}`;
+  return `角色 ${n}`;
 }
 
 export function duplicateLabelSet(agents: Pick<NodeConfig, "label">[]): Set<string> {
@@ -49,7 +49,7 @@ export function disambiguateAgentLabel(
   agents: Pick<NodeConfig, "label">[],
   ignoreIdx: number
 ): string {
-  const base = desired.trim() || `智能体 ${ignoreIdx + 1}`;
+  const base = desired.trim() || `角色 ${ignoreIdx + 1}`;
   const others = new Set(
     agents
       .map((a, idx) => (idx === ignoreIdx ? null : effectiveAgentLabel(a, idx)))

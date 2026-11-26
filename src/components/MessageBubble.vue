@@ -123,7 +123,7 @@ const thinkingSummary = computed(() => {
     return `思考用时 ${(props.reasoningElapsedMs / 1000).toFixed(1)}s`;
   }
   const chars = props.reasoningContent.trim().length;
-  return `幕后心声（${chars} 字）`;
+  return `思考过程（${chars} 字）`;
 });
 
 const agentInitial = computed(() => {
@@ -202,9 +202,9 @@ function submitEditReplay() {
         <span
           v-if="roomId && roomId !== 'main'"
           class="px-1.5 py-0.5 rounded-md bg-violet-100/90 text-violet-700 text-[10px] font-medium shrink-0"
-          title="仅该私密房间成员互相可见"
+          title="仅私聊成员可见"
         >
-          里屋私聊
+          私聊
         </span>
         <span class="font-mono text-[11px] text-slate-400 truncate max-w-[140px] sm:max-w-[220px]">{{ modelName }}</span>
         <template v-if="isStreaming">
@@ -258,7 +258,7 @@ function submitEditReplay() {
                   class="flex items-center gap-2.5 px-3 py-2.5 rounded-xl cursor-pointer outline-none hover:bg-blue-50 hover:text-[#007AFF] focus:bg-blue-50 focus:text-[#007AFF]"
                 >
                   <GitBranch class="w-4 h-4" />
-                  <span>从此处分叉平行宇宙</span>
+                  <span>从此处分叉世界线</span>
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   @select="startEdit"
@@ -373,7 +373,7 @@ function submitEditReplay() {
             type="button"
             @click="emit('fork', { turnNumber, messageId: messageId ?? null })"
             class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-[#007AFF] hover:bg-blue-50/70 transition-colors"
-            title="从此处分叉平行宇宙"
+            title="从此处分叉世界线"
           >
             <GitBranch class="w-3.5 h-3.5" />
           </button>

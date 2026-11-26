@@ -17,6 +17,7 @@ const props = withDefaults(
     showCount?: boolean;
     triggerLabel?: string;
     iconOnly?: boolean;
+    compact?: boolean;
   }>(),
   {
     cards: () => [],
@@ -24,6 +25,7 @@ const props = withDefaults(
     showCount: true,
     triggerLabel: "角色库",
     iconOnly: false,
+    compact: false,
   }
 );
 
@@ -72,8 +74,11 @@ function choose(card: CharacterCard) {
     <PopoverTrigger as-child>
       <button
         type="button"
-        class="flex items-center justify-center gap-1.5 rounded-xl text-[12px] font-medium bg-[#F7F7F9] hover:bg-[#EFEFF4] text-slate-700 border border-black/[0.06] transition-colors outline-none data-[state=open]:bg-[#EAEAEF] data-[state=open]:border-black/[0.12]"
-        :class="iconOnly ? 'w-9 h-9' : 'h-9 px-3'"
+        class="flex items-center justify-center gap-1.5 text-[12px] font-medium bg-[#F5F5F7] hover:bg-[#EAEAEF] text-slate-700 border border-black/[0.08] transition-colors outline-none data-[state=open]:bg-[#EAEAEF] data-[state=open]:border-black/[0.15]"
+        :class="[
+          compact ? 'rounded-lg' : 'rounded-xl',
+          iconOnly ? (compact ? 'w-8 h-8' : 'w-9 h-9') : (compact ? 'h-8 px-2.5' : 'h-9 px-3'),
+        ]"
         :title="triggerLabel"
       >
         <BookUser class="w-3.5 h-3.5 text-slate-500 shrink-0" />
@@ -112,7 +117,7 @@ function choose(card: CharacterCard) {
           @click="emit('update:inheritMemory', !inheritMemory)"
           class="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg hover:bg-black/[0.05] transition-colors text-left outline-none"
         >
-          <span class="text-[12px] font-medium text-slate-700">附带过往记忆烙印</span>
+          <span class="text-[12px] font-medium text-slate-700">附带经历记忆</span>
           <span
             class="w-4 h-4 rounded-[5px] flex items-center justify-center transition-colors shrink-0"
             :class="
@@ -131,7 +136,7 @@ function choose(card: CharacterCard) {
           v-if="filteredCards.length === 0"
           class="py-5 px-3 text-center text-[11.5px] text-slate-400 leading-relaxed"
         >
-          {{ cards.length === 0 ? "角色库暂无存档，可在《实验结案复盘简报》中一键存入。" : "未找到匹配的灵魂角色" }}
+          {{ cards.length === 0 ? "角色库暂无存档，可在复盘报告中保存角色。" : "未找到匹配的角色" }}
         </div>
 
         <div v-else class="max-h-[256px] overflow-y-auto space-y-0.5 pr-0.5">

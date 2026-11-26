@@ -8,15 +8,16 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::models::{
-    builtin_character_cards, builtin_presets, is_pass_notice, ActivePrivateRoom, BoardApprovalMode,
-    CharacterCard, CrisisCard, ExperimentConfig, ExperimentDetail, ExperimentSummary, ObserverNote,
-    PresetTemplate, RelationshipEdge, SpeakerRole, TimelineMessage, TurnSnapshot, UiPrefs,
-    DEFAULT_CORE_ENGINE_PROMPT, LEGACY_CORE_ENGINE_PROMPT,
+    builtin_character_cards, builtin_presets, is_pass_notice, ActivePrivateRoom, ApiProfile,
+    BoardApprovalMode, CharacterCard, CrisisCard, ExperimentConfig, ExperimentDetail,
+    ExperimentSummary, ObserverNote, PresetTemplate, RelationshipEdge, SpeakerRole,
+    TimelineMessage, TurnSnapshot, UiPrefs, DEFAULT_CORE_ENGINE_PROMPT, LEGACY_CORE_ENGINE_PROMPT,
 };
 use crate::sanitizer::strip_think_tags;
 
 const CORE_ENGINE_PROMPT_KEY: &str = "core_engine_prompt";
 const UI_PREFS_KEY: &str = "ui_prefs";
+const API_PROFILES_KEY: &str = "api_profiles";
 const BUILTIN_PRESETS_VERSION_KEY: &str = "builtin_presets_version";
 const CURRENT_BUILTIN_PRESETS_VERSION: &str = "5";
 
@@ -540,6 +541,66 @@ impl Database {
             params![UI_PREFS_KEY, json, now],
         )?;
         Ok(())
+    }
+
+    pub fn get_api_profiles(&self) -> Result<Vec<ApiProfile>> {
+        let conn = self.conn.lock().unwrap();
+        let val: Option<String> = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                params![API_PROFILES_KEY],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(json) = val {
+            if let Ok(profiles) = serde_json::from_str::<Vec<ApiProfile>>(&json) {
+                return Ok(profiles);
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    pub fn save_api_profiles(&self, profiles: &[ApiProfile]) -> Result<Vec<ApiProfile>> {
+        let now = Utc::now().to_rfc3339();
+        let mut normalized: Vec<ApiProfile> = profiles
+            .iter()
+            .enumerate()
+            .map(|(idx, p)| ApiProfile {
+                id: if p.id.trim().is_empty() {
+                    format!("api-{}", Uuid::new_v4().simple())
+                } else {
+                    p.id.trim().to_string()
+                },
+                name: if p.name.trim().is_empty() {
+                    format!("API 配置 {}", idx + 1)
+                } else {
+                    p.name.trim().to_string()
+                },
+                base_url: p.base_url.trim().to_string(),
+                api_key: p.api_key.trim().to_string(),
+                model_name: p.model_name.trim().to_string(),
+            })
+            .collect();
+        if normalized.is_empty() {
+            normalized.push(ApiProfile {
+                id: "default".to_string(),
+                name: "默认 API".to_string(),
+                base_url: "https://api.deepseek.com".to_string(),
+                api_key: String::new(),
+                model_name: "deepseek-flash".to_string(),
+            });
+        }
+        let json = serde_json::to_string(&normalized)?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at",
+            params![API_PROFILES_KEY, json, now],
+        )?;
+        Ok(normalized)
     }
 
     pub fn list_presets(&self) -> Result<Vec<PresetTemplate>> {

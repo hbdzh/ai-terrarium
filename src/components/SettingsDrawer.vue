@@ -2,80 +2,102 @@
 import { computed, ref, watch } from "vue";
 import {
   X,
-  Copy,
-  Sparkles,
-  Plus,
-  Trash2,
   Download,
   Upload,
-  RotateCcw,
-  Save,
-  ChevronDown,
-  ChevronRight,
-  FileText,
-  Cpu,
+  KeyRound,
   Telescope,
-  SlidersHorizontal,
-  BookmarkPlus,
+  Clock,
+  MessageCircle,
+  Cpu,
   Sun,
-  Moon,
-  Monitor,
+  Check,
 } from "lucide-vue-next";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
-import type { CharacterCard, ExperimentConfig, NodeConfig, PresetTemplate, ThemePreference } from "../types";
+import type { ApiProfile, ExperimentConfig, NodeConfig, ThemePreference } from "../types";
 import { triggerHaptic } from "../utils/native";
+import {
+  applyApiProfileToNode,
+  cloneNormalizedConfig,
+  normalizeThinkingLevel,
+  resolveNodeApiProfileId,
+  syncConfigWithApiProfiles,
+} from "../utils/config";
 import { themePreference, setThemePreference } from "../utils/theme";
 import { MECHANIC_DESCRIPTIONS } from "../constants/mechanicDescriptions";
-import {
-  disambiguateAgentLabel,
-  duplicateLabelSet,
-  effectiveAgentLabel,
-  findDuplicateAgentLabel,
-  nextUniqueAgentLabel,
-} from "../utils/agents";
 import AdaptiveModal from "./ui/AdaptiveModal.vue";
-import CharacterLibraryPopover from "./CharacterLibraryPopover.vue";
-import ExperimentTagsPicker from "./ExperimentTagsPicker.vue";
+import ModelSelector from "./ui/ModelSelector.vue";
 import RangeSlider from "./ui/RangeSlider.vue";
 import ToggleSwitch from "./ui/ToggleSwitch.vue";
 import {
+  DEFAULT_BASE_URL,
+  DEFAULT_MODEL_NAME,
+  PROVIDER_PRESETS,
+  isKeylessFriendlyEndpoint,
+} from "../constants/providers";
+import { fetchProviderModels, normalizeBaseUrl } from "../utils/modelCache";
+import {
   applyTagLocksToMechanics,
   getLockedMechanics,
-  toggleExperimentTag,
 } from "../constants/experimentTags";
-import type { MechanicKey } from "../constants/mechanicDescriptions";
 
 const props = defineProps<{
   open: boolean;
   config: ExperimentConfig | null;
-  presets: PresetTemplate[];
-  characterCards?: CharacterCard[];
+  apiProfiles: ApiProfile[];
 }>();
 
 const emit = defineEmits<{
   close: [];
   save: [config: ExperimentConfig];
-  savePreset: [preset: PresetTemplate];
-  resetPreset: [presetId: string];
-  deletePreset: [presetId: string];
-  deleteCharacterCard: [cardId: string];
-  saveCharacterCard: [payload: { agentId: string; label: string; systemPrompt: string }];
+  saveApiProfiles: [profiles: ApiProfile[]];
   notify: [message: string];
 }>();
 
 const draft = ref<ExperimentConfig | null>(null);
 const initialSnapshot = ref("");
-const activeTab = ref<"script" | "agents" | "observer" | "safety">("script");
-const selectedAgentIdx = ref(0);
-const inheritCardMemory = ref(true);
-const saveAsPresetOpen = ref(false);
-const newPresetName = ref("");
-const corePromptOpen = ref(false);
+const profilesDraft = ref<ApiProfile[]>([]);
+const initialProfilesSnapshot = ref("");
+const activeTab = ref<"api" | "observer" | "schedule" | "behavior" | "resources" | "appearance">("api");
+const selectedProfileIdx = ref(0);
 const corePromptDraft = ref("");
 const corePromptInitial = ref("");
 const corePromptSaving = ref(false);
 const confirmDiscardOpen = ref(false);
+
+const navTabs = [
+  { id: "api", label: "模型与 API", icon: KeyRound },
+  { id: "observer", label: "观察与分析", icon: Telescope },
+  { id: "schedule", label: "推演与调度", icon: Clock },
+  { id: "behavior", label: "对话与行为", icon: MessageCircle },
+  { id: "resources", label: "性能与资源", icon: Cpu },
+  { id: "appearance", label: "外观", icon: Sun },
+] as const;
+
+function providerBadgeMeta(id: string): { letter: string; bg: string; fg: string } {
+  switch (id) {
+    case "deepseek":
+      return { letter: "D", bg: "#ECE8FA", fg: "#6B57B5" };
+    case "dashscope":
+      return { letter: "Q", bg: "#FAF0E1", fg: "#B97D2E" };
+    case "moonshot":
+      return { letter: "K", bg: "#EAF0FA", fg: "#4B6EB5" };
+    case "volces":
+      return { letter: "豆", bg: "#EBE8F7", fg: "#6E5BB0" };
+    case "openai":
+      return { letter: "O", bg: "#FAF0E1", fg: "#B97D2E" };
+    case "gemini":
+      return { letter: "G", bg: "#EAF0FA", fg: "#4B6EB5" };
+    case "zhipu":
+      return { letter: "智", bg: "#EBE8F7", fg: "#6E5BB0" };
+    case "minimax":
+      return { letter: "M", bg: "#FAF0E1", fg: "#B97D2E" };
+    case "openrouter":
+      return { letter: "R", bg: "#EAF0FA", fg: "#4B6EB5" };
+    default:
+      return { letter: "+", bg: "#F2F2F5", fg: "#666B76" };
+  }
+}
 
 async function loadCoreEnginePrompt() {
   try {
@@ -119,83 +141,67 @@ async function resetCoreEnginePrompt() {
   }
 }
 
-const providerQuickUrls = [
-  { name: "DeepSeek", url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+const providerSlots = [
+  ...PROVIDER_PRESETS.map((p) => ({
+    id: p.id,
+    name: p.name,
+    url: p.url,
+    model: p.model,
+  })),
   {
-    name: "阿里云百炼 (Qwen)",
-    url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    model: "qwen-plus",
-  },
-  {
-    name: "月之暗面 (Kimi)",
-    url: "https://api.moonshot.cn/v1",
-    model: "moonshot-v1-8k",
-  },
-  {
-    name: "火山引擎 (豆包)",
-    url: "https://ark.cn-beijing.volces.com/api/v3",
-    model: "doubao-pro-32k",
-  },
-  {
-    name: "OpenAI",
-    url: "https://api.openai.com/v1",
-    model: "gpt-4o-mini",
+    id: "custom",
+    name: "自定义",
+    url: "",
+    model: "",
   },
 ];
 
-const thinkingLevelOptions = [
-  { value: "default", label: "模型默认" },
-  { value: "off", label: "关闭" },
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
-] as const;
+function buildProviderProfiles(existing: ApiProfile[]): ApiProfile[] {
+  return providerSlots.map((slot) => {
+    const matched =
+      existing.find((p) => p.id === slot.id) ??
+      (slot.url
+        ? existing.find((p) => normalizeBaseUrl(p.baseUrl) === normalizeBaseUrl(slot.url))
+        : existing.find(
+            (p) => !PROVIDER_PRESETS.some((pr) => normalizeBaseUrl(pr.url) === normalizeBaseUrl(p.baseUrl))
+          ));
+    return {
+      id: slot.id,
+      name: slot.name,
+      baseUrl: matched?.baseUrl || slot.url,
+      apiKey: matched?.apiKey || "",
+      modelName: matched?.modelName || slot.model,
+    };
+  });
+}
 
-function normalizeThinkingLevel(raw: unknown): string {
-  const s = typeof raw === "string" ? raw.trim().toLowerCase() : "";
-  return s === "off" || s === "low" || s === "medium" || s === "high" || s === "default"
-    ? s
-    : "default";
+function configuredProfilesList(list: ApiProfile[]): ApiProfile[] {
+  const ready = list.filter(
+    (p) => p.apiKey.trim().length > 0 || (p.baseUrl.trim().length > 0 && isKeylessFriendlyEndpoint(p.baseUrl))
+  );
+  if (ready.length > 0) return ready;
+  const current = list[selectedProfileIdx.value] ?? list[0];
+  return current ? [current] : [];
 }
 
 watch(
   () => props.open,
   (isOpen) => {
     if (isOpen && props.config) {
-      const cloned: ExperimentConfig = JSON.parse(JSON.stringify(props.config));
-      cloned.globalSystemPrompt = cloned.globalSystemPrompt ?? "";
-      cloned.tokenBudget = cloned.tokenBudget ?? 0;
-      cloned.contextWindowTokens = cloned.contextWindowTokens ?? 32000;
-      cloned.compactionThresholdPct = cloned.compactionThresholdPct ?? 80;
-      cloned.boardApprovalMode = cloned.boardApprovalMode ?? "auto";
-      cloned.enableBoardTools = cloned.enableBoardTools ?? true;
-      cloned.initialBoard = cloned.initialBoard ?? "";
-      cloned.enablePrefixCacheOpt = cloned.enablePrefixCacheOpt ?? true;
-      cloned.enableCompactionGuard = cloned.enableCompactionGuard ?? true;
-      cloned.enablePrivateNotes = cloned.enablePrivateNotes ?? false;
-      cloned.enableSmartSelector = cloned.enableSmartSelector ?? true;
-      cloned.enableAdaptiveReasoning = cloned.enableAdaptiveReasoning ?? false;
-      cloned.adaptiveLowReasoningEffort = cloned.adaptiveLowReasoningEffort ?? "low";
-      cloned.enablePeriodicReflection = cloned.enablePeriodicReflection ?? false;
-      cloned.enableAutoDirector = cloned.enableAutoDirector ?? false;
-      cloned.enableNarrativeArc = cloned.enableNarrativeArc ?? false;
-      cloned.tags = Array.isArray(cloned.tags) ? [...cloned.tags] : [];
-      cloned.targetTotalTurns = cloned.targetTotalTurns ?? 30;
-      cloned.allowPassTurn = cloned.allowPassTurn ?? false;
-      cloned.randomMoodDice = cloned.randomMoodDice ?? false;
-      cloned.intuitiveFastReply = cloned.intuitiveFastReply ?? false;
-      cloned.agents = (cloned.agents ?? []).map((a) => ({
-        ...a,
-        thinkingLevel: normalizeThinkingLevel(a.thinkingLevel),
-      }));
+      const built = buildProviderProfiles(props.apiProfiles);
+      profilesDraft.value = built;
+      initialProfilesSnapshot.value = JSON.stringify(built);
+
+      const cloned = cloneNormalizedConfig(props.config);
+      const activeList = configuredProfilesList(built);
       if (cloned.nodeC) {
-        cloned.nodeC.thinkingLevel = normalizeThinkingLevel(cloned.nodeC.thinkingLevel);
+        cloned.nodeC.apiProfileId = resolveNodeApiProfileId(cloned.nodeC, activeList);
       }
       draft.value = cloned;
       initialSnapshot.value = JSON.stringify(cloned);
-      selectedAgentIdx.value = 0;
-      saveAsPresetOpen.value = false;
-      newPresetName.value = "";
+
+      const firstReadyIdx = built.findIndex((p) => p.apiKey.trim().length > 0);
+      selectedProfileIdx.value = firstReadyIdx >= 0 ? firstReadyIdx : 0;
       confirmDiscardOpen.value = false;
       loadCoreEnginePrompt();
     }
@@ -203,126 +209,36 @@ watch(
   { immediate: true }
 );
 
-const duplicateLabels = computed(() =>
-  draft.value ? duplicateLabelSet(draft.value.agents) : new Set<string>()
-);
-
 const isDirty = computed(() => {
   const draftChanged =
     Boolean(draft.value) && JSON.stringify(draft.value) !== initialSnapshot.value;
+  const profilesChanged =
+    JSON.stringify(profilesDraft.value) !== initialProfilesSnapshot.value;
   const coreChanged = corePromptDraft.value !== corePromptInitial.value;
-  return draftChanged || coreChanged;
+  return draftChanged || profilesChanged || coreChanged;
 });
 
-const currentAgent = computed<NodeConfig | null>(() => {
-  if (!draft.value || draft.value.agents.length === 0) return null;
-  const idx = Math.min(selectedAgentIdx.value, draft.value.agents.length - 1);
-  return draft.value.agents[idx];
+const currentProfile = computed<ApiProfile | null>(() => {
+  if (profilesDraft.value.length === 0) return null;
+  const idx = Math.min(selectedProfileIdx.value, profilesDraft.value.length - 1);
+  return profilesDraft.value[idx];
 });
 
-function openSaveAsPreset() {
-  newPresetName.value = "";
-  saveAsPresetOpen.value = true;
+const selectableProfiles = computed(() => configuredProfilesList(profilesDraft.value));
+
+function maybePrefetchModels(target: Pick<ApiProfile, "baseUrl" | "apiKey">) {
+  const url = target.baseUrl.trim();
+  if (!url.startsWith("http://") && !url.startsWith("https://")) return;
+  if (!target.apiKey.trim() && !isKeylessFriendlyEndpoint(url)) return;
+  void fetchProviderModels(url, target.apiKey, false).catch(() => {});
 }
 
-function confirmSaveAsPreset() {
-  if (!draft.value) return;
-  const currentAgents = draft.value.agents;
-  const preset: PresetTemplate = {
-    id: "",
-    name: newPresetName.value.trim() || "新建自定义场景",
-    description: "由当前实验设定保存的场景预设模板",
-    globalSystemPrompt: draft.value.globalSystemPrompt ?? "",
-    initialTopic: draft.value.initialTopic ?? "",
-    tags: [...(draft.value.tags ?? [])],
-    agentPrompts: currentAgents.map((a) => ({
-      label: a.label,
-      systemPrompt: a.systemPrompt,
-    })),
-    isBuiltin: false,
-    nodeALabel: currentAgents[0]?.label || "智能体 1",
-    nodeAPrompt: currentAgents[0]?.systemPrompt || "",
-    nodeBLabel: currentAgents[1]?.label || "智能体 2",
-    nodeBPrompt: currentAgents[1]?.systemPrompt || "",
-  };
-  emit("savePreset", preset);
-  saveAsPresetOpen.value = false;
-  newPresetName.value = "";
-  emit("notify", `已将当前设定存为新预设「${preset.name}」`);
-}
-
-function onCustomPromptEdit() {
-  if (!draft.value) return;
-  if (draft.value.presetId === "free") {
-    draft.value.presetId = "custom";
+function selectObserverProfile(profileId: string) {
+  if (!draft.value?.nodeC) return;
+  const prof = selectableProfiles.value.find((p) => p.id === profileId);
+  if (prof) {
+    applyApiProfileToNode(draft.value.nodeC, prof);
   }
-}
-
-function addAgent() {
-  if (!draft.value) return;
-  const first = draft.value.agents[0];
-  const label = nextUniqueAgentLabel(draft.value.agents);
-  const newId = `ai-${Date.now().toString(36)}-${draft.value.agents.length + 1}`;
-  draft.value.agents.push({
-    id: newId,
-    label,
-    baseUrl: first?.baseUrl || "https://api.deepseek.com/v1",
-    apiKey: first?.apiKey || "",
-    modelName: first?.modelName || "deepseek-chat",
-    temperature: 0.9,
-    thinkingLevel: "default",
-    systemPrompt: "",
-  });
-  selectedAgentIdx.value = draft.value.agents.length - 1;
-}
-
-function removeAgent(idx: number) {
-  if (!draft.value || draft.value.agents.length <= 2) return;
-  draft.value.agents.splice(idx, 1);
-  if (selectedAgentIdx.value >= draft.value.agents.length) {
-    selectedAgentIdx.value = draft.value.agents.length - 1;
-  }
-}
-
-function copyCredentialsFromFirst(target: NodeConfig) {
-  if (!draft.value || !draft.value.agents[0]) return;
-  const first = draft.value.agents[0];
-  target.baseUrl = first.baseUrl;
-  target.apiKey = first.apiKey;
-  if (!target.modelName) {
-    target.modelName = first.modelName;
-  }
-}
-
-function applyProvider(target: NodeConfig, url: string, model: string) {
-  target.baseUrl = url;
-  target.modelName = model;
-}
-
-function importCharacterCardToAgent(target: NodeConfig, card: CharacterCard) {
-  if (!draft.value) return;
-  const idx = draft.value.agents.indexOf(target);
-  const assignedLabel = disambiguateAgentLabel(card.name, draft.value.agents, idx);
-  target.label = assignedLabel;
-  const parts = [card.basePrompt.trim()];
-  if (inheritCardMemory.value) {
-    if (card.behaviorTraits.trim()) {
-      parts.push(`【跨世界博弈特质】\n${card.behaviorTraits.trim()}`);
-    }
-    if (card.memoryImprints && card.memoryImprints.length > 0) {
-      parts.push(
-        `【跨宇宙记忆烙印】\n${card.memoryImprints.map((m) => `- ${m}`).join("\n")}`
-      );
-    }
-  }
-  target.systemPrompt = parts.filter(Boolean).join("\n\n");
-  onCustomPromptEdit();
-  emit(
-    "notify",
-    assignedLabel === card.name
-      ? `已将灵魂角色「${card.name}」导入当前槽位`
-      : `为避免重名，已将「${card.name}」命名为「${assignedLabel}」`
-  );
 }
 
 async function exportConfigJson() {
@@ -355,8 +271,7 @@ async function triggerImportJson() {
       throw new Error("无效的 JSON 对象");
     }
     draft.value = normalizeImportedConfig(parsed);
-    selectedAgentIdx.value = 0;
-    emit("notify", `已导入 ${draft.value.agents.length} 个 AI 节点配置，点击「保存配置」生效`);
+    emit("notify", `已导入 ${draft.value.agents.length} 个角色配置，点击「保存配置」生效`);
   } catch (err: any) {
     emit("notify", `导入失败：${err?.message ?? "JSON 格式无效"}`);
   }
@@ -367,9 +282,9 @@ function normalizeImportedConfig(raw: any): ExperimentConfig {
   const normalizeNode = (n: any, fallbackId: string, fallbackLabel: string): NodeConfig => ({
     id: typeof n?.id === "string" && n.id.trim() ? n.id.trim() : fallbackId,
     label: typeof n?.label === "string" && n.label.trim() ? n.label.trim() : fallbackLabel,
-    baseUrl: typeof n?.baseUrl === "string" ? n.baseUrl : "https://api.deepseek.com/v1",
+    baseUrl: typeof n?.baseUrl === "string" ? n.baseUrl : DEFAULT_BASE_URL,
     apiKey: typeof n?.apiKey === "string" ? n.apiKey : "",
-    modelName: typeof n?.modelName === "string" ? n.modelName : "deepseek-chat",
+    modelName: typeof n?.modelName === "string" ? n.modelName : DEFAULT_MODEL_NAME,
     temperature:
       typeof n?.temperature === "number" && !Number.isNaN(n.temperature)
         ? Math.min(2, Math.max(0, n.temperature))
@@ -381,11 +296,11 @@ function normalizeImportedConfig(raw: any): ExperimentConfig {
   let agents: NodeConfig[] = [];
   if (Array.isArray(raw?.agents) && raw.agents.length > 0) {
     agents = raw.agents.map((a: any, i: number) =>
-      normalizeNode(a, `ai-${i + 1}`, `智能体 ${i + 1}`)
+      normalizeNode(a, `ai-${i + 1}`, `角色 ${i + 1}`)
     );
   } else if (raw?.nodeA || raw?.nodeB) {
-    if (raw.nodeA) agents.push(normalizeNode(raw.nodeA, "AiA", "智能体 1"));
-    if (raw.nodeB) agents.push(normalizeNode(raw.nodeB, "AiB", "智能体 2"));
+    if (raw.nodeA) agents.push(normalizeNode(raw.nodeA, "AiA", "角色 1"));
+    if (raw.nodeB) agents.push(normalizeNode(raw.nodeB, "AiB", "角色 2"));
   }
   if (agents.length === 0) {
     agents = JSON.parse(JSON.stringify(fallback.agents));
@@ -495,37 +410,12 @@ function normalizeImportedConfig(raw: any): ExperimentConfig {
         : (fallback.intuitiveFastReply ?? false),
     agents,
     nodeC: raw?.nodeC
-      ? normalizeNode(raw.nodeC, "observer", "观察员 C")
+      ? normalizeNode(raw.nodeC, "observer", "局势分析")
       : JSON.parse(JSON.stringify(fallback.nodeC)),
   };
 }
 
 const lockedMechanics = computed(() => getLockedMechanics(draft.value?.tags ?? []));
-
-function handleToggleTag(tagId: string) {
-  if (!draft.value) return;
-  const currentMech: Record<MechanicKey, boolean> = {
-    intuitiveFastReply: Boolean(draft.value.intuitiveFastReply),
-    allowPassTurn: Boolean(draft.value.allowPassTurn),
-    randomMoodDice: Boolean(draft.value.randomMoodDice),
-    enablePrivateNotes: Boolean(draft.value.enablePrivateNotes),
-    enableBoardTools: draft.value.enableBoardTools ?? true,
-    enableSmartSelector: draft.value.enableSmartSelector ?? true,
-  };
-  const res = toggleExperimentTag(draft.value.tags ?? [], tagId, currentMech);
-  draft.value.tags = res.tags;
-  draft.value.intuitiveFastReply = res.mechanics.intuitiveFastReply;
-  draft.value.allowPassTurn = res.mechanics.allowPassTurn;
-  draft.value.randomMoodDice = res.mechanics.randomMoodDice;
-  draft.value.enablePrivateNotes = res.mechanics.enablePrivateNotes;
-  draft.value.enableBoardTools = res.mechanics.enableBoardTools;
-  draft.value.enableSmartSelector = res.mechanics.enableSmartSelector;
-}
-
-function handleClearTags() {
-  if (!draft.value) return;
-  draft.value.tags = [];
-}
 
 async function handleSave() {
   if (!draft.value) return;
@@ -543,22 +433,23 @@ async function handleSave() {
   draft.value.enablePrivateNotes = patchedMech.enablePrivateNotes;
   draft.value.enableBoardTools = patchedMech.enableBoardTools;
   draft.value.enableSmartSelector = patchedMech.enableSmartSelector;
-  const dup = findDuplicateAgentLabel(draft.value.agents);
-  if (dup) {
-    activeTab.value = "script";
-    confirmDiscardOpen.value = false;
-    emit("notify", `角色名称「${dup}」存在重复，请修改后再保存`);
-    return;
-  }
-  draft.value.agents.forEach((a, idx) => {
-    a.label = effectiveAgentLabel(a, idx);
-  });
+
+  const normalizedProfiles: ApiProfile[] = configuredProfilesList(profilesDraft.value).map((p) => ({
+    id: p.id,
+    name: p.name,
+    baseUrl: p.baseUrl.trim() || DEFAULT_BASE_URL,
+    apiKey: p.apiKey.trim(),
+    modelName: p.modelName.trim() || DEFAULT_MODEL_NAME,
+  }));
+
+  const syncedConfig = syncConfigWithApiProfiles(draft.value, normalizedProfiles);
   if (corePromptDraft.value !== corePromptInitial.value) {
     await saveCoreEnginePrompt();
   }
   confirmDiscardOpen.value = false;
   triggerHaptic("confirm");
-  emit("save", draft.value);
+  emit("saveApiProfiles", normalizedProfiles);
+  emit("save", syncedConfig);
   emit("close");
 }
 
@@ -627,20 +518,15 @@ defineExpose({
 
         <div class="px-4 pb-2.5 flex gap-1.5 overflow-x-auto no-scrollbar">
           <button
-            v-for="tab in [
-              { id: 'script', label: '本局剧本' },
-              { id: 'agents', label: `模型与 API (${draft.agents.length})` },
-              { id: 'observer', label: '观察员 C' },
-              { id: 'safety', label: '外观与调度' },
-            ]"
+            v-for="tab in navTabs"
             :key="tab.id"
             type="button"
-            @click="triggerHaptic('light'); activeTab = tab.id as any"
+            @click="triggerHaptic('light'); activeTab = tab.id"
             class="h-8 px-3.5 rounded-full text-[12.5px] font-medium transition-colors shrink-0"
             :class="
               activeTab === tab.id
-                ? 'bg-[#1D1D1F] text-white'
-                : 'bg-[#F2F2F7] text-slate-600 hover:bg-[#EAEAEF]'
+                ? 'bg-[#242426] text-white'
+                : 'bg-[#F2F2F5] text-[#666B76] hover:bg-[#EFEFF2]'
             "
           >
             {{ tab.label }}
@@ -649,37 +535,36 @@ defineExpose({
       </div>
     </template>
 
-    <!-- Body: ChatGPT / macOS Settings Clean 2-Pane Split on Desktop, Inset Grouped Cards on Mobile -->
-    <div v-if="draft" class="flex-1 min-h-0 flex overflow-hidden bg-[#F2F2F7] md:bg-white">
+    <!-- Body: Clean 2-Pane Split on Desktop -->
+    <div v-if="draft" class="flex-1 min-h-0 flex overflow-hidden bg-[#F6F6F8] md:bg-white">
       <!-- Desktop Full-Height Left Nav (>= md) -->
-      <nav class="hidden md:flex md:w-[212px] shrink-0 flex-col justify-between bg-[#F7F7F8] border-r border-black/[0.06] p-3 select-none">
+      <nav class="hidden md:flex md:w-[216px] shrink-0 flex-col justify-between bg-[#F6F6F8] border-r border-[#ECECF0] p-3 select-none">
         <div class="space-y-4">
           <div class="px-2.5 pt-1.5 flex items-center justify-between">
-            <span class="text-[15px] font-semibold text-[#1D1D1F] tracking-tight">设置</span>
+            <span class="text-[15px] font-semibold text-[#25262A] tracking-tight">设置</span>
           </div>
 
           <div class="space-y-0.5">
             <button
-              v-for="tab in [
-                { id: 'script', label: '本局剧本与角色', icon: FileText },
-                { id: 'agents', label: `模型与 API (${draft.agents.length})`, icon: Cpu },
-                { id: 'observer', label: '观察员 C', icon: Telescope },
-                { id: 'safety', label: '外观、调度与安全阀', icon: SlidersHorizontal },
-              ]"
+              v-for="tab in navTabs"
               :key="tab.id"
               type="button"
-              @click="activeTab = tab.id as any"
-              class="w-full h-9 flex items-center gap-2.5 px-2.5 rounded-[10px] text-[13px] transition-colors text-left outline-none"
+              @click="activeTab = tab.id"
+              class="relative w-full h-9 flex items-center gap-2.5 px-3 rounded-[9px] text-[13px] transition-colors text-left outline-none"
               :class="
                 activeTab === tab.id
-                  ? 'bg-black/[0.065] text-[#1D1D1F] font-medium'
-                  : 'text-slate-600 font-normal hover:bg-black/[0.035] hover:text-[#1D1D1F]'
+                  ? 'bg-[#EFEFF2] text-[#25262A] font-medium'
+                  : 'text-[#666B76] font-normal hover:bg-black/[0.035] hover:text-[#25262A]'
               "
             >
+              <span
+                v-if="activeTab === tab.id"
+                class="absolute left-1 top-2 bottom-2 w-[2.5px] rounded-full bg-[#7965CC]"
+              ></span>
               <component
                 :is="tab.icon"
                 class="w-4 h-4 shrink-0"
-                :class="activeTab === tab.id ? 'text-[#1D1D1F]' : 'text-slate-400'"
+                :class="activeTab === tab.id ? 'text-[#25262A]' : 'text-[#858A95]'"
               />
               <span class="truncate">{{ tab.label }}</span>
             </button>
@@ -709,459 +594,163 @@ defineExpose({
 
       <!-- Right Pure White Content Column on Desktop, Inset Grouped Canvas on Mobile -->
       <div class="flex-1 min-w-0 flex flex-col bg-[#F2F2F7] md:bg-white overflow-hidden">
-        <!-- Desktop Clean Content Header (Title + Close X only, zero button clutter) -->
-        <div class="hidden md:flex items-center justify-between px-6 h-13 border-b border-black/[0.05] shrink-0">
-          <h2 class="text-[14.5px] font-semibold text-[#1D1D1F]">
-            {{
-              activeTab === "script"
-                ? "本局剧本与角色"
-                : activeTab === "agents"
-                  ? "模型与 API"
-                  : activeTab === 'observer'
-                    ? "观察员 C"
-                    : "外观、调度与安全阀"
-            }}
+        <!-- Desktop Clean Content Header -->
+        <div class="hidden md:flex items-center justify-between px-6 h-13 border-b border-[#ECECF0] shrink-0">
+          <h2 class="text-[13.5px] font-semibold text-[#25262A]">
+            {{ navTabs.find((t) => t.id === activeTab)?.label ?? "设置" }}
           </h2>
           <button
             type="button"
             @click="requestClose"
-            class="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-[#1D1D1F] hover:bg-black/[0.05] transition-colors outline-none"
+            class="w-8 h-8 flex items-center justify-center rounded-lg text-[#858A95] hover:text-[#25262A] hover:bg-[#EFEFF2] transition-colors outline-none"
           >
             <X class="w-4 h-4" />
           </button>
         </div>
 
-        <div class="flex-1 min-h-0 overflow-y-auto px-3.5 py-4 md:px-6 md:py-5">
-          <div class="max-w-[540px] mx-auto space-y-4 md:space-y-5">
-          <!-- Tab 1: Current Experiment Script & Roles (Inset Grouped cards on mobile, flat hairlines on desktop) -->
-          <template v-if="activeTab === 'script'">
-            <div class="flex flex-wrap items-center justify-between gap-2 px-1 md:px-0">
-              <span class="text-[12px] text-slate-500 md:text-slate-400">
-                仅调整当前实验设定 · 切换剧本请使用「新建实验」
-              </span>
-              <button
-                type="button"
-                @click="openSaveAsPreset"
-                class="shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px] font-medium text-slate-600 bg-white/80 md:bg-transparent border border-black/[0.06] md:border-transparent hover:text-[#1D1D1F] hover:bg-black/[0.05] transition outline-none"
-              >
-                <Save class="w-3.5 h-3.5" />
-                <span>存为预设模板</span>
-              </button>
+        <div class="flex-1 min-h-0 overflow-y-auto px-4 py-5 md:px-7 md:py-6">
+          <div class="max-w-[600px] mx-auto space-y-5">
+          <!-- Tab 1: 模型与 API (2-Column Provider List + Detail) -->
+          <template v-if="activeTab === 'api'">
+            <div>
+              <h3 class="text-[20px] font-semibold text-[#25262A] tracking-tight">模型与 API</h3>
+              <p class="text-[12.5px] text-[#858A95] mt-1">管理模型服务商、默认模型与访问凭据。</p>
             </div>
 
-            <div
-              v-if="saveAsPresetOpen"
-              class="p-3 rounded-2xl md:rounded-xl bg-white md:bg-[#F7F7F8] border border-black/[0.07] flex flex-wrap items-center gap-2 shadow-2xs md:shadow-none"
-            >
-              <input
-                v-model="newPresetName"
-                @keydown.enter.prevent="confirmSaveAsPreset"
-                placeholder="输入新预设模板名称（例如：深夜便利店推理）"
-                class="flex-1 min-w-[180px] rounded-xl md:rounded-lg border border-black/[0.08] bg-[#F5F5F7] md:bg-white px-3 py-1.5 text-[13px] text-[#1D1D1F] placeholder:text-slate-400 outline-none focus:ring-2 focus:ring-black/10"
-              />
-              <button
-                type="button"
-                @click="saveAsPresetOpen = false"
-                class="h-8 px-3 rounded-lg text-[12.5px] text-slate-600 hover:bg-black/[0.05]"
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                @click="confirmSaveAsPreset"
-                class="h-8 px-3.5 rounded-lg text-[12.5px] font-medium bg-[#1D1D1F] hover:bg-black text-white"
-              >
-                保存
-              </button>
-            </div>
-
-            <!-- 1 & 2. 本局场景与开场引子 (Grouped White Card on Mobile) -->
-            <div class="rounded-2xl bg-white p-4 border border-black/[0.05] shadow-[0_1px_2px_rgba(0,0,0,0.02)] md:rounded-none md:bg-transparent md:p-0 md:border-0 md:shadow-none space-y-4">
-              <div class="pb-3 border-b border-black/[0.06]">
-                <ExperimentTagsPicker
-                  :tags="draft.tags ?? []"
-                  @toggle="handleToggleTag"
-                  @clear="handleClearTags"
-                />
-              </div>
-
-              <div class="space-y-1.5">
-                <div class="flex items-center justify-between gap-2">
-                  <label class="text-[13px] font-semibold md:font-medium text-[#1D1D1F]">
-                    本局场景与文风规则
-                  </label>
-                  <span class="text-[11.5px] text-slate-400">对本局所有角色生效</span>
+            <div class="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-5 items-start">
+              <!-- Provider List -->
+              <div class="space-y-1 md:border-r md:border-[#ECECF0] md:pr-4">
+                <div class="px-2 pb-1 text-[11.5px] font-medium text-[#858A95]">
+                  服务商 · {{ profilesDraft.length }}
                 </div>
-                <textarea
-                  v-model="draft.globalSystemPrompt"
-                  @input="onCustomPromptEdit"
-                  rows="3"
-                  placeholder="例如：场景背景、文风要求、单次发言字数限制等（可留空）"
-                  class="w-full resize-none rounded-xl border border-black/[0.08] bg-[#F5F5F7] md:bg-[#F7F7F9] focus:bg-white px-3.5 py-2.5 text-[13.5px] text-[#1D1D1F] placeholder:text-slate-400 leading-relaxed outline-none focus:border-black/20 transition"
-                ></textarea>
-              </div>
-
-              <div class="space-y-1.5">
-                <div class="flex items-center justify-between gap-2">
-                  <label class="text-[13px] font-semibold md:font-medium text-[#1D1D1F]">
-                    第 1 轮开场引子
-                  </label>
-                  <span class="text-[11.5px] text-slate-400">可选，留空直接开聊</span>
-                </div>
-                <textarea
-                  v-model="draft.initialTopic"
-                  rows="2"
-                  placeholder="留空则不设开场引子，让智能体直接开始对话"
-                  class="w-full resize-none rounded-xl border border-black/[0.08] bg-[#F5F5F7] md:bg-[#F7F7F9] focus:bg-white px-3.5 py-2.5 text-[13.5px] text-[#1D1D1F] placeholder:text-slate-400 leading-relaxed outline-none focus:border-black/20 transition"
-                ></textarea>
-              </div>
-            </div>
-
-            <!-- 3. 各角色身份与私密底牌 -->
-            <div class="pt-1 md:pt-3 md:border-t md:border-black/[0.06] space-y-3">
-              <div class="flex items-center justify-between gap-2 px-1 md:px-0">
-                <span class="text-[13px] font-semibold text-[#1D1D1F]">
-                  角色与私密底牌（{{ draft.agents.length }} 位）
-                </span>
-                <button
-                  type="button"
-                  @click="addAgent"
-                  class="h-8 flex items-center gap-1 px-3 rounded-full text-[12px] font-medium bg-white md:bg-[#F2F2F5] border border-black/[0.07] md:border-transparent hover:bg-[#E7E7EC] text-[#1D1D1F] transition outline-none"
-                >
-                  <Plus class="w-3.5 h-3.5" />
-                  <span>添加角色</span>
-                </button>
-              </div>
-
-              <div
-                v-for="(ag, idx) in draft.agents"
-                :key="ag.id"
-                class="rounded-2xl bg-white p-4 border border-black/[0.05] shadow-[0_1px_2px_rgba(0,0,0,0.02)] md:rounded-none md:bg-transparent md:px-0 md:pb-0 md:pt-3 md:border-0 md:shadow-none space-y-2.5 md:space-y-2"
-                :class="idx > 0 ? 'md:border-t md:border-black/[0.05]' : ''"
-              >
-                <div class="flex items-center justify-between gap-2">
-                  <div class="flex items-center gap-2 flex-1 min-w-0">
-                    <span class="text-[11.5px] font-mono text-slate-400 shrink-0">#{{ idx + 1 }}</span>
-                    <input
-                      v-model="ag.label"
-                      placeholder="角色名称"
-                      class="flex-1 min-w-0 h-9 rounded-xl border bg-[#F5F5F7] md:bg-[#F7F7F9] focus:bg-white px-3 text-[13.5px] font-medium text-[#1D1D1F] placeholder:text-slate-400 outline-none transition"
-                      :class="
-                        duplicateLabels.has(effectiveAgentLabel(ag, idx))
-                          ? 'border-rose-400 ring-2 ring-rose-200/70'
-                          : 'border-black/[0.08] focus:border-black/20'
-                      "
-                    />
-                  </div>
-                  <div class="flex items-center gap-1.5 shrink-0">
-                    <CharacterLibraryPopover
-                      :cards="characterCards"
-                      :inherit-memory="inheritCardMemory"
-                      :allow-delete="true"
-                      @update:inherit-memory="inheritCardMemory = $event"
-                      @select="importCharacterCardToAgent(ag, $event)"
-                      @delete="emit('deleteCharacterCard', $event)"
-                    />
-                    <button
-                      type="button"
-                      @click="
-                        triggerHaptic('light');
-                        emit('saveCharacterCard', {
-                          agentId: ag.id,
-                          label: effectiveAgentLabel(ag, idx),
-                          systemPrompt: ag.systemPrompt,
-                        });
-                      "
-                      class="h-9 md:h-8 px-2.5 flex items-center gap-1 rounded-xl md:rounded-lg text-[12px] font-medium bg-[#F2F2F7] md:bg-[#F4F4F6] hover:bg-indigo-50 text-slate-600 hover:text-indigo-700 transition"
-                      title="将该角色设定存入跨世界灵魂角色库"
-                    >
-                      <BookmarkPlus class="w-3.5 h-3.5" />
-                      <span class="hidden sm:inline">存入库</span>
-                    </button>
-                    <button
-                      v-if="draft.agents.length > 2"
-                      type="button"
-                      @click="removeAgent(idx)"
-                      class="w-9 h-9 flex items-center justify-center rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition"
-                      title="删除该角色"
-                    >
-                      <Trash2 class="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-
-                <p
-                  v-if="duplicateLabels.has(effectiveAgentLabel(ag, idx))"
-                  class="text-[11.5px] text-rose-600 font-medium pl-6"
-                >
-                  角色名称不能重复，请修改名称以区分不同智能体
-                </p>
-                <textarea
-                  v-model="ag.systemPrompt"
-                  @input="onCustomPromptEdit"
-                  rows="3"
-                  placeholder="设定该角色的身份背景、性格底色与隐藏动机（可留空）"
-                  class="w-full resize-none rounded-xl border border-black/[0.08] bg-[#F5F5F7] md:bg-[#F7F7F9] focus:bg-white px-3.5 py-2.5 text-[13.5px] text-[#1D1D1F] placeholder:text-slate-400 leading-relaxed outline-none focus:border-black/20 transition"
-                ></textarea>
-              </div>
-            </div>
-
-            <div
-              v-if="draft.presetId === 'free'"
-              class="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200/60 text-[12.5px] text-emerald-900 flex gap-2.5"
-            >
-              <Sparkles class="w-4 h-4 shrink-0 mt-0.5 text-emerald-600" />
-              <div>
-                <div class="font-semibold mb-0.5">当前为「自由漫谈」零预设模式</div>
-                <div class="opacity-85 leading-relaxed">
-                  系统自动跳过底层演戏总纲与白板工具，所有 AI 将从空白上下文开始自由对话。
-                </div>
-              </div>
-            </div>
-          </template>
-
-          <!-- Tab 2: Models & API -->
-          <template v-else-if="activeTab === 'agents'">
-            <div class="flex items-center justify-between gap-2 px-0.5 md:px-0">
-              <div class="flex flex-wrap items-center gap-1.5">
-                <button
-                  v-for="(ag, idx) in draft.agents"
-                  :key="ag.id"
-                  type="button"
-                  @click="triggerHaptic('light'); selectedAgentIdx = idx"
-                  class="h-8 flex items-center gap-1.5 px-3 rounded-full text-[12.5px] font-medium transition"
-                  :class="
-                    selectedAgentIdx === idx
-                      ? 'bg-[#1D1D1F] text-white'
-                      : 'bg-white md:bg-[#F2F2F5] text-slate-700 border border-black/[0.06] md:border-transparent hover:bg-[#E7E7EC]'
-                  "
-                >
-                  <span>{{ ag.label || `智能体 ${idx + 1}` }}</span>
-                  <span
-                    v-if="!ag.apiKey.trim()"
-                    class="w-1.5 h-1.5 rounded-full bg-rose-400"
-                    title="未配置 API Key"
-                  ></span>
-                </button>
-              </div>
-
-              <button
-                type="button"
-                @click="addAgent"
-                class="shrink-0 h-8 flex items-center gap-1 px-3 rounded-full text-[12px] font-medium bg-white md:bg-[#F2F2F5] border border-black/[0.07] md:border-transparent hover:bg-[#E7E7EC] text-[#1D1D1F] transition"
-              >
-                <Plus class="w-3.5 h-3.5" />
-                <span>添加 AI</span>
-              </button>
-            </div>
-
-            <div
-              v-if="currentAgent"
-              class="rounded-2xl bg-white p-4 border border-black/[0.05] shadow-[0_1px_2px_rgba(0,0,0,0.02)] md:rounded-none md:bg-transparent md:p-0 md:pt-4 md:border-0 md:border-t md:border-black/[0.06] md:shadow-none space-y-4"
-            >
-              <div class="flex flex-wrap items-center justify-between gap-2">
-                <div class="text-[12.5px] text-slate-500">
-                  正在配置「<span class="font-medium text-[#1D1D1F]">{{ currentAgent.label || `智能体 ${selectedAgentIdx + 1}` }}</span>」
-                </div>
-                <div class="flex items-center gap-3">
+                <div class="flex md:flex-col gap-1 overflow-x-auto md:overflow-x-visible pb-1 md:pb-0 no-scrollbar">
                   <button
-                    v-if="selectedAgentIdx > 0"
+                    v-for="(prof, idx) in profilesDraft"
+                    :key="prof.id"
                     type="button"
-                    @click="copyCredentialsFromFirst(currentAgent)"
-                    class="flex items-center gap-1 text-[12px] font-medium text-slate-600 hover:text-[#1D1D1F] transition"
-                  >
-                    <Copy class="w-3.5 h-3.5" />
-                    同步第 1 位 Key 与地址
-                  </button>
-                  <button
-                    v-if="draft.agents.length > 2"
-                    type="button"
-                    @click="removeAgent(selectedAgentIdx)"
-                    class="flex items-center gap-1 text-[12px] font-medium text-rose-600 hover:underline"
-                  >
-                    <Trash2 class="w-3.5 h-3.5" />
-                    删除
-                  </button>
-                </div>
-              </div>
-
-              <div class="space-y-1.5">
-                <div class="text-[11.5px] font-medium text-slate-400">快捷填入端点</div>
-                <div class="flex flex-wrap gap-1.5">
-                  <button
-                    v-for="prov in providerQuickUrls"
-                    :key="prov.name"
-                    type="button"
-                    @click="applyProvider(currentAgent, prov.url, prov.model)"
-                    class="px-2.5 py-1 rounded-lg text-[12px] bg-[#F2F2F7] md:bg-[#F4F4F6] hover:bg-[#EAEAEF] text-slate-700 transition"
-                  >
-                    {{ prov.name }}
-                  </button>
-                </div>
-              </div>
-
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                <div>
-                  <label class="block text-[12px] font-medium text-slate-600 mb-1.5">角色名称</label>
-                  <input
-                    v-model="currentAgent.label"
-                    placeholder="角色名称"
-                    class="w-full h-10 rounded-xl border border-black/[0.08] bg-[#F5F5F7] md:bg-[#F7F7F9] focus:bg-white px-3.5 text-[13.5px] text-[#1D1D1F] placeholder:text-slate-400 outline-none focus:border-black/20 transition"
-                  />
-                </div>
-                <div>
-                  <label class="block text-[12px] font-medium text-slate-600 mb-1.5">Model Name</label>
-                  <input
-                    v-model="currentAgent.modelName"
-                    placeholder="如 deepseek-chat / qwen-plus"
-                    class="w-full h-10 rounded-xl border border-black/[0.08] bg-[#F5F5F7] md:bg-[#F7F7F9] focus:bg-white px-3.5 text-[13.5px] text-[#1D1D1F] placeholder:text-slate-400 font-mono outline-none focus:border-black/20 transition"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label class="block text-[12px] font-medium text-slate-600 mb-1.5">Base URL</label>
-                <input
-                  v-model="currentAgent.baseUrl"
-                  placeholder="https://api.deepseek.com/v1"
-                  class="w-full h-10 rounded-xl border border-black/[0.08] bg-[#F5F5F7] md:bg-[#F7F7F9] focus:bg-white px-3.5 text-[13.5px] text-[#1D1D1F] placeholder:text-slate-400 font-mono outline-none focus:border-black/20 transition"
-                />
-              </div>
-
-              <div>
-                <label class="block text-[12px] font-medium text-slate-600 mb-1.5">API Key</label>
-                <input
-                  v-model="currentAgent.apiKey"
-                  type="password"
-                  placeholder="sk-..."
-                  class="w-full h-10 rounded-xl border border-black/[0.08] bg-[#F5F5F7] md:bg-[#F7F7F9] focus:bg-white px-3.5 text-[13.5px] text-[#1D1D1F] placeholder:text-slate-400 font-mono outline-none focus:border-black/20 transition"
-                />
-              </div>
-
-              <div>
-                <div class="flex items-center justify-between text-[13px] mb-1">
-                  <span class="font-medium text-slate-700">Temperature（温度）</span>
-                  <span class="font-mono font-medium text-[#1D1D1F] tabular-nums px-2 py-0.5 rounded-md bg-[#F2F2F7] md:bg-transparent text-[12.5px]">
-                    {{ Number(currentAgent.temperature).toFixed(2) }}
-                  </span>
-                </div>
-                <RangeSlider
-                  :model-value="currentAgent.temperature"
-                  :min="0"
-                  :max="1.5"
-                  :step="0.05"
-                  @update:model-value="currentAgent.temperature = $event"
-                />
-              </div>
-
-              <div>
-                <div class="flex flex-wrap items-center justify-between gap-2 text-[13px] mb-1.5">
-                  <span class="font-medium text-slate-700">思考深度（Thinking / Reasoning）</span>
-                  <span
-                    v-if="draft.intuitiveFastReply"
-                    class="px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200/80 text-amber-700 text-[10.5px] font-medium"
-                  >
-                    已由本局「直觉快反应」临时接管为快反应模式
-                  </span>
-                </div>
-                <div
-                  class="grid grid-cols-5 p-1 rounded-xl bg-[#F2F2F7] md:bg-[#EFEFF4] gap-1 transition-opacity"
-                  :class="{ 'opacity-65': draft.intuitiveFastReply }"
-                >
-                  <button
-                    v-for="opt in thinkingLevelOptions"
-                    :key="opt.value"
-                    type="button"
-                    @click="currentAgent.thinkingLevel = opt.value"
-                    class="h-8 rounded-lg text-[12px] font-medium transition-all"
+                    @click="triggerHaptic('light'); selectedProfileIdx = idx"
+                    class="shrink-0 md:w-full flex items-center gap-2.5 px-2.5 py-2 rounded-[9px] text-left transition-colors outline-none"
                     :class="
-                      (currentAgent.thinkingLevel || 'default') === opt.value
-                        ? 'bg-white text-[#1D1D1F] shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
-                        : 'text-slate-600 hover:text-[#1D1D1F]'
+                      selectedProfileIdx === idx
+                        ? 'bg-[#F0EDF9] text-[#25262A] font-medium'
+                        : 'hover:bg-[#F5F5F7] text-[#666B76]'
                     "
                   >
-                    {{ opt.label }}
+                    <span
+                      class="w-6 h-6 rounded-[6px] grid place-items-center text-[11.5px] font-semibold shrink-0"
+                      :style="{
+                        backgroundColor: providerBadgeMeta(prof.id).bg,
+                        color: providerBadgeMeta(prof.id).fg,
+                      }"
+                    >
+                      {{ providerBadgeMeta(prof.id).letter }}
+                    </span>
+                    <span class="flex-1 min-w-0 truncate text-[12.5px]">{{ prof.name }}</span>
+                    <span
+                      v-if="prof.apiKey.trim().length > 0"
+                      class="w-1.5 h-1.5 rounded-full bg-[#25A477] shrink-0"
+                      title="已配置 API Key"
+                    ></span>
                   </button>
                 </div>
-                <p class="mt-1.5 text-[11px] leading-relaxed text-slate-400">
-                  仅在关闭「直觉快反应」时按此档位独立生效；开启「直觉快反应」时全员自动强制快反应直出。
-                </p>
+              </div>
+
+              <!-- Selected Provider Editor -->
+              <div v-if="currentProfile" class="space-y-4">
+                <div class="flex items-center gap-3">
+                  <span
+                    class="w-9 h-9 rounded-[10px] grid place-items-center text-[14px] font-semibold shrink-0"
+                    :style="{
+                      backgroundColor: providerBadgeMeta(currentProfile.id).bg,
+                      color: providerBadgeMeta(currentProfile.id).fg,
+                    }"
+                  >
+                    {{ providerBadgeMeta(currentProfile.id).letter }}
+                  </span>
+                  <div class="min-w-0">
+                    <div class="text-[14.5px] font-semibold text-[#25262A] truncate">
+                      {{ currentProfile.name }}
+                    </div>
+                    <div class="text-[11.5px] text-[#858A95]">
+                      {{ currentProfile.apiKey.trim() ? "已配置凭据" : "未配置 API Key" }}
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label class="block text-[12px] font-medium text-[#666B76] mb-1.5">默认模型</label>
+                  <ModelSelector
+                    v-model="currentProfile.modelName"
+                    :base-url="currentProfile.baseUrl"
+                    :api-key="currentProfile.apiKey"
+                    placeholder="选择或输入模型"
+                    @notify="emit('notify', $event)"
+                  />
+                </div>
+
+                <div>
+                  <label class="block text-[12px] font-medium text-[#666B76] mb-1.5">接口地址</label>
+                  <input
+                    v-model="currentProfile.baseUrl"
+                    @blur="maybePrefetchModels(currentProfile)"
+                    :placeholder="DEFAULT_BASE_URL"
+                    class="w-full h-10 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] font-mono outline-none focus:border-[#7965CC] transition"
+                  />
+                </div>
+
+                <div>
+                  <label class="block text-[12px] font-medium text-[#666B76] mb-1.5">API Key</label>
+                  <input
+                    v-model="currentProfile.apiKey"
+                    @blur="maybePrefetchModels(currentProfile)"
+                    type="password"
+                    placeholder="sk-..."
+                    class="w-full h-10 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] font-mono outline-none focus:border-[#7965CC] transition"
+                  />
+                </div>
               </div>
             </div>
           </template>
 
-          <!-- Observer C Config Tab -->
+          <!-- Tab 2: 观察与分析 -->
           <template v-else-if="activeTab === 'observer'">
-            <div class="rounded-2xl bg-white p-4 border border-black/[0.05] shadow-[0_1px_2px_rgba(0,0,0,0.02)] md:rounded-none md:bg-transparent md:p-0 md:border-0 md:shadow-none space-y-4">
-              <div class="flex flex-wrap items-center justify-between gap-2">
-                <div class="text-[12.5px] text-slate-500">快捷填入常用兼容端点</div>
-                <button
-                  type="button"
-                  @click="copyCredentialsFromFirst(draft.nodeC)"
-                  class="flex items-center gap-1 text-[12px] font-medium text-slate-600 hover:text-[#1D1D1F] transition"
-                >
-                  <Copy class="w-3.5 h-3.5" />
-                  同步第 1 位 AI 的地址与 Key
-                </button>
-              </div>
+            <div>
+              <h3 class="text-[20px] font-semibold text-[#25262A] tracking-tight">观察与分析</h3>
+              <p class="text-[12.5px] text-[#858A95] mt-1">设置观察员，以及推演过程中的自动分析方式。</p>
+            </div>
 
-              <div class="flex flex-wrap gap-1.5">
-                <button
-                  v-for="prov in providerQuickUrls"
-                  :key="prov.name"
-                  type="button"
-                  @click="applyProvider(draft.nodeC, prov.url, prov.model)"
-                  class="px-2.5 py-1 rounded-lg text-[12px] bg-[#F2F2F7] md:bg-[#F4F4F6] hover:bg-[#EAEAEF] text-slate-700 transition"
-                >
-                  {{ prov.name }}
-                </button>
-              </div>
-
+            <div class="space-y-4">
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                 <div>
-                  <label class="block text-[12px] font-medium text-slate-600 mb-1.5">角色名称</label>
+                  <label class="block text-[12px] font-medium text-[#666B76] mb-1.5">显示名称</label>
                   <input
                     v-model="draft.nodeC.label"
-                    placeholder="观察员 C"
-                    class="w-full h-10 rounded-xl border border-black/[0.08] bg-[#F5F5F7] md:bg-[#F7F7F9] focus:bg-white px-3.5 text-[13.5px] text-[#1D1D1F] placeholder:text-slate-400 outline-none focus:border-black/20 transition"
+                    placeholder="局势分析"
+                    class="w-full h-10 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] outline-none focus:border-[#7965CC] transition"
                   />
                 </div>
                 <div>
-                  <label class="block text-[12px] font-medium text-slate-600 mb-1.5">Model Name</label>
-                  <input
-                    v-model="draft.nodeC.modelName"
-                    placeholder="建议使用 Flash/Turbo 级高速模型"
-                    class="w-full h-10 rounded-xl border border-black/[0.08] bg-[#F5F5F7] md:bg-[#F7F7F9] focus:bg-white px-3.5 text-[13.5px] text-[#1D1D1F] placeholder:text-slate-400 font-mono outline-none focus:border-black/20 transition"
-                  />
+                  <label class="block text-[12px] font-medium text-[#666B76] mb-1.5">使用的 API 配置</label>
+                  <select
+                    :value="draft.nodeC.apiProfileId || selectableProfiles[0]?.id"
+                    @change="selectObserverProfile(($event.target as HTMLSelectElement).value)"
+                    class="w-full h-10 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3 text-[13px] text-[#25262A] outline-none focus:border-[#7965CC] transition"
+                  >
+                    <option v-for="prof in selectableProfiles" :key="prof.id" :value="prof.id">
+                      {{ prof.name }} ({{ prof.modelName }})
+                    </option>
+                  </select>
                 </div>
-              </div>
-
-              <div>
-                <label class="block text-[12px] font-medium text-slate-600 mb-1.5">Base URL</label>
-                <input
-                  v-model="draft.nodeC.baseUrl"
-                  placeholder="https://api.deepseek.com/v1"
-                  class="w-full h-10 rounded-xl border border-black/[0.08] bg-[#F5F5F7] md:bg-[#F7F7F9] focus:bg-white px-3.5 text-[13.5px] text-[#1D1D1F] placeholder:text-slate-400 font-mono outline-none focus:border-black/20 transition"
-                />
-              </div>
-
-              <div>
-                <label class="block text-[12px] font-medium text-slate-600 mb-1.5">API Key</label>
-                <input
-                  v-model="draft.nodeC.apiKey"
-                  type="password"
-                  placeholder="sk-..."
-                  class="w-full h-10 rounded-xl border border-black/[0.08] bg-[#F5F5F7] md:bg-[#F7F7F9] focus:bg-white px-3.5 text-[13.5px] text-[#1D1D1F] placeholder:text-slate-400 font-mono outline-none focus:border-black/20 transition"
-                />
               </div>
 
               <div>
                 <div class="flex items-center justify-between text-[13px] mb-1">
-                  <span class="font-medium text-slate-700">Temperature（温度）</span>
-                  <span class="font-mono font-medium text-[#1D1D1F] tabular-nums px-2 py-0.5 rounded-md bg-[#F2F2F7] md:bg-transparent text-[12.5px]">
-                    {{ Number(draft.nodeC.temperature).toFixed(2) }}
+                  <span class="font-medium text-[#25262A]">Temperature</span>
+                  <span class="font-mono font-medium text-[#25262A] tabular-nums text-[12.5px]">
+                    {{ Number(draft.nodeC.temperature).toFixed(1) }}
                   </span>
                 </div>
+                <p class="text-[11.5px] text-[#858A95] mb-1">观察员生成内容的随机性</p>
                 <RangeSlider
                   :model-value="draft.nodeC.temperature"
                   :min="0"
@@ -1172,136 +761,56 @@ defineExpose({
               </div>
 
               <div>
-                <label class="block text-[12px] font-medium text-slate-600 mb-1.5">
-                  观察员 System Prompt
-                </label>
+                <label class="block text-[12px] font-medium text-[#666B76] mb-1.5">分析提示词</label>
                 <textarea
                   v-model="draft.nodeC.systemPrompt"
                   rows="4"
-                  placeholder="输入观察员诊断视角提示词..."
-                  class="w-full resize-none rounded-xl border border-black/[0.08] bg-[#F5F5F7] md:bg-[#F7F7F9] focus:bg-white px-3.5 py-2.5 text-[13.5px] text-[#1D1D1F] placeholder:text-slate-400 leading-relaxed outline-none focus:border-black/20 transition"
+                  placeholder="输入局势分析提示词..."
+                  class="w-full resize-none rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 py-2.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] leading-relaxed outline-none focus:border-[#7965CC] transition"
                 ></textarea>
               </div>
 
-              <div class="pt-3 border-t border-black/[0.06] flex items-center justify-between gap-3">
-                <div class="min-w-0">
-                  <div class="text-[13px] font-medium text-[#1D1D1F]">戏剧情境导演模式</div>
-                  <div class="text-[12px] text-slate-400 mt-0.5 leading-relaxed">
-                    陷入高僵化客套循环或缺乏新信息推进时，由观察员 C 结合剧本世界观注入客观突发环境事件（环境旁白），取代生硬的元指令。
+              <div class="pt-4 border-t border-[#ECECF0] space-y-4">
+                <div>
+                  <div class="flex items-center justify-between text-[13px]">
+                    <span class="font-medium text-[#25262A]">局势分析间隔</span>
+                    <span class="font-medium tabular-nums text-[#25262A] text-[12.5px]">{{ draft.observerInterval }} 轮</span>
                   </div>
+                  <p class="text-[11.5px] text-[#858A95] mt-0.5 mb-1">每推进 N 轮后台分析一次</p>
+                  <RangeSlider
+                    :model-value="draft.observerInterval"
+                    :min="2"
+                    :max="30"
+                    :step="1"
+                    @update:model-value="draft.observerInterval = $event"
+                  />
                 </div>
-                <ToggleSwitch v-model="draft.enableAutoDirector" />
+
+                <div class="flex items-center justify-between gap-3">
+                  <div class="min-w-0">
+                    <div class="text-[13px] font-medium text-[#25262A]">自动情景推进</div>
+                    <div class="text-[11.5px] text-[#858A95] mt-0.5">对话停滞时自动触发场景事件推进剧情。</div>
+                  </div>
+                  <ToggleSwitch v-model="draft.enableAutoDirector" />
+                </div>
               </div>
             </div>
           </template>
 
-          <!-- Appearance, Safety & Scheduling Tab (Grouped cards on mobile, hairline rows on desktop) -->
-          <template v-else>
-            <div class="space-y-3 md:space-y-0 md:divide-y md:divide-black/[0.06]">
-              <!-- Theme Mode Switcher -->
-              <div class="rounded-2xl bg-white p-4 border border-black/[0.05] shadow-[0_1px_2px_rgba(0,0,0,0.02)] md:rounded-none md:bg-transparent md:px-0 md:pt-0 md:pb-4 md:border-0 md:shadow-none flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                <div class="min-w-0">
-                  <div class="text-[13.5px] font-medium text-[#1D1D1F]">界面主题外观</div>
-                  <div class="text-[12px] text-slate-400 mt-0.5">
-                    支持浅色、深色或自动跟随系统外观（即时生效）
-                  </div>
-                </div>
-                <div class="grid grid-cols-3 p-1 rounded-xl bg-[#EFEFF4] gap-1 shrink-0 sm:w-[240px]">
-                  <button
-                    v-for="opt in ([
-                      { id: 'system', label: '跟随系统', icon: Monitor },
-                      { id: 'light', label: '浅色', icon: Sun },
-                      { id: 'dark', label: '深色', icon: Moon },
-                    ] as const)"
-                    :key="opt.id"
-                    type="button"
-                    @click="triggerHaptic('light'); setThemePreference(opt.id as ThemePreference)"
-                    class="h-8 flex items-center justify-center gap-1 rounded-lg text-[12px] font-medium transition-all outline-none"
-                    :class="
-                      themePreference === opt.id
-                        ? 'bg-white text-[#1D1D1F] shadow-[0_1px_3px_rgba(0,0,0,0.08)]'
-                        : 'text-slate-600 hover:text-[#1D1D1F]'
-                    "
-                  >
-                    <component :is="opt.icon" class="w-3.5 h-3.5 shrink-0" />
-                    <span>{{ opt.label }}</span>
-                  </button>
-                </div>
-              </div>
+          <!-- Tab 3: 推演与调度 -->
+          <template v-else-if="activeTab === 'schedule'">
+            <div>
+              <h3 class="text-[20px] font-semibold text-[#25262A] tracking-tight">推演与调度</h3>
+              <p class="text-[12.5px] text-[#858A95] mt-1">控制推演运行节奏、轮次限制及全局规则。</p>
+            </div>
 
-              <!-- Collapsible Core Engine Prompt -->
-              <div class="rounded-2xl bg-white p-4 border border-black/[0.05] shadow-[0_1px_2px_rgba(0,0,0,0.02)] md:rounded-none md:bg-transparent md:px-0 md:py-4 md:border-0 md:shadow-none">
-                <button
-                  type="button"
-                  @click="corePromptOpen = !corePromptOpen"
-                  class="w-full py-0.5 md:py-2 flex items-center justify-between gap-2 text-left group"
-                >
-                  <div class="flex flex-wrap items-center gap-2 min-w-0">
-                    <span class="text-[13.5px] font-medium text-[#1D1D1F]">
-                      系统底层演戏总纲
-                    </span>
-                    <span class="px-2 py-0.5 rounded-full bg-[#F2F2F5] text-[11px] text-slate-500">
-                      跨所有实验生效 · 自由漫谈跳过
-                    </span>
-                  </div>
-                  <component
-                    :is="corePromptOpen ? ChevronDown : ChevronRight"
-                    class="w-4 h-4 text-slate-400 group-hover:text-slate-700 shrink-0"
-                  />
-                </button>
-                <div v-if="corePromptOpen" class="pt-3 space-y-2.5">
-                  <textarea
-                    v-model="corePromptDraft"
-                    rows="5"
-                    placeholder="输入全局底层演戏法则..."
-                    class="w-full resize-none rounded-xl border border-black/[0.08] bg-[#F5F5F7] md:bg-[#F7F7F9] focus:bg-white px-3.5 py-2.5 text-[13.5px] text-[#1D1D1F] placeholder:text-slate-400 leading-relaxed outline-none focus:border-black/20 transition"
-                  ></textarea>
-                  <div class="flex items-center justify-end gap-2">
-                    <button
-                      type="button"
-                      @click="resetCoreEnginePrompt"
-                      :disabled="corePromptSaving"
-                      class="h-8 flex items-center gap-1 px-3 rounded-lg text-[12px] font-medium text-slate-600 hover:bg-black/[0.05] transition disabled:opacity-50"
-                    >
-                      <RotateCcw class="w-3 h-3" />
-                      <span>恢复默认</span>
-                    </button>
-                    <button
-                      type="button"
-                      @click="saveCoreEnginePrompt"
-                      :disabled="corePromptSaving"
-                      class="h-8 flex items-center gap-1 px-3.5 rounded-lg text-[12px] font-medium bg-[#1D1D1F] hover:bg-black text-white transition disabled:opacity-50"
-                    >
-                      <Save class="w-3 h-3" />
-                      <span>保存总纲</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Cadence Sliders -->
-              <div class="py-4 space-y-1.5">
+            <div class="space-y-4">
+              <div>
                 <div class="flex items-center justify-between text-[13px]">
-                  <span class="font-medium text-[#1D1D1F]">观察员 C 触发周期（轮）</span>
-                  <span class="font-medium tabular-nums text-slate-600">每 {{ draft.observerInterval }} 轮</span>
+                  <span class="font-medium text-[#25262A]">轮次停顿间隔</span>
+                  <span class="font-medium tabular-nums text-[#25262A] text-[12.5px]">{{ Number(draft.pauseSeconds).toFixed(1) }} s</span>
                 </div>
-                <RangeSlider
-                  :model-value="draft.observerInterval"
-                  :min="2"
-                  :max="30"
-                  :step="1"
-                  @update:model-value="draft.observerInterval = $event"
-                />
-                <p class="text-[12px] text-slate-400">
-                  主对话推进满 N 轮后后台异步诊断，不阻塞对话流。
-                </p>
-              </div>
-
-              <div class="py-4 space-y-1.5">
-                <div class="flex items-center justify-between text-[13px]">
-                  <span class="font-medium text-[#1D1D1F]">回合呼吸停顿时间（秒）</span>
-                  <span class="font-medium tabular-nums text-slate-600">{{ Number(draft.pauseSeconds).toFixed(1) }} s</span>
-                </div>
+                <p class="text-[11.5px] text-[#858A95] mt-0.5 mb-1">每轮发言结束后的等待间隔。</p>
                 <RangeSlider
                   :model-value="draft.pauseSeconds"
                   :min="0.5"
@@ -1309,104 +818,123 @@ defineExpose({
                   :step="0.5"
                   @update:model-value="draft.pauseSeconds = $event"
                 />
-                <p class="text-[12px] text-slate-400">
-                  每轮 AI 发言完毕后的观察缓冲间隔。
-                </p>
               </div>
 
-              <!-- Limits -->
-              <div class="py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                 <div class="min-w-0">
-                  <div class="text-[13px] font-medium text-[#1D1D1F]">最大连续运行轮数熔断</div>
-                  <div class="text-[12px] text-slate-400 mt-0.5">单次「开始演化」最多推进该轮数即自动暂停</div>
+                  <div class="text-[13px] font-medium text-[#25262A]">连续运行上限</div>
+                  <div class="text-[11.5px] text-[#858A95] mt-0.5">单次开始推进该轮数后自动暂停。</div>
                 </div>
                 <input
                   v-model.number="draft.maxConsecutiveTurns"
                   type="number"
                   min="1"
                   max="1000"
-                  class="w-full sm:w-28 h-9 rounded-xl border border-black/[0.08] bg-[#F7F7F9] focus:bg-white px-3 text-[13px] font-mono outline-none focus:border-black/20 transition shrink-0"
+                  class="w-full sm:w-28 h-9 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3 text-[13px] font-mono text-[#25262A] outline-none focus:border-[#7965CC] transition shrink-0"
                 />
               </div>
 
-              <div class="py-4 space-y-2.5">
-                <div class="flex flex-wrap items-center justify-between gap-2">
-                  <span class="text-[13px] font-medium text-[#1D1D1F]">单局 Token 预算熔断（0 = 不限）</span>
-                  <div class="flex items-center gap-1">
+              <div class="pt-4 border-t border-[#ECECF0] space-y-4">
+                <div class="text-[12px] font-medium text-[#858A95]">剧情与规则</div>
+
+                <div class="space-y-2">
+                  <div class="flex items-center justify-between gap-3">
+                    <div class="min-w-0">
+                      <div class="text-[13px] font-medium text-[#25262A]">三幕式剧情节奏</div>
+                      <div class="text-[11.5px] text-[#858A95] mt-0.5">按目标总轮数控制剧情推进与收尾。</div>
+                    </div>
+                    <ToggleSwitch v-model="draft.enableNarrativeArc" />
+                  </div>
+                  <div
+                    v-if="draft.enableNarrativeArc"
+                    class="flex items-center justify-between gap-2 pl-3 py-1 border-l-2 border-[#E5E5EA]"
+                  >
+                    <span class="text-[12px] text-[#666B76]">目标总轮数</span>
+                    <input
+                      v-model.number="draft.targetTotalTurns"
+                      type="number"
+                      min="5"
+                      max="500"
+                      class="w-24 h-8 rounded-[8px] border border-[#E5E5EA] bg-[#F5F5F7] px-2.5 text-[12.5px] font-mono text-[#25262A] outline-none focus:border-[#7965CC]"
+                    />
+                  </div>
+                </div>
+
+                <div class="space-y-2">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-[12.5px] font-medium text-[#25262A]">全局基础规则 · 自由漫谈跳过</span>
                     <button
-                      v-for="presetVal in [0, 50000, 150000, 500000]"
-                      :key="presetVal"
                       type="button"
-                      @click="draft.tokenBudget = presetVal"
-                      class="px-2.5 py-0.5 rounded-full text-[11.5px] transition"
-                      :class="
-                        (draft.tokenBudget ?? 0) === presetVal
-                          ? 'bg-[#1D1D1F] text-white'
-                          : 'bg-[#F2F2F5] text-slate-600 hover:bg-[#E7E7EC]'
-                      "
+                      @click="resetCoreEnginePrompt"
+                      :disabled="corePromptSaving"
+                      class="text-[11.5px] text-[#666B76] hover:text-[#25262A] transition disabled:opacity-50"
                     >
-                      {{ presetVal === 0 ? "不限" : `${presetVal / 1000}k` }}
+                      恢复默认
                     </button>
                   </div>
+                  <textarea
+                    v-model="corePromptDraft"
+                    rows="4"
+                    placeholder="编辑全局规则..."
+                    class="w-full resize-none rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 py-2.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] leading-relaxed outline-none focus:border-[#7965CC] transition"
+                  ></textarea>
                 </div>
-                <input
-                  v-model.number="draft.tokenBudget"
-                  type="number"
-                  min="0"
-                  step="5000"
-                  class="w-full sm:w-44 h-9 rounded-xl border border-black/[0.08] bg-[#F7F7F9] focus:bg-white px-3 text-[13px] font-mono outline-none focus:border-black/20 transition"
-                />
+              </div>
+            </div>
+          </template>
+
+          <!-- Tab 4: 对话与行为 -->
+          <template v-else-if="activeTab === 'behavior'">
+            <div>
+              <h3 class="text-[20px] font-semibold text-[#25262A] tracking-tight">对话与行为</h3>
+              <p class="text-[12.5px] text-[#858A95] mt-1">管理智能体的发言方式、独立记忆与互动行为。</p>
+            </div>
+
+            <div class="pt-3 border-t border-[#ECECF0] space-y-4">
+              <div class="text-[12px] font-medium text-[#858A95]">角色行为</div>
+
+              <div
+                class="flex items-center justify-between gap-3"
+                :class="lockedMechanics.enablePrivateNotes ? 'opacity-60' : ''"
+              >
+                <div class="min-w-0">
+                  <div class="text-[13px] font-medium text-[#25262A] flex items-center gap-1.5">
+                    <span>角色私密备忘</span>
+                    <span v-if="lockedMechanics.enablePrivateNotes" class="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[10.5px]">
+                      由 [{{ lockedMechanics.enablePrivateNotes }}] 锁定
+                    </span>
+                  </div>
+                  <div class="text-[11.5px] text-[#858A95] mt-0.5">允许角色记录仅自己可见的判断与计划。</div>
+                </div>
+                <ToggleSwitch v-model="draft.enablePrivateNotes" :disabled="Boolean(lockedMechanics.enablePrivateNotes)" />
               </div>
 
-              <div class="py-4 space-y-3">
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 items-end">
-                  <div>
-                    <label class="block text-[13px] font-medium text-[#1D1D1F] mb-1.5">
-                      上下文预算窗口（Tokens）
-                    </label>
-                    <input
-                      v-model.number="draft.contextWindowTokens"
-                      type="number"
-                      min="2048"
-                      step="4096"
-                      class="w-full h-9 rounded-xl border border-black/[0.08] bg-[#F7F7F9] focus:bg-white px-3 text-[13px] font-mono outline-none focus:border-black/20 transition"
-                    />
-                  </div>
-                  <div>
-                    <div class="flex items-center justify-between text-[13px] mb-1">
-                      <span class="font-medium text-[#1D1D1F]">自动记忆折叠阈值</span>
-                      <span class="font-medium tabular-nums text-slate-600">
-                        {{ draft.compactionThresholdPct ?? 80 }}%
-                      </span>
-                    </div>
-                    <RangeSlider
-                      :model-value="draft.compactionThresholdPct ?? 80"
-                      :min="50"
-                      :max="95"
-                      :step="5"
-                      @update:model-value="draft.compactionThresholdPct = $event"
-                    />
-                  </div>
+              <div class="flex items-center justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-[13px] font-medium text-[#25262A]">智能指定发言角色</div>
+                  <div class="text-[11.5px] text-[#858A95] mt-0.5">根据上下文动态选择下一位发言者。</div>
                 </div>
-                <p class="text-[12px] text-slate-400">
-                  达到阈值时自动浓缩早期对话为「历史纪要」，保留最近 6~8 轮细节。
-                </p>
+                <ToggleSwitch v-model="draft.enableSmartSelector" />
               </div>
 
-              <!-- Whiteboard Section -->
-              <div class="py-4 space-y-3">
+              <div class="flex items-center justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-[13px] font-medium text-[#25262A]">后台直觉提示</div>
+                  <div class="text-[11.5px] text-[#858A95] mt-0.5">分析局势时为角色生成简短直觉提示。</div>
+                </div>
+                <ToggleSwitch v-model="draft.enablePeriodicReflection" />
+              </div>
+
+              <div class="space-y-2.5">
                 <div class="flex items-center justify-between gap-3">
                   <div class="min-w-0">
-                    <div class="text-[13px] font-medium text-[#1D1D1F]">启用实验室共享白板工具</div>
-                    <div class="text-[11.5px] leading-relaxed text-slate-400 mt-0.5">
-                      开：{{ MECHANIC_DESCRIPTIONS.enableBoardTools.onEffect }} ｜ 关：{{ MECHANIC_DESCRIPTIONS.enableBoardTools.offEffect }}
-                    </div>
+                    <div class="text-[13px] font-medium text-[#25262A]">共享白板工具</div>
+                    <div class="text-[11.5px] text-[#858A95] mt-0.5">允许角色共同维护一份全局可见的共享信息区。</div>
                   </div>
                   <ToggleSwitch v-model="draft.enableBoardTools" />
                 </div>
-
-                <div v-if="draft.enableBoardTools" class="flex flex-wrap items-center justify-between gap-3 pt-1">
-                  <span class="text-[12.5px] text-slate-600">白板修改权限</span>
+                <div v-if="draft.enableBoardTools" class="flex flex-wrap items-center justify-between gap-3 pl-3 border-l-2 border-[#E5E5EA]">
+                  <span class="text-[12px] text-[#666B76]">白板写入审核</span>
                   <div class="flex p-0.5 rounded-full bg-[#F2F2F5]">
                     <button
                       type="button"
@@ -1414,11 +942,11 @@ defineExpose({
                       class="px-3 py-1 rounded-full text-[11.5px] font-medium transition"
                       :class="
                         draft.boardApprovalMode !== 'approval' && draft.boardApprovalMode !== 'guardian'
-                          ? 'bg-white text-[#1D1D1F] shadow-2xs'
-                          : 'text-slate-600'
+                          ? 'bg-white text-[#25262A] shadow-2xs'
+                          : 'text-[#666B76]'
                       "
                     >
-                      自动放行
+                      自动通过
                     </button>
                     <button
                       type="button"
@@ -1426,8 +954,8 @@ defineExpose({
                       class="px-3 py-1 rounded-full text-[11.5px] font-medium transition"
                       :class="
                         draft.boardApprovalMode === 'guardian'
-                          ? 'bg-indigo-600 text-white'
-                          : 'text-slate-600'
+                          ? 'bg-[#7965CC] text-white'
+                          : 'text-[#666B76]'
                       "
                     >
                       防泄密审核
@@ -1438,207 +966,255 @@ defineExpose({
                       class="px-3 py-1 rounded-full text-[11.5px] font-medium transition"
                       :class="
                         draft.boardApprovalMode === 'approval'
-                          ? 'bg-amber-500 text-white'
-                          : 'text-slate-600'
+                          ? 'bg-[#C38B38] text-white'
+                          : 'text-[#666B76]'
                       "
                     >
-                      人工审批
+                      人工审核
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="pt-4 border-t border-[#ECECF0] space-y-4">
+              <div class="text-[12px] font-medium text-[#858A95]">对话质感</div>
+
+              <div class="flex items-center justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-[13px] font-medium text-[#25262A]">允许跳过发言 [PASS]</div>
+                  <div class="text-[11.5px] text-[#858A95] mt-0.5">允许角色在适当时机跳过本轮发言。</div>
+                </div>
+                <ToggleSwitch v-model="draft.allowPassTurn" />
+              </div>
+
+              <div
+                class="flex items-center justify-between gap-3"
+                :class="lockedMechanics.randomMoodDice ? 'opacity-60' : ''"
+              >
+                <div class="min-w-0">
+                  <div class="text-[13px] font-medium text-[#25262A]">随机情绪波动</div>
+                  <div class="text-[11.5px] text-[#858A95] mt-0.5">{{ MECHANIC_DESCRIPTIONS.randomMoodDice.onEffect }}</div>
+                </div>
+                <ToggleSwitch v-model="draft.randomMoodDice" :disabled="Boolean(lockedMechanics.randomMoodDice)" />
+              </div>
+
+              <div
+                class="flex items-center justify-between gap-3"
+                :class="lockedMechanics.intuitiveFastReply ? 'opacity-60' : ''"
+              >
+                <div class="min-w-0">
+                  <div class="text-[13px] font-medium text-[#25262A]">快反应模式</div>
+                  <div class="text-[11.5px] text-[#858A95] mt-0.5">{{ MECHANIC_DESCRIPTIONS.intuitiveFastReply.onEffect }}</div>
+                </div>
+                <ToggleSwitch v-model="draft.intuitiveFastReply" :disabled="Boolean(lockedMechanics.intuitiveFastReply)" />
+              </div>
+            </div>
+          </template>
+
+          <!-- Tab 5: 性能与资源 -->
+          <template v-else-if="activeTab === 'resources'">
+            <div>
+              <h3 class="text-[20px] font-semibold text-[#25262A] tracking-tight">性能与资源</h3>
+              <p class="text-[12.5px] text-[#858A95] mt-1">控制推理深度、缓存策略与 Token 使用上限。</p>
+            </div>
+
+            <div class="space-y-4">
+              <div class="flex items-center justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-[13px] font-medium text-[#25262A]">提示词缓存优化</div>
+                  <div class="text-[11.5px] text-[#858A95] mt-0.5">固定角色设定顺序以复用平台缓存折扣。</div>
+                </div>
+                <ToggleSwitch v-model="draft.enablePrefixCacheOpt" />
+              </div>
+
+              <div class="flex items-center justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-[13px] font-medium text-[#25262A]">防循环自动暂停</div>
+                  <div class="text-[11.5px] text-[#858A95] mt-0.5">上下文过小导致频繁压缩时自动暂停。</div>
+                </div>
+                <ToggleSwitch v-model="draft.enableCompactionGuard" />
+              </div>
+
+              <div class="space-y-2">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="min-w-0">
+                    <div class="text-[13px] font-medium text-[#25262A]">动态推理深度</div>
+                    <div class="text-[11.5px] text-[#858A95] mt-0.5">平淡对话降低开销，冲突或收尾恢复完整推理。</div>
+                  </div>
+                  <ToggleSwitch v-model="draft.enableAdaptiveReasoning" />
+                </div>
+                <div
+                  v-if="draft.enableAdaptiveReasoning"
+                  class="flex flex-wrap items-center justify-between gap-2 pl-3 py-1.5 border-l-2 border-[#E5E5EA]"
+                >
+                  <span class="text-[12px] text-[#666B76]">低冲突档位</span>
+                  <div class="flex p-0.5 rounded-[8px] bg-[#F2F2F5]">
+                    <button
+                      v-for="tier in [
+                        { id: 'minimal', label: 'minimal' },
+                        { id: 'low', label: 'low' },
+                        { id: 'medium', label: 'medium' },
+                      ]"
+                      :key="tier.id"
+                      type="button"
+                      @click="draft.adaptiveLowReasoningEffort = tier.id"
+                      class="px-2.5 py-1 rounded-[6px] text-[11px] font-mono font-medium transition"
+                      :class="
+                        (draft.adaptiveLowReasoningEffort ?? 'low') === tier.id
+                          ? 'bg-white text-[#25262A] shadow-2xs'
+                          : 'text-[#666B76] hover:text-[#25262A]'
+                      "
+                    >
+                      {{ tier.label }}
                     </button>
                   </div>
                 </div>
               </div>
 
-              <!-- Advanced Engine Features -->
-              <div class="py-4 space-y-3.5">
-                <div class="text-[12px] font-semibold text-slate-400 uppercase tracking-wider">进阶引擎优化</div>
-
-                <div class="flex items-center justify-between gap-3">
-                  <div class="min-w-0">
-                    <div class="text-[13px] font-medium text-[#1D1D1F]">前缀缓存优化</div>
-                    <div class="text-[12px] text-slate-400 mt-0.5">固定人设置顶以复用平台缓存折扣</div>
-                  </div>
-                  <ToggleSwitch v-model="draft.enablePrefixCacheOpt" />
-                </div>
-
-                <div class="flex items-center justify-between gap-3">
-                  <div class="min-w-0">
-                    <div class="text-[13px] font-medium text-[#1D1D1F]">记忆压缩防循环保护</div>
-                    <div class="text-[12px] text-slate-400 mt-0.5">记忆窗口过小时自动暂停并提醒</div>
-                  </div>
-                  <ToggleSwitch v-model="draft.enableCompactionGuard" />
-                </div>
-
-                <div
-                  class="flex items-center justify-between gap-3"
-                  :class="lockedMechanics.enablePrivateNotes ? 'opacity-60' : ''"
-                  :title="lockedMechanics.enablePrivateNotes ? `已由标签 [${lockedMechanics.enablePrivateNotes}] 自动锁定，取消该标签即可手动调节` : ''"
-                >
-                  <div class="min-w-0">
-                    <div class="text-[13px] font-medium text-[#1D1D1F] flex items-center gap-1.5">
-                      <span>角色私密备忘</span>
-                      <span v-if="lockedMechanics.enablePrivateNotes" class="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[10.5px]">
-                        已由 [{{ lockedMechanics.enablePrivateNotes }}] 锁定
-                      </span>
-                    </div>
-                    <div class="text-[11.5px] leading-relaxed text-slate-400 mt-0.5">
-                      开：{{ MECHANIC_DESCRIPTIONS.enablePrivateNotes.onEffect }} ｜ 关：{{ MECHANIC_DESCRIPTIONS.enablePrivateNotes.offEffect }}
-                    </div>
-                  </div>
-                  <ToggleSwitch v-model="draft.enablePrivateNotes" :disabled="Boolean(lockedMechanics.enablePrivateNotes)" />
-                </div>
-
-                <div class="flex items-center justify-between gap-3">
-                  <div class="min-w-0">
-                    <div class="text-[13px] font-medium text-[#1D1D1F]">多人智能点名对话</div>
-                    <div class="text-[11.5px] leading-relaxed text-slate-400 mt-0.5">
-                      开：{{ MECHANIC_DESCRIPTIONS.enableSmartSelector.onEffect }} ｜ 关：{{ MECHANIC_DESCRIPTIONS.enableSmartSelector.offEffect }}
-                    </div>
-                  </div>
-                  <ToggleSwitch v-model="draft.enableSmartSelector" />
-                </div>
+              <div class="pt-4 border-t border-[#ECECF0] space-y-4">
+                <div class="text-[12px] font-medium text-[#858A95]">资源上限</div>
 
                 <div class="space-y-2">
-                  <div class="flex items-center justify-between gap-3">
-                    <div class="min-w-0">
-                      <div class="text-[13px] font-medium text-[#1D1D1F]">按冲突强度调节推理深度</div>
-                      <div class="text-[12px] text-slate-400 mt-0.5">平淡对话降耗，冲突或终局恢复全速</div>
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div class="text-[13px] font-medium text-[#25262A]">单局 Token 上限</div>
+                      <div class="text-[11.5px] text-[#858A95]">0 = 不限</div>
                     </div>
-                    <ToggleSwitch v-model="draft.enableAdaptiveReasoning" />
+                    <input
+                      v-model.number="draft.tokenBudget"
+                      type="number"
+                      min="0"
+                      step="5000"
+                      class="w-32 h-9 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3 text-[13px] font-mono text-[#25262A] outline-none focus:border-[#7965CC] transition"
+                    />
                   </div>
-                  <div
-                    v-if="draft.enableAdaptiveReasoning"
-                    class="flex flex-wrap items-center justify-between gap-2 pl-3 py-1.5 border-l-2 border-slate-200"
-                  >
-                    <span class="text-[12px] text-slate-500">低张力档位</span>
-                    <div class="flex p-0.5 rounded-full bg-[#F2F2F5]">
+                  <div class="flex justify-end">
+                    <div class="inline-flex p-0.5 rounded-[8px] bg-[#F2F2F5]">
                       <button
-                        v-for="tier in [
-                          { id: 'minimal', label: 'minimal' },
-                          { id: 'low', label: 'low' },
-                          { id: 'medium', label: 'medium' },
-                        ]"
-                        :key="tier.id"
+                        v-for="presetVal in [0, 50000, 150000, 500000]"
+                        :key="presetVal"
                         type="button"
-                        @click="draft.adaptiveLowReasoningEffort = tier.id"
-                        class="px-2.5 py-0.5 rounded-full text-[11px] font-mono font-medium transition"
+                        @click="draft.tokenBudget = presetVal"
+                        class="px-2.5 py-1 rounded-[6px] text-[11.5px] font-medium transition"
                         :class="
-                          (draft.adaptiveLowReasoningEffort ?? 'low') === tier.id
-                            ? 'bg-white text-[#1D1D1F] shadow-2xs'
-                            : 'text-slate-500 hover:text-[#1D1D1F]'
+                          (draft.tokenBudget ?? 0) === presetVal
+                            ? 'bg-white text-[#25262A] shadow-2xs'
+                            : 'text-[#666B76] hover:text-[#25262A]'
                         "
                       >
-                        {{ tier.label }}
+                        {{ presetVal === 0 ? "不限" : `${presetVal / 1000}k` }}
                       </button>
                     </div>
                   </div>
                 </div>
 
-                <div class="flex items-center justify-between gap-3">
-                  <div class="min-w-0">
-                    <div class="text-[13px] font-medium text-[#1D1D1F]">周期直觉反思提示</div>
-                    <div class="text-[12px] text-slate-400 mt-0.5">观察员顺带为角色生成直觉提示推动剧情</div>
-                  </div>
-                  <ToggleSwitch v-model="draft.enablePeriodicReflection" />
-                </div>
-
-                <div class="space-y-2">
-                  <div class="flex items-center justify-between gap-3">
-                    <div class="min-w-0">
-                      <div class="text-[13px] font-medium text-[#1D1D1F]">三幕式节奏与自然结局</div>
-                      <div class="text-[12px] text-slate-400 mt-0.5">按目标总轮数把控节奏并引导自然落幕</div>
-                    </div>
-                    <ToggleSwitch v-model="draft.enableNarrativeArc" />
-                  </div>
-                  <div
-                    v-if="draft.enableNarrativeArc"
-                    class="flex items-center justify-between gap-2 pl-3 py-1 border-l-2 border-slate-200"
-                  >
-                    <span class="text-[12px] text-slate-500">目标总轮数</span>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 items-end">
+                  <div>
+                    <label class="block text-[12px] font-medium text-[#666B76] mb-1.5">上下文窗口（Tokens）</label>
                     <input
-                      v-model.number="draft.targetTotalTurns"
+                      v-model.number="draft.contextWindowTokens"
                       type="number"
-                      min="5"
-                      max="500"
-                      class="w-24 h-8 rounded-lg border border-black/[0.08] bg-[#F7F7F9] px-2.5 text-[12.5px] font-mono outline-none focus:border-black/20"
+                      min="2048"
+                      step="4096"
+                      class="w-full h-9 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3 text-[13px] font-mono text-[#25262A] outline-none focus:border-[#7965CC] transition"
+                    />
+                  </div>
+                  <div>
+                    <div class="flex items-center justify-between text-[12px] mb-1">
+                      <span class="font-medium text-[#666B76]">记忆摘要阈值</span>
+                      <span class="font-mono font-medium text-[#25262A]">{{ draft.compactionThresholdPct ?? 80 }}%</span>
+                    </div>
+                    <RangeSlider
+                      :model-value="draft.compactionThresholdPct ?? 80"
+                      :min="50"
+                      :max="95"
+                      :step="5"
+                      @update:model-value="draft.compactionThresholdPct = $event"
                     />
                   </div>
                 </div>
               </div>
-
-              <!-- Natural Social & Human-like Enhancements -->
-              <div class="py-4 space-y-3.5">
-                <div class="text-[12px] font-semibold text-slate-400 uppercase tracking-wider">自然社交与活人感</div>
-
-                <div class="flex items-center justify-between gap-3">
-                  <div class="min-w-0">
-                    <div class="text-[13px] font-medium text-[#1D1D1F]">允许选择性沉默 [PASS]</div>
-                    <div class="text-[11.5px] leading-relaxed text-slate-400 mt-0.5">
-                      开：{{ MECHANIC_DESCRIPTIONS.allowPassTurn.onEffect }} ｜ 关：{{ MECHANIC_DESCRIPTIONS.allowPassTurn.offEffect }}
-                    </div>
-                  </div>
-                  <ToggleSwitch v-model="draft.allowPassTurn" />
-                </div>
-
-                <div
-                  class="flex items-center justify-between gap-3"
-                  :class="lockedMechanics.randomMoodDice ? 'opacity-60' : ''"
-                  :title="lockedMechanics.randomMoodDice ? `已由标签 [${lockedMechanics.randomMoodDice}] 自动锁定，取消该标签即可手动调节` : ''"
-                >
-                  <div class="min-w-0">
-                    <div class="text-[13px] font-medium text-[#1D1D1F] flex items-center gap-1.5">
-                      <span>随机微情绪骰子</span>
-                      <span v-if="lockedMechanics.randomMoodDice" class="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[10.5px]">
-                        已由 [{{ lockedMechanics.randomMoodDice }}] 锁定
-                      </span>
-                    </div>
-                    <div class="text-[11.5px] leading-relaxed text-slate-400 mt-0.5">
-                      开：{{ MECHANIC_DESCRIPTIONS.randomMoodDice.onEffect }} ｜ 关：{{ MECHANIC_DESCRIPTIONS.randomMoodDice.offEffect }}
-                    </div>
-                  </div>
-                  <ToggleSwitch v-model="draft.randomMoodDice" :disabled="Boolean(lockedMechanics.randomMoodDice)" />
-                </div>
-
-                <div
-                  class="flex items-center justify-between gap-3"
-                  :class="lockedMechanics.intuitiveFastReply ? 'opacity-60' : ''"
-                  :title="lockedMechanics.intuitiveFastReply ? `已由标签 [${lockedMechanics.intuitiveFastReply}] 自动锁定，取消该标签即可手动调节` : ''"
-                >
-                  <div class="min-w-0">
-                    <div class="text-[13px] font-medium text-[#1D1D1F] flex items-center gap-1.5">
-                      <span>直觉快反应模式</span>
-                      <span v-if="lockedMechanics.intuitiveFastReply" class="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[10.5px]">
-                        已由 [{{ lockedMechanics.intuitiveFastReply }}] 锁定
-                      </span>
-                    </div>
-                    <div class="text-[11.5px] leading-relaxed text-slate-400 mt-0.5">
-                      开：{{ MECHANIC_DESCRIPTIONS.intuitiveFastReply.onEffect }} ｜ 关：{{ MECHANIC_DESCRIPTIONS.intuitiveFastReply.offEffect }}
-                    </div>
-                  </div>
-                  <ToggleSwitch v-model="draft.intuitiveFastReply" :disabled="Boolean(lockedMechanics.intuitiveFastReply)" />
-                </div>
-              </div>
             </div>
+          </template>
+
+          <!-- Tab 6: 外观 -->
+          <template v-else-if="activeTab === 'appearance'">
+            <div>
+              <h3 class="text-[20px] font-semibold text-[#25262A] tracking-tight">外观</h3>
+              <p class="text-[12.5px] text-[#858A95] mt-1">根据系统环境或个人偏好调整界面主题。</p>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <button
+                v-for="opt in [
+                  { id: 'system', label: '跟随系统', darkPreview: false },
+                  { id: 'light', label: '浅色', darkPreview: false },
+                  { id: 'dark', label: '深色', darkPreview: true },
+                ]"
+                :key="opt.id"
+                type="button"
+                @click="triggerHaptic('light'); setThemePreference(opt.id as ThemePreference)"
+                class="text-left rounded-[12px] border p-2.5 transition-all outline-none"
+                :class="
+                  themePreference === opt.id
+                    ? 'border-[#7965CC] bg-[#F0EDF9]/50 ring-1 ring-[#7965CC]/30'
+                    : 'border-[#E5E5EA] bg-white hover:bg-[#F5F5F7]'
+                "
+              >
+                <div
+                  class="h-14 rounded-[8px] border overflow-hidden flex mb-2.5"
+                  :class="opt.darkPreview ? 'bg-[#1C1C21] border-white/10' : 'bg-[#FFFFFF] border-[#ECECF0]'"
+                >
+                  <div
+                    class="w-7 h-full shrink-0"
+                    :class="opt.darkPreview ? 'bg-[#28282F]' : 'bg-[#EFEFF2]'"
+                  ></div>
+                  <div class="flex-1 p-2 space-y-1.5 flex flex-col justify-center">
+                    <div
+                      v-for="n in 4"
+                      :key="n"
+                      class="h-1 rounded-full"
+                      :class="opt.darkPreview ? 'bg-white/15' : 'bg-[#D6D8DE]'"
+                    ></div>
+                  </div>
+                </div>
+                <div class="flex items-center justify-between px-0.5">
+                  <span class="text-[12.5px] font-medium text-[#25262A]">{{ opt.label }}</span>
+                  <Check v-if="themePreference === opt.id" class="w-3.5 h-3.5 text-[#7965CC]" />
+                </div>
+              </button>
+            </div>
+
+            <p class="text-[12px] text-[#858A95]">
+              主题实时预览，统一应用于主窗口、观察面板和设置弹窗。
+            </p>
           </template>
           </div>
         </div>
 
-        <!-- Clean Minimal Footer (Avoids stretched giant black bar on foldables/tablets) -->
-        <div class="shrink-0 px-4 md:px-6 py-3 border-t border-black/[0.06] bg-white">
-          <div class="max-w-[540px] mx-auto grid grid-cols-[1fr_2fr] min-[520px]:flex min-[520px]:items-center min-[520px]:justify-end gap-2.5">
-            <button
-              type="button"
-              @click="requestClose"
-              class="h-10 md:h-8 px-4 rounded-xl md:rounded-lg text-[13.5px] md:text-[12.5px] font-medium text-slate-600 bg-[#F2F2F7] md:bg-transparent hover:bg-black/[0.05] transition-colors outline-none"
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              @click="handleSave"
-              class="h-10 md:h-8 px-6 md:px-4 rounded-xl md:rounded-lg text-[13.5px] md:text-[12.5px] font-medium bg-[#1D1D1F] hover:bg-black text-white transition-colors outline-none"
-            >
-              保存配置
-            </button>
+        <!-- Clean Minimal Footer -->
+        <div class="shrink-0 px-4 md:px-6 py-3 border-t border-[#ECECF0] bg-white">
+          <div class="max-w-[600px] mx-auto flex items-center justify-between gap-3">
+            <span class="hidden sm:inline text-[11.5px] text-[#858A95]">
+              全局 API 与本地推演设置
+            </span>
+            <div class="flex-1 sm:flex-initial grid grid-cols-[1fr_2fr] sm:flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                @click="requestClose"
+                class="h-9 md:h-8 px-4 rounded-[9px] text-[13px] md:text-[12.5px] font-medium text-[#666B76] hover:bg-[#EFEFF2] transition-colors outline-none"
+              >
+                关闭
+              </button>
+              <button
+                type="button"
+                @click="handleSave"
+                class="h-9 md:h-8 px-5 md:px-4 rounded-[9px] text-[13px] md:text-[12.5px] font-medium bg-[#242426] hover:bg-[#363639] text-white transition-colors outline-none"
+              >
+                保存配置
+              </button>
+            </div>
           </div>
         </div>
       </div>

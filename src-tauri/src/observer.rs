@@ -297,7 +297,7 @@ pub async fn run_observer_analysis(
 ) -> Result<ObserverJsonResult> {
     let node_c = &config.node_c;
     if node_c.api_key.trim().is_empty() || node_c.model_name.trim().is_empty() {
-        return Err(anyhow!("观察员节点 C 未配置 API Key 或 Model Name"));
+        return Err(anyhow!("局势分析未配置 API Key 或模型名称"));
     }
 
     let url = resolve_chat_completions_url(&node_c.base_url);
@@ -432,10 +432,10 @@ pub async fn run_observer_analysis(
             .json(&body)
             .send()
             .await
-            .with_context(|| format!("观察员请求 {} 失败", url))?;
+            .with_context(|| format!("局势分析请求 {} 失败", url))?;
 
         if resp.status().is_success() {
-            let parsed: NonStreamResponse = resp.json().await.context("解析观察员响应失败")?;
+            let parsed: NonStreamResponse = resp.json().await.context("解析局势分析响应失败")?;
             let content = parsed
                 .choices
                 .into_iter()
@@ -451,19 +451,19 @@ pub async fn run_observer_analysis(
             use_json_format = false;
             continue;
         }
-        return Err(anyhow!("观察员 API 错误 ({}): {}", status, err_text));
+        return Err(anyhow!("局势分析 API 错误 ({}): {}", status, err_text));
     };
 
     parse_observer_json(&raw_content)
 }
 
-/// 生成实验结案复盘简报（Markdown 格式），包含核心转折点、高光金句 Top 3、智能体行为画像。
+/// 生成复盘报告（Markdown 格式），包含核心转折点、高光金句 Top 3、角色行为画像。
 pub async fn generate_final_report_markdown(
     client: &Client,
     detail: &ExperimentDetail,
 ) -> Result<String> {
     let Some(node) = select_compactor_node(&detail.config) else {
-        return Err(anyhow!("请先为观察员 C 或至少一个 AI 节点配置 API Key"));
+        return Err(anyhow!("请先为局势分析或至少一个角色配置 API Key"));
     };
 
     let mut transcript = String::new();
@@ -555,15 +555,15 @@ pub async fn generate_final_report_markdown(
         .json(&body)
         .send()
         .await
-        .with_context(|| format!("生成复盘简报请求 {} 失败", url))?;
+        .with_context(|| format!("生成复盘报告请求 {} 失败", url))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let err = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("生成复盘简报 API 错误 ({}): {}", status, err));
+        return Err(anyhow!("生成复盘报告 API 错误 ({}): {}", status, err));
     }
 
-    let parsed: NonStreamResponse = resp.json().await.context("解析复盘简报响应失败")?;
+    let parsed: NonStreamResponse = resp.json().await.context("解析复盘报告响应失败")?;
     let report = parsed
         .choices
         .into_iter()
@@ -572,7 +572,7 @@ pub async fn generate_final_report_markdown(
         .unwrap_or_default();
 
     if report.trim().is_empty() {
-        return Err(anyhow!("观察员未返回有效复盘内容"));
+        return Err(anyhow!("未返回有效复盘内容"));
     }
 
     Ok(report)
@@ -657,11 +657,11 @@ pub fn parse_generated_scenario_json(raw: &str) -> Result<GeneratedScenario> {
     };
 
     let mut parsed: GeneratedScenario = serde_json::from_str(candidate)
-        .with_context(|| format!("AI 捏剧返回非合法 JSON: {}", raw))?;
+        .with_context(|| format!("生成剧本返回非合法 JSON: {}", raw))?;
 
     parsed.title = parsed.title.trim().to_string();
     if parsed.title.is_empty() {
-        parsed.title = "未命名脑洞沙盒".to_string();
+        parsed.title = "未命名剧本".to_string();
     }
     parsed.global_system_prompt = parsed.global_system_prompt.trim().to_string();
     parsed.initial_topic = parsed.initial_topic.trim().to_string();
@@ -698,7 +698,7 @@ pub async fn generate_scenario_from_idea(
 ) -> Result<GeneratedScenario> {
     let Some(node) = select_utility_node(config) else {
         return Err(anyhow!(
-            "请先在「设置」中为至少一个 AI 节点或观察员 C 配置 API Key"
+            "请先在「设置」中为至少一个角色或局势分析配置 API Key"
         ));
     };
 
@@ -781,7 +781,7 @@ pub async fn parse_director_command(
     instruction: &str,
 ) -> Result<DirectorParsedAction> {
     let Some(node) = select_compactor_node(config) else {
-        return Err(anyhow!("请先配置观察员 C 或至少一个 AI 节点的 API Key"));
+        return Err(anyhow!("请先为至少一个角色或局势分析配置 API Key"));
     };
 
     let roster = config
@@ -902,10 +902,10 @@ pub async fn distill_memory_imprints(
     detail: &ExperimentDetail,
 ) -> Result<Vec<DistilledImprint>> {
     if detail.messages.is_empty() {
-        return Err(anyhow!("当前实验尚无对话记录，无法提炼记忆烙印"));
+        return Err(anyhow!("当前推演尚无对话记录，无法提取经历记忆"));
     }
     let Some(node) = select_compactor_node(&detail.config) else {
-        return Err(anyhow!("请先为观察员 C 或至少一个 AI 节点配置 API Key"));
+        return Err(anyhow!("请先为局势分析或至少一个角色配置 API Key"));
     };
 
     let roster = detail
@@ -946,7 +946,7 @@ pub async fn distill_memory_imprints(
     let raw = call_json_completion(client, node, &system_prompt, &user_prompt, 0.3).await?;
     let imprints = parse_distilled_imprints_json(&raw)?;
     if imprints.is_empty() {
-        return Err(anyhow!("未能提炼出有效的角色记忆烙印"));
+        return Err(anyhow!("未能提取有效的经历记忆"));
     }
     Ok(imprints)
 }
@@ -958,7 +958,7 @@ pub async fn generate_worldline_comparison_markdown(
     exp_b: &ExperimentDetail,
 ) -> Result<String> {
     let Some(node) = select_compactor_node(&exp_a.config).or_else(|| select_compactor_node(&exp_b.config)) else {
-        return Err(anyhow!("请先为观察员 C 或至少一个 AI 节点配置 API Key"));
+        return Err(anyhow!("请先为局势分析或至少一个角色配置 API Key"));
     };
 
     let mut diverge_turn = exp_a.fork_turn.or(exp_b.fork_turn).unwrap_or(0);
@@ -1063,7 +1063,7 @@ pub async fn generate_worldline_comparison_markdown(
         .map(|c| strip_think_tags(&c.message.content))
         .unwrap_or_default();
     if report.trim().is_empty() {
-        return Err(anyhow!("观察员未返回有效世界线对照报告"));
+        return Err(anyhow!("未返回有效世界线对照报告"));
     }
     Ok(report)
 }

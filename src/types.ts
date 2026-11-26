@@ -4,9 +4,18 @@ export type EngineState = "idle" | "running" | "paused" | "stepping";
 
 export type ThinkingLevel = "default" | "off" | "low" | "medium" | "high";
 
+export interface ApiProfile {
+  id: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  modelName: string;
+}
+
 export interface NodeConfig {
   id: string;
   label: string;
+  apiProfileId?: string | null;
   baseUrl: string;
   apiKey: string;
   modelName: string;

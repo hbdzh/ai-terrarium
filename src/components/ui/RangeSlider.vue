@@ -38,16 +38,16 @@ function onInput(e: Event) {
   <div class="relative h-7 flex items-center select-none touch-none">
     <div
       class="w-full h-1.5 rounded-full overflow-hidden"
-      :class="dark ? 'bg-white/20' : 'bg-slate-200/90'"
+      :class="dark ? 'bg-white/20' : 'bg-[#E5E5EA] dark:bg-white/15'"
     >
       <div
         class="h-full rounded-full transition-[width] duration-75"
-        :class="dark ? 'bg-[#0A84FF]' : 'bg-[#007AFF]'"
+        :class="dark ? 'bg-[#9583E0]' : 'bg-[#7965CC] dark:bg-[#9583E0]'"
         :style="{ width: `${pct}%` }"
       ></div>
     </div>
     <div
-      class="pointer-events-none absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-5 h-5 rounded-full bg-white border border-black/[0.08] shadow-[0_2px_6px_rgba(0,0,0,0.2)] transition-[left] duration-75"
+      class="pointer-events-none absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-[18px] h-[18px] rounded-full bg-white border border-black/[0.1] shadow-[0_1px_4px_rgba(0,0,0,0.22)] transition-[left] duration-75"
       :style="{ left: `${pct}%` }"
     ></div>
     <input
@@ -57,7 +57,7 @@ function onInput(e: Event) {
       :step="step"
       :value="modelValue"
       @input="onInput"
-      class="absolute inset-0 w-full h-full opacity-0 cursor-pointer m-0"
+      class="absolute inset-0 w-full h-full opacity-0 cursor-pointer m-0 focus-visible:outline-none"
     />
   </div>
 </template>

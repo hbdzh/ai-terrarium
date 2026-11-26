@@ -30,7 +30,7 @@ const emit = defineEmits<{
         <div class="flex items-center gap-2 min-w-0">
           <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#007AFF]/25 text-blue-300 text-[11.5px] md:text-[11px] font-medium">
             <Film class="w-3.5 h-3.5 md:w-3 md:h-3" />
-            剧场回放
+            回放
           </span>
           <span class="text-[12.5px] md:text-xs text-slate-300 tabular-nums">
             第 {{ currentTurn }}/{{ totalTurns }} 轮 · {{ currentIndex }}/{{ totalCount }}
@@ -54,7 +54,7 @@ const emit = defineEmits<{
             type="button"
             @click="emit('exit')"
             class="w-8 h-8 md:w-auto md:h-auto md:p-1.5 flex items-center justify-center rounded-full hover:bg-white/15 text-slate-300 hover:text-white transition"
-            title="退出剧场回放"
+            title="退出回放"
           >
             <X class="w-4 h-4" />
           </button>

@@ -146,46 +146,46 @@ const modes: {
 }[] = [
   {
     kind: "GodSystem",
-    label: "环境旁白",
-    shortLabel: "旁白",
-    hint: "全知事件：同时注入所有智能体的系统上下文（如：窗外突然下起了红色的雨）",
-    shortHint: "输入全知环境旁白（如：窗外突然下起了暴雨）",
+    label: "场景事件",
+    shortLabel: "事件",
+    hint: "向所有角色注入场景变化（如：窗外突然下起暴雨）",
+    shortHint: "输入场景事件（如：窗外突然下起暴雨）",
     icon: Globe2,
     activeClass: "bg-[#1D1D1F] text-white shadow-xs",
   },
   {
     kind: "GodWhisper",
-    label: "心灵低语",
-    shortLabel: "低语",
-    hint: "定向潜意识：仅悄悄塞入指定 AI 下一轮的 System Prompt，其余参与者完全不知情",
-    shortHint: "向选定角色注入只有他能听见的暗语...",
+    label: "定向提示",
+    shortLabel: "提示",
+    hint: "仅向指定角色发送下一轮提示，其余角色不可见",
+    shortHint: "向选定角色发送单独提示...",
     icon: EyeOff,
     activeClass: "bg-indigo-600 text-white shadow-xs",
   },
   {
     kind: "GodPublic",
-    label: "亲自发言",
-    shortLabel: "发言",
-    hint: "路人降临：人类直接下场说一句话，所有 AI 均可见并回应",
-    shortHint: "以人类/路人身份公开发言...",
+    label: "外部插话",
+    shortLabel: "插话",
+    hint: "以旁观者身份公开发言，所有角色可见并回应",
+    shortHint: "以旁观者身份公开发言...",
     icon: MessageCircle,
     activeClass: "bg-emerald-600 text-white shadow-xs",
   },
   {
     kind: "DirectorRemote",
-    label: "导演遥控",
-    shortLabel: "遥控",
-    hint: "后台自然语言指令：不中断运行热更新参数或向角色下达暗语（如：让阿哲别再装傻了，把观察间隔改为3轮）",
-    shortHint: "输入后台导演指令（如：把观察周期改为3轮）",
+    label: "导演指令",
+    shortLabel: "指令",
+    hint: "用自然语言调整运行参数或角色状态（如：分析周期改为 3 轮）",
+    shortHint: "输入导演指令（如：分析周期改为 3 轮）",
     icon: Wand2,
     activeClass: "bg-amber-600 text-white shadow-xs",
   },
   {
     kind: "PrivateRoom",
     label: "私密房间",
-    shortLabel: "里屋",
-    hint: "空间隔离里屋：指定 2 名角色开启 1~5 轮临时私密房间，大厅其余角色完全无法听见",
-    shortHint: "选择 2 名角色开启限时私密对话...",
+    shortLabel: "私聊",
+    hint: "指定 2 名角色进行 1~5 轮私下对话，其余角色不可见",
+    shortHint: "选择 2 名角色开启限时私聊...",
     icon: DoorClosed,
     activeClass: "bg-violet-600 text-white shadow-xs",
   },
@@ -276,7 +276,7 @@ function roomMemberNames(memberIds: string[]): string {
           <div class="flex flex-wrap items-center gap-2 text-[13px] md:text-xs">
             <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500 text-white font-semibold text-[11px]">
               <ShieldAlert class="w-3 h-3" />
-              白板修改待审批
+              白板修改待审核
             </span>
             <span class="font-semibold text-[#1D1D1F]">{{ pendingApproval.agentLabel }}</span>
             <span class="text-slate-600 break-words">申请更新共享白板 · {{ pendingApproval.reason }}</span>
@@ -289,7 +289,7 @@ function roomMemberNames(memberIds: string[]): string {
               @click="showApprovalDiff = !showApprovalDiff"
               class="h-8 md:h-auto px-3 md:px-2.5 py-1 rounded-full text-[12px] md:text-[11px] font-medium bg-white border border-black/[0.08] text-slate-700 hover:bg-slate-50 transition-colors"
             >
-              {{ showApprovalDiff ? "收起 Diff" : "展开 Diff" }}
+              {{ showApprovalDiff ? "收起对比" : "修改对比" }}
             </button>
             <button
               type="button"
@@ -305,7 +305,7 @@ function roomMemberNames(memberIds: string[]): string {
                 emit('resolveApproval', {
                   requestId: pendingApproval.requestId,
                   approved: false,
-                  rejectReason: '造物主驳回了本次白板写入申请',
+                  rejectReason: '主持人驳回了本次白板修改',
                 })
               "
               class="h-8 md:h-auto flex items-center gap-1 px-3 py-1 rounded-full text-[12px] md:text-[11px] font-medium bg-rose-600 hover:bg-rose-700 text-white transition-colors"
@@ -325,7 +325,7 @@ function roomMemberNames(memberIds: string[]): string {
               class="h-8 md:h-auto flex items-center gap-1 px-3.5 py-1 rounded-full text-[12px] md:text-[11px] font-medium bg-emerald-600 hover:bg-emerald-700 text-white transition-colors"
             >
               <Check class="w-3.5 h-3.5 md:w-3 md:h-3" />
-              {{ editingApproval ? "修改后放行" : "批准放行" }}
+              {{ editingApproval ? "修改并批准" : "批准" }}
             </button>
           </div>
         </div>
@@ -358,84 +358,85 @@ function roomMemberNames(memberIds: string[]): string {
 
     <!-- Floating Minimalist ChatGPT-Style Composer -->
     <div
-      class="relative pointer-events-auto max-w-[740px] mx-auto rounded-[24px] bg-white border border-black/[0.1] shadow-[0_4px_24px_rgba(0,0,0,0.055)] p-2.5 md:px-4 md:pt-3 md:pb-2.5 space-y-2 md:space-y-1.5"
+      class="relative pointer-events-auto max-w-[740px] mx-auto rounded-[24px] bg-white border border-black/[0.065] shadow-[0_2px_18px_rgba(0,0,0,0.045)] p-2.5 md:px-4 md:pt-3 md:pb-2.5 space-y-2 md:space-y-1.5"
     >
-      <!-- Crisis Event Cards Adaptive Modal -->
+      <!-- Event Cards Adaptive Modal (matching Screenshot 8) -->
       <AdaptiveModal
         :open="cardsOpen"
-        title="观察员 C 现场危机/转折事件卡"
+        title="转折事件卡"
         max-width-class="max-w-3xl"
         @close="cardsOpen = false"
       >
         <template #header>
-          <div class="px-5 py-3.5 border-b border-black/[0.06] flex items-center justify-between gap-2 shrink-0">
+          <div class="px-6 py-4 border-b border-[#ECECF0] flex items-center justify-between gap-2 shrink-0 bg-white">
             <div class="min-w-0">
-              <div class="text-[14px] md:text-xs font-semibold text-[#1D1D1F] flex items-center gap-1.5">
-                <Sparkles class="w-4 h-4 md:w-3.5 md:h-3.5 text-violet-600 shrink-0" />
-                <span class="truncate">现场危机 / 转折事件卡</span>
-              </div>
-              <p class="text-[11.5px] md:text-[11px] text-slate-400 mt-0.5">轻触任意卡片即可立即注入主对话</p>
+              <h3 class="text-[16px] font-semibold text-[#25262A] truncate">转折事件卡</h3>
+              <p class="text-[12px] text-[#858A95] mt-0.5">选择一个事件，改变当前推演的走向</p>
             </div>
-            <div class="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                @click="emit('triggerObserver')"
-                :disabled="observerRunning"
-                class="h-8 px-3 rounded-full bg-blue-50 text-[12px] md:text-[11px] font-medium text-[#007AFF] hover:bg-blue-100/70 transition disabled:opacity-45"
-              >
-                {{ observerRunning ? "生成中..." : "刷新抽卡" }}
-              </button>
-              <button
-                type="button"
-                @click="cardsOpen = false"
-                class="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600"
-              >
-                <X class="w-4 h-4" />
-              </button>
-            </div>
+            <button
+              type="button"
+              @click="cardsOpen = false"
+              class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#EFEFF2] text-[#858A95] hover:text-[#25262A] transition"
+            >
+              <X class="w-4 h-4" />
+            </button>
           </div>
         </template>
 
-        <div class="p-4 sm:p-5 overflow-y-auto flex-1 bg-[#F7F7FA]">
+        <div class="p-5 overflow-y-auto flex-1 bg-white">
           <div
             v-if="!crisisCards || crisisCards.length === 0"
-            class="py-10 text-center text-[13px] md:text-xs text-slate-400"
+            class="py-12 text-center text-[13px] text-[#858A95]"
           >
-            尚无实时事件卡，请点击右上角「刷新抽卡」或等待观察员触发。
+            暂无事件卡，请点击「换一批」或等待局势分析生成。
           </div>
-          <div v-else class="grid grid-cols-1 lg:grid-cols-3 gap-3">
+          <div v-else class="grid grid-cols-1 md:grid-cols-3 gap-3.5">
             <button
               v-for="(card, idx) in crisisCards"
               :key="idx"
               type="button"
               @click="injectCrisisCard(card)"
-              class="group text-left p-4 rounded-2xl bg-white hover:bg-violet-50/50 active:scale-[0.99] border border-black/[0.07] hover:border-violet-300 shadow-[0_1px_4px_rgba(0,0,0,0.03)] transition-all space-y-2.5 flex flex-col justify-between"
+              class="group text-left p-4 rounded-[12px] bg-white hover:bg-[#F5F5F7]/60 active:scale-[0.99] border border-[#E5E5EA] hover:border-[#7965CC]/50 transition-all flex flex-col justify-between gap-4"
             >
-              <div class="space-y-2">
+              <div class="space-y-3">
                 <div class="flex items-center justify-between gap-2">
-                  <span class="text-[15px] md:text-[13px] font-semibold text-[#1D1D1F] truncate">{{ card.title }}</span>
-                  <span
-                    class="px-2 py-0.5 rounded-full text-[11px] md:text-[10px] font-medium shrink-0"
-                    :class="
-                      card.kind === 'GodPublic'
-                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/70'
-                        : 'bg-slate-100 text-slate-700 border border-slate-200/70'
-                    "
-                  >
-                    {{ card.kind === "GodPublic" ? "路人降临" : "环境事件" }}
+                  <span class="w-8 h-8 rounded-[8px] bg-[#F0EDF9] text-[#7965CC] grid place-items-center shrink-0">
+                    <Sparkles class="w-4 h-4" />
+                  </span>
+                  <span class="px-2 py-0.5 rounded-[6px] bg-[#F2F2F5] text-[11px] font-medium text-[#666B76] shrink-0">
+                    {{ card.kind === "GodPublic" ? "外部插话" : "场景事件" }}
                   </span>
                 </div>
-                <p class="text-[13.5px] md:text-[12px] text-slate-600 leading-relaxed break-words">
+                <div class="text-[15px] font-semibold text-[#25262A] leading-snug">
+                  {{ card.title }}
+                </div>
+                <p class="text-[12.5px] text-[#666B76] leading-relaxed break-words">
                   {{ card.content }}
                 </p>
               </div>
-              <div class="pt-1 flex items-center justify-end text-[11.5px] font-medium text-violet-600 opacity-85 group-hover:opacity-100">
-                <span>点击立即注入</span>
-                <ArrowUpRight class="w-3.5 h-3.5 ml-0.5" />
+              <div class="pt-3 border-t border-[#ECECF0] flex items-center justify-between text-[12px] font-medium text-[#7965CC]">
+                <span>注入对话</span>
+                <ArrowUpRight class="w-3.5 h-3.5 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
               </div>
             </button>
           </div>
         </div>
+
+        <template #footer>
+          <div class="px-6 py-3 border-t border-[#ECECF0] bg-white flex items-center justify-between gap-3 shrink-0">
+            <span class="text-[11.5px] text-[#858A95]">
+              {{ crisisCards && crisisCards.length > 0 ? `当前共 ${crisisCards.length} 张转折事件卡` : "等待生成事件卡" }}
+            </span>
+            <button
+              type="button"
+              @click="emit('triggerObserver')"
+              :disabled="observerRunning"
+              class="h-8 px-3.5 rounded-[8px] border border-[#E5E5EA] bg-white hover:bg-[#F5F5F7] text-[12px] font-medium text-[#25262A] transition disabled:opacity-45"
+            >
+              {{ observerRunning ? "生成中..." : "换一批" }}
+            </button>
+          </div>
+        </template>
       </AdaptiveModal>
 
       <!-- Mobile Native Bottom Sheet for Mode Picker (< 768px) -->
@@ -509,7 +510,7 @@ function roomMemberNames(memberIds: string[]): string {
                 </span>
               </div>
               <p class="text-[11.5px] md:text-[11px] text-slate-500 mt-0.5">
-                空间隔离生效中：仅房间内 2 名角色互相可见对话。
+                仅房间内 2 名角色相互可见对话。
               </p>
             </div>
           </div>
@@ -520,7 +521,7 @@ function roomMemberNames(memberIds: string[]): string {
             class="h-9 md:h-auto flex items-center gap-1 px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-medium transition-colors shrink-0"
           >
             <X class="w-3.5 h-3.5" />
-            <span>一键解散房间</span>
+            <span>结束私聊</span>
           </button>
         </div>
 
@@ -529,7 +530,7 @@ function roomMemberNames(memberIds: string[]): string {
           v-else-if="agents.length < 3"
           class="px-2 py-2 text-[12.5px] md:text-xs text-slate-500"
         >
-          临时私密里屋需要至少 <strong class="text-[#1D1D1F]">3 名</strong> AI 角色才能触发空间隔离（当前 {{ agents.length }} 名）。
+          开启私密房间至少需要 <strong class="text-[#1D1D1F]">3 名</strong> 角色（当前 {{ agents.length }} 名）。
         </div>
 
         <!-- Create Private Room Form -->
@@ -580,7 +581,7 @@ function roomMemberNames(memberIds: string[]): string {
             class="h-9 md:h-auto flex items-center gap-1.5 px-4 py-1.5 rounded-xl text-[12.5px] md:text-xs font-medium bg-violet-600 hover:bg-violet-700 text-white disabled:opacity-40 transition-colors shrink-0"
           >
             <DoorClosed class="w-3.5 h-3.5" />
-            <span>开启私密里屋 ({{ roomTurns }} 轮)</span>
+            <span>开启私聊 ({{ roomTurns }} 轮)</span>
           </button>
         </div>
       </div>
@@ -672,10 +673,10 @@ function roomMemberNames(memberIds: string[]): string {
                 ? 'bg-violet-50 text-violet-700'
                 : 'text-slate-600 md:text-slate-500 bg-[#F4F4F6] md:bg-transparent hover:text-[#1D1D1F] hover:bg-black/[0.045]'
             "
-            title="抽取观察员 C 现场生成的转折/危机事件卡"
+            title="查看或抽取转折事件卡"
           >
             <Dices class="w-3.5 h-3.5" />
-            <span>抽卡</span>
+            <span>事件卡</span>
             <span
               v-if="crisisCards && crisisCards.length > 0"
               class="px-1.5 rounded-full bg-black/[0.06] text-[10.5px] text-slate-600 tabular-nums"
@@ -689,15 +690,15 @@ function roomMemberNames(memberIds: string[]): string {
             v-if="activePrivateRoom"
             @click="mode = 'PrivateRoom'"
             class="flex items-center gap-1 h-7 px-2.5 rounded-full bg-violet-50 text-violet-700 text-[11.5px] font-medium cursor-pointer"
-            :title="activePrivateRoom.title || '临时私密房间激活中'"
+            :title="activePrivateRoom.title || '私密房间进行中'"
           >
             <DoorClosed class="w-3 h-3" />
-            <span class="tabular-nums">里屋余 {{ activePrivateRoom.remainingTurns }} 轮</span>
+            <span class="tabular-nums">私聊余 {{ activePrivateRoom.remainingTurns }} 轮</span>
             <button
               type="button"
               @click.stop="emit('closePrivateRoom')"
               class="ml-0.5 hover:text-rose-600"
-              title="一键解散房间"
+              title="结束私聊"
             >
               <X class="w-3 h-3" />
             </button>

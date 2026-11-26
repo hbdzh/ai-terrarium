@@ -2,13 +2,14 @@
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useWindowSize } from "@vueuse/core";
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { Telescope, ClipboardList, X, Copy, Check, Code2, Scissors, ClipboardPaste, TextSelect } from "lucide-vue-next";
+import { Telescope, ClipboardList, X, Copy, Check, Code2, Scissors, ClipboardPaste, TextSelect, PanelLeft, PanelRight } from "lucide-vue-next";
 import { isMacOS, isWindows, isDesktopOS, isMobileOS } from "./utils/platform";
 import { writeClipboardText, readClipboardText } from "./utils/clipboard";
 import { warmupMarkdownParser } from "./utils/markdown";
 import { triggerHaptic } from "./utils/native";
 import { resolvedTheme, setThemePreference, syncThemeVisuals, themePreference } from "./utils/theme";
 import { initialDataPromises } from "./bootstrap";
+import { seedApiProfilesFromConfig } from "./utils/config";
 import { renderPureScriptPngBytes } from "./utils/scriptExport";
 import WindowsTitleBar from "./components/WindowsTitleBar.vue";
 import ResizablePanelGroup from "./components/ui/ResizablePanelGroup.vue";
@@ -26,9 +27,11 @@ const Sheet = defineAsyncComponent(() => import("./components/ui/Sheet.vue"));
 const ReplayController = defineAsyncComponent(() => import("./components/ReplayController.vue"));
 const SharedBoardDrawer = defineAsyncComponent(() => import("./components/SharedBoardDrawer.vue"));
 const SettingsDrawer = defineAsyncComponent(() => import("./components/SettingsDrawer.vue"));
+const ScenarioScriptModal = defineAsyncComponent(() => import("./components/ScenarioScriptModal.vue"));
 const NewExperimentModal = defineAsyncComponent(() => import("./components/NewExperimentModal.vue"));
 const ForkTweakModal = defineAsyncComponent(() => import("./components/ForkTweakModal.vue"));
 import type {
+  ApiProfile,
   BoardApprovalMode,
   BoardApprovalRequest,
   CharacterCard,
@@ -50,6 +53,7 @@ const experiment = ref<ExperimentDetail | null>(null);
 const experiments = ref<ExperimentSummary[]>([]);
 const presets = ref<PresetTemplate[]>([]);
 const characterCards = ref<CharacterCard[]>([]);
+const apiProfiles = ref<ApiProfile[]>([]);
 const engineState = ref<EngineState>("idle");
 const statusReason = ref<string | null>(null);
 const streaming = ref<StreamingDraft | null>(null);
@@ -89,6 +93,8 @@ const promptCopied = ref(false);
 
 const settingsOpen = ref(false);
 const settingsDrawerRef = ref<{ requestClose?: () => void } | null>(null);
+const scriptModalOpen = ref(false);
+const scriptModalRef = ref<{ requestClose?: () => void } | null>(null);
 const newExpOpen = ref(false);
 
 const { width: windowWidth, height: windowHeight } = useWindowSize();
@@ -910,13 +916,13 @@ function handleStreamEvent(ev: StreamEvent) {
       observerRunning.value = false;
       experiment.value.observerNotes.unshift(ev.note);
       if (ev.note.perturbationInjected) {
-        showToast("观察员检测到对话僵化 > 80，已自动注入破局扰动");
+        showToast("检测到对话停滞，已自动触发场景事件");
       }
       break;
 
     case "observer_error":
       observerRunning.value = false;
-      showToast(`观察员异常: ${ev.error}`);
+      showToast(`局势分析异常: ${ev.error}`);
       break;
 
     case "observer_skipped":
@@ -928,7 +934,7 @@ function handleStreamEvent(ev: StreamEvent) {
       experiment.value.compactedSummary = ev.compactedSummary;
       contextUsagePct.value = ev.contextUsagePct;
       showToast(
-        `上下文已自动折叠为历史纪要（~${ev.tokensBefore.toLocaleString()} → ${ev.tokensAfter.toLocaleString()} tok）`
+        `早期对话已自动摘要（~${ev.tokensBefore.toLocaleString()} → ${ev.tokensAfter.toLocaleString()} tok）`
       );
       break;
 
@@ -997,7 +1003,7 @@ function handleStreamEvent(ev: StreamEvent) {
 
     case "narrative_finale_reached":
       finalePromptVisible.value = true;
-      showToast(`已达第 ${ev.totalTurns}/${ev.targetTurns} 轮目标，故事自然落幕`);
+      showToast(`已达第 ${ev.totalTurns}/${ev.targetTurns} 轮目标，本局已收尾`);
       break;
   }
 }
@@ -1023,6 +1029,14 @@ onMounted(async () => {
         settingsDrawerRef.value.requestClose();
       } else {
         settingsOpen.value = false;
+      }
+      return true;
+    }
+    if (scriptModalOpen.value) {
+      if (scriptModalRef.value?.requestClose) {
+        scriptModalRef.value.requestClose();
+      } else {
+        scriptModalOpen.value = false;
       }
       return true;
     }
@@ -1085,6 +1099,13 @@ onMounted(async () => {
     initialDataPromises.characterCards.then((cards) => {
       characterCards.value = cards;
     }),
+    initialDataPromises.apiProfiles
+      .then((profiles) => {
+        apiProfiles.value = profiles;
+      })
+      .catch(() => {
+        apiProfiles.value = [];
+      }),
     initialDataPromises.uiPrefs
       .then((prefs) => {
         desktopLeftSidebarOpen.value = prefs.leftSidebarOpen;
@@ -1108,12 +1129,23 @@ onMounted(async () => {
         uiPrefsLoaded = true;
       }),
   ]);
+
+  if (apiProfiles.value.length === 0) {
+    const seeded = seedApiProfilesFromConfig(experiment.value?.config ?? null);
+    try {
+      apiProfiles.value = await invoke<ApiProfile[]>("save_api_profiles", {
+        profiles: seeded,
+      });
+    } catch {
+      apiProfiles.value = seeded;
+    }
+  }
 });
 
 async function startEngine() {
   if (missingKeys.value) {
     settingsOpen.value = true;
-    showToast("请先为所有参与对话的 AI 节点配置 API Key");
+    showToast("请先为所有参与对话的角色配置 API Key");
     return;
   }
   await invoke("start_engine");
@@ -1126,10 +1158,16 @@ async function pauseEngine() {
 async function stepEngine(targetAgentId?: string | null) {
   if (missingKeys.value) {
     settingsOpen.value = true;
-    showToast("请先为所有参与对话的 AI 节点配置 API Key");
+    showToast("请先为所有参与对话的角色配置 API Key");
     return;
   }
   await invoke("step_engine", { targetAgentId: targetAgentId ?? null });
+}
+
+async function saveApiProfiles(nextProfiles: ApiProfile[]) {
+  apiProfiles.value = await invoke<ApiProfile[]>("save_api_profiles", {
+    profiles: nextProfiles,
+  });
 }
 
 async function saveConfig(newConfig: ExperimentConfig) {
@@ -1147,11 +1185,6 @@ async function saveConfig(newConfig: ExperimentConfig) {
 async function handleSavePreset(preset: PresetTemplate) {
   presets.value = await invoke<PresetTemplate[]>("save_preset", { preset });
   showToast(`预设模板「${preset.name}」已保存`);
-}
-
-async function handleResetPreset(presetId: string) {
-  presets.value = await invoke<PresetTemplate[]>("reset_builtin_preset", { presetId });
-  showToast("已恢复预设默认提示词");
 }
 
 async function handleDeletePreset(presetId: string) {
@@ -1292,10 +1325,10 @@ async function handleToggleApprovalMode(mode: BoardApprovalMode) {
   experiment.value.config = updatedConfig;
   showToast(
     mode === "approval"
-      ? "已开启造物主人工审批拦截"
+      ? "已开启白板人工审核"
       : mode === "guardian"
         ? "已开启防泄密审核"
-        : "已切换为白板自动放行"
+        : "已切换为白板自动通过"
   );
 }
 
@@ -1354,7 +1387,7 @@ async function handleDirectorCommand(instruction: string) {
     });
     showToast(`🎬 ${summary}`);
   } catch (err: any) {
-    showToast(`导演遥控解析失败: ${err?.toString?.() ?? err}`);
+    showToast(`导演指令解析失败: ${err?.toString?.() ?? err}`);
   } finally {
     directorBusy.value = false;
   }
@@ -1368,7 +1401,7 @@ async function handleStartPrivateRoom(memberIds: string[], turns: number) {
       memberIds,
       turns,
     });
-    showToast(`已开启临时私密房间（${turns}轮），仅成员互相可见`);
+    showToast(`已开启私密房间（${turns}轮），仅成员可见`);
   } catch (err: any) {
     showToast(`开启私密房间失败: ${err?.toString?.() ?? err}`);
   }
@@ -1394,7 +1427,7 @@ async function handleSaveCharacterCard(
       labelOverride: payload.label ?? null,
       promptOverride: payload.systemPrompt ?? null,
     });
-    showToast("角色已提取并存入跨世界灵魂角色库");
+    showToast("角色已保存至角色库");
   } catch (err: any) {
     showToast(`存入角色库失败: ${err?.toString?.() ?? err}`);
   }
@@ -1432,9 +1465,9 @@ async function handleGenerateReport() {
       experimentId: experiment.value.id,
     });
     experiment.value.finalReport = report;
-    showToast("结案复盘简报已生成");
+    showToast("复盘报告已生成");
   } catch (err: any) {
-    showToast(`生成复盘简报失败: ${err?.toString?.() ?? err}`);
+    showToast(`生成复盘报告失败: ${err?.toString?.() ?? err}`);
   } finally {
     generatingReport.value = false;
   }
@@ -1450,10 +1483,10 @@ async function handleDistillImprints() {
     );
     characterCards.value = res.cards;
     showToast(
-      `已提炼 ${res.distilled.length} 位角色的本局经历烙印并写入灵魂库`
+      `已提取 ${res.distilled.length} 位角色的经历记忆并保存`
     );
   } catch (err: any) {
-    showToast(`提炼经历烙印失败: ${err?.toString?.() ?? err}`);
+    showToast(`提取经历记忆失败: ${err?.toString?.() ?? err}`);
   } finally {
     distillingImprints.value = false;
   }
@@ -1471,9 +1504,9 @@ async function handleUpdateCardImprints(payload: {
         memoryImprints: payload.memoryImprints,
       }
     );
-    showToast("灵魂角色记忆烙印已更新");
+    showToast("经历记忆已更新");
   } catch (err: any) {
-    showToast(`更新烙印失败: ${err?.toString?.() ?? err}`);
+    showToast(`更新经历记忆失败: ${err?.toString?.() ?? err}`);
   }
 }
 
@@ -1664,7 +1697,7 @@ async function handleInspectPrompt(messageId: string) {
   try {
     const raw = await invoke<string | null>("get_message_raw_prompt", { messageId });
     if (!raw) {
-      showToast("该轮消息未记录原始 Prompt（可能为早期历史存档）");
+      showToast("该轮消息未记录原始提示词（可能为早期历史存档）");
       return;
     }
     promptModalRaw.value = raw;
@@ -1676,7 +1709,7 @@ async function handleInspectPrompt(messageId: string) {
     promptCopied.value = false;
     promptModalOpen.value = true;
   } catch (err: any) {
-    showToast(`读取原始 Prompt 失败: ${err?.toString?.() ?? err}`);
+    showToast(`读取原始提示词失败: ${err?.toString?.() ?? err}`);
   }
 }
 
@@ -1700,12 +1733,27 @@ async function copyRawPrompt() {
 <template>
   <div
     id="app-main-shell"
-    class="h-dvh w-screen flex overflow-hidden text-[#1D1D1F]"
+    class="relative h-dvh w-screen flex overflow-hidden text-[#1D1D1F]"
     :class="[
       isWindows ? 'bg-transparent' : isMobileOS && isDesktopSidebar && desktopLeftSidebarOpen ? 'bg-[#F9F9FB]' : 'bg-white',
       isMobileOS ? 'pl-[var(--safe-left,0px)] pr-[var(--safe-right,0px)]' : '',
     ]"
   >
+    <!-- Persistent Fixed Left Sidebar Toggle on Desktop (never shifts on open/collapse) -->
+    <div
+      v-if="isDesktopSidebar && !isWindows"
+      class="pointer-events-none absolute top-0 left-0 z-30 h-[46px] flex items-center"
+      :class="isMacOS ? 'pl-[80px]' : 'pl-3'"
+    >
+      <button
+        type="button"
+        @click="triggerHaptic('light'); leftSidebarOpen = !leftSidebarOpen"
+        class="pointer-events-auto w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.05] active:bg-black/[0.08] transition-colors outline-none"
+        title="展开/收起左侧实验档案栏 (Ctrl+B)"
+      >
+        <PanelLeft class="w-4 h-4 stroke-[1.75]" />
+      </button>
+    </div>
     <!-- Full-height Native Left Archive Sidebar (Desktop >= 1024px or Foldable/Tablet Landscape) -->
     <aside
       v-if="isDesktopSidebar"
@@ -1789,7 +1837,7 @@ async function copyRawPrompt() {
       />
 
       <div
-        class="flex-1 min-h-0 flex flex-col overflow-hidden bg-white transition-[border-radius] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
+        class="relative flex-1 min-h-0 flex flex-col overflow-hidden bg-white transition-[border-radius] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
         :class="
           isWindows
             ? isDesktopSidebar && desktopLeftSidebarOpen
@@ -1798,6 +1846,25 @@ async function copyRawPrompt() {
             : ''
         "
       >
+        <!-- Persistent Single Right Inspector Toggle at Top-Right Corner on Wide Desktop (replaces duplicate toggle + X) -->
+        <div
+          v-if="isWideDesktop"
+          class="pointer-events-none absolute top-0 right-3.5 z-30 h-[46px] flex items-center"
+        >
+          <button
+            type="button"
+            @click="triggerHaptic('light'); inspectorOpen = !inspectorOpen"
+            class="pointer-events-auto relative w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.05] active:bg-black/[0.08] transition-colors outline-none"
+            title="展开/收起右侧边栏 (Ctrl+\)"
+          >
+            <PanelRight class="w-4 h-4 stroke-[1.75]" />
+            <span
+              v-if="pendingApproval"
+              class="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-500 animate-ping"
+            ></span>
+          </button>
+        </div>
+
         <template v-if="!isWideDesktop">
         <TopControlBar
           :experiment="experiment"
@@ -1807,7 +1874,9 @@ async function copyRawPrompt() {
           :replay-active="replayActive"
           :sidebar-open="leftSidebarOpen"
           :traffic-light-clearance="isMacOS && !(isDesktopSidebar && desktopLeftSidebarOpen)"
+          :hide-sidebar-toggle="isDesktopSidebar && !isWindows"
           :inspector-open="inspectorOpen"
+          :hide-inspector-toggle="false"
           :has-pending-approval="Boolean(pendingApproval)"
           :context-usage-pct="contextUsagePct"
           :context-active-tokens="contextActiveTokens"
@@ -1817,6 +1886,7 @@ async function copyRawPrompt() {
           @pause="pauseEngine"
           @step="stepEngine"
           @open-settings="settingsOpen = true"
+          @open-script="scriptModalOpen = true"
           @rename-experiment="renameExperiment"
           @toggle-replay="toggleReplay"
           @toggle-blind-guess="blindGuessMode = !blindGuessMode"
@@ -1827,7 +1897,7 @@ async function copyRawPrompt() {
         <!-- Mobile View Switcher (portrait phones & vertical foldables/tablets) unified into single header surface -->
         <div
           v-if="isMobile"
-          class="shrink-0 px-3 pb-2 pt-1.5 bg-white border-b border-black/[0.06]"
+          class="shrink-0 px-3 pb-1.5 pt-1 bg-white"
         >
           <div class="grid grid-cols-3 p-1 rounded-xl bg-[#EFEFF4] gap-1">
             <button
@@ -1865,7 +1935,7 @@ async function copyRawPrompt() {
               class="h-8 flex items-center justify-center gap-1 rounded-lg text-[12.5px] font-medium transition-all"
               :class="mobileTab === 'observer' ? 'bg-white text-[#1D1D1F] shadow-[0_1px_3px_rgba(0,0,0,0.08)]' : 'text-slate-600'"
             >
-              <span>观察舱</span>
+              <span>局势分析</span>
               <span class="text-[11px] opacity-65 tabular-nums">({{ displayObserverNotes.length }})</span>
             </button>
           </div>
@@ -1901,7 +1971,9 @@ async function copyRawPrompt() {
               :replay-active="replayActive"
               :sidebar-open="leftSidebarOpen"
               :traffic-light-clearance="isMacOS && !(isDesktopSidebar && desktopLeftSidebarOpen)"
+              :hide-sidebar-toggle="isDesktopSidebar && !isWindows"
               :inspector-open="inspectorOpen"
+              :hide-inspector-toggle="true"
               :has-pending-approval="Boolean(pendingApproval)"
               :context-usage-pct="contextUsagePct"
               :context-active-tokens="contextActiveTokens"
@@ -1911,6 +1983,7 @@ async function copyRawPrompt() {
               @pause="pauseEngine"
               @step="stepEngine"
               @open-settings="settingsOpen = true"
+              @open-script="scriptModalOpen = true"
               @rename-experiment="renameExperiment"
               @toggle-replay="toggleReplay"
               @toggle-blind-guess="blindGuessMode = !blindGuessMode"
@@ -1993,45 +2066,41 @@ async function copyRawPrompt() {
           >
               <div
                 :data-tauri-drag-region="isMacOS ? '' : undefined"
-                class="flex items-center justify-between gap-2 px-4 border-b border-black/[0.05] bg-white shrink-0 select-none"
+                class="flex items-center justify-between gap-2 pl-3.5 pr-12 bg-white shrink-0 select-none"
                 :class="
                   isMobileOS
                     ? 'pt-[var(--safe-top,env(safe-area-inset-top))] min-h-[calc(46px+var(--safe-top,0px))]'
                     : 'h-[46px]'
                 "
               >
-                <div class="flex items-center gap-4">
+                <div class="flex items-center gap-1">
                   <button
                     type="button"
                     @click="inspectorTab = 'observer'"
-                    class="relative h-[46px] flex items-center gap-1.5 text-[13px] transition-colors"
+                    class="h-7 px-2.5 rounded-lg flex items-center gap-1.5 text-[12.5px] transition-colors"
                     :class="
                       inspectorTab === 'observer'
-                        ? 'font-semibold text-[#1D1D1F]'
-                        : 'font-medium text-slate-400 hover:text-slate-700'
+                        ? 'bg-black/[0.055] font-semibold text-[#1D1D1F]'
+                        : 'font-medium text-slate-400 hover:text-slate-700 hover:bg-black/[0.035]'
                     "
                   >
                     <Telescope class="w-3.5 h-3.5" />
-                    <span>观察舱</span>
+                    <span>局势分析</span>
                     <span
                       v-if="displayObserverNotes.length > 0"
                       class="text-[11px] opacity-65 tabular-nums"
                     >
                       ({{ displayObserverNotes.length }})
                     </span>
-                    <span
-                      v-if="inspectorTab === 'observer'"
-                      class="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-[#1D1D1F]"
-                    ></span>
                   </button>
                   <button
                     type="button"
                     @click="inspectorTab = 'board'"
-                    class="relative h-[46px] flex items-center gap-1.5 text-[13px] transition-colors"
+                    class="relative h-7 px-2.5 rounded-lg flex items-center gap-1.5 text-[12.5px] transition-colors"
                     :class="
                       inspectorTab === 'board'
-                        ? 'font-semibold text-[#1D1D1F]'
-                        : 'font-medium text-slate-400 hover:text-slate-700'
+                        ? 'bg-black/[0.055] font-semibold text-[#1D1D1F]'
+                        : 'font-medium text-slate-400 hover:text-slate-700 hover:bg-black/[0.035]'
                     "
                   >
                     <ClipboardList class="w-3.5 h-3.5" />
@@ -2047,21 +2116,8 @@ async function copyRawPrompt() {
                       v-if="pendingApproval"
                       class="w-2 h-2 rounded-full bg-amber-500 animate-ping"
                     ></span>
-                    <span
-                      v-if="inspectorTab === 'board'"
-                      class="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-[#1D1D1F]"
-                    ></span>
                   </button>
                 </div>
-
-                <button
-                  type="button"
-                  @click="inspectorOpen = false"
-                  class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-[#1D1D1F] hover:bg-black/[0.05] transition-colors"
-                  title="收起右栏"
-                >
-                  <X class="w-3.5 h-3.5" />
-                </button>
               </div>
 
               <div class="flex-1 min-h-0 overflow-hidden">
@@ -2171,11 +2227,11 @@ async function copyRawPrompt() {
         <Sheet
           v-if="isTablet"
           :open="sheetInspectorOpen"
-          title="观察舱与共享白板"
+          title="局势分析与共享白板"
           width-class="w-[380px] min-[900px]:w-[420px] max-w-[86vw]"
           @update:open="sheetInspectorOpen = $event"
         >
-          <div class="h-12 flex items-center justify-between gap-2 px-4 border-b border-black/[0.06] bg-white shrink-0">
+          <div class="h-12 flex items-center justify-between gap-2 px-4 bg-white shrink-0">
             <div class="flex items-center p-0.5 rounded-xl bg-[#EFEFF4]">
               <button
                 type="button"
@@ -2188,7 +2244,7 @@ async function copyRawPrompt() {
                 "
               >
                 <Telescope class="w-3.5 h-3.5" />
-                <span>观察舱</span>
+                <span>局势分析</span>
                 <span
                   v-if="displayObserverNotes.length > 0"
                   class="text-[11px] opacity-65 tabular-nums"
@@ -2421,13 +2477,13 @@ async function copyRawPrompt() {
         v-if="finalePromptVisible"
         class="fixed top-28 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2 rounded-full bg-white/95 backdrop-blur-xl border border-black/[0.08] shadow-[0_12px_36px_rgba(0,0,0,0.14)] text-xs"
       >
-        <span class="font-medium text-[#1D1D1F]">🎭 本局已达目标轮数自然落幕</span>
+        <span class="font-medium text-[#1D1D1F]">本局已达目标轮数</span>
         <button
           type="button"
           @click="openFinaleReport"
           class="px-3 py-1 rounded-full bg-[#007AFF] hover:bg-[#0062CC] text-white font-medium transition"
         >
-          生成结案复盘简报
+          生成复盘报告
         </button>
         <button
           type="button"
@@ -2443,13 +2499,23 @@ async function copyRawPrompt() {
       ref="settingsDrawerRef"
       :open="settingsOpen"
       :config="experiment?.config ?? null"
-      :presets="presets"
-      :character-cards="characterCards"
+      :api-profiles="apiProfiles"
       @close="settingsOpen = false"
       @save="saveConfig"
+      @save-api-profiles="saveApiProfiles"
+      @notify="showToast"
+    />
+
+    <ScenarioScriptModal
+      ref="scriptModalRef"
+      :open="scriptModalOpen"
+      :experiment-title="experiment?.title ?? ''"
+      :config="experiment?.config ?? null"
+      :character-cards="characterCards"
+      :api-profiles="apiProfiles"
+      @close="scriptModalOpen = false"
+      @save="saveConfig"
       @save-preset="handleSavePreset"
-      @reset-preset="handleResetPreset"
-      @delete-preset="handleDeletePreset"
       @delete-character-card="handleDeleteCharacterCard"
       @save-character-card="handleSaveCharacterCard"
       @notify="showToast"
@@ -2460,6 +2526,7 @@ async function copyRawPrompt() {
       :presets="presets"
       :current-config="experiment?.config ?? null"
       :character-cards="characterCards"
+      :api-profiles="apiProfiles"
       @close="newExpOpen = false"
       @create="createNewExperiment"
       @save-preset="handleSavePreset"
@@ -2471,6 +2538,7 @@ async function copyRawPrompt() {
       :title="experiment?.title ?? ''"
       :config="experiment?.config ?? null"
       :character-cards="characterCards"
+      :api-profiles="apiProfiles"
       @close="forkTweakOpen = false"
       @save-and-continue="handleSaveForkTweak"
     />
@@ -2507,7 +2575,7 @@ async function copyRawPrompt() {
             >
               <Check v-if="promptCopied" class="w-3.5 h-3.5 text-emerald-600" />
               <Copy v-else class="w-3.5 h-3.5" />
-              <span>{{ promptCopied ? "已复制 JSON" : "一键复制" }}</span>
+              <span>{{ promptCopied ? "已复制 JSON" : "复制 JSON" }}</span>
             </button>
             <button
               type="button"

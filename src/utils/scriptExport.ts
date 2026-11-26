@@ -48,8 +48,8 @@ export function buildPureScriptDocument(detail: ExperimentDetail): PureScriptDoc
   const cast = agents.map((ag, idx) => {
     const colorHex = ROLE_COLORS[idx % ROLE_COLORS.length];
     agentColorMap.set(ag.id, colorHex);
-    agentLabelMap.set(ag.id, ag.label || `智能体 ${idx + 1}`);
-    return { label: ag.label || `智能体 ${idx + 1}`, colorHex };
+    agentLabelMap.set(ag.id, ag.label || `角色 ${idx + 1}`);
+    return { label: ag.label || `角色 ${idx + 1}`, colorHex };
   });
 
   const labelFor = (id: string | null) =>
@@ -92,10 +92,10 @@ export function buildPureScriptDocument(detail: ExperimentDetail): PureScriptDoc
       if (isPassNoticeClient(msg)) {
         items.push({ kind: "pass", content: clean });
       } else {
-        items.push({ kind: "god_system", speaker: "环境旁白", content: clean });
+        items.push({ kind: "god_system", speaker: "场景事件", content: clean });
       }
     } else if (msg.role === "GodPublic") {
-      items.push({ kind: "god_public", speaker: "路人", content: clean });
+      items.push({ kind: "god_public", speaker: "外部插话", content: clean });
     }
     // GodWhisper intentionally excluded from pure script mode
 
@@ -340,7 +340,7 @@ export async function renderPureScriptPngBytes(
         ctx.stroke();
         ctx.font = `600 12px ${fontFamily}`;
         ctx.fillStyle = "#0062CC";
-        ctx.fillText(`🔭 观察员阶段手记 · ${item.meta ?? ""}`, padX + 16, boxY + 22);
+        ctx.fillText(`分析笔记 · ${item.meta ?? ""}`, padX + 16, boxY + 22);
         ctx.font = `400 13px ${fontFamily}`;
         ctx.fillStyle = "#334155";
         nLines.forEach((ln, idx) => {
@@ -363,7 +363,7 @@ export async function renderPureScriptPngBytes(
         ctx.fill();
         ctx.font = `600 11.5px ${fontFamily}`;
         ctx.fillStyle = isSys ? "#CBD5E1" : "#047857";
-        ctx.fillText(isSys ? "🌐 环境旁白" : "👤 路人插话", padX + 16, boxY + 21);
+        ctx.fillText(isSys ? "场景事件" : "外部插话", padX + 16, boxY + 21);
         ctx.font = `400 13.5px ${fontFamily}`;
         ctx.fillStyle = isSys ? "#F8FAFC" : "#065F46";
         gLines.forEach((ln, idx) => {
@@ -431,7 +431,7 @@ export async function renderPureScriptPngBytes(
     ctx.stroke();
     ctx.font = `400 11.5px ${fontFamily}`;
     ctx.fillStyle = "#94A3B8";
-    ctx.fillText("AI Terrarium · 纯享剧本模式导出", padX, footY + 24);
+    ctx.fillText("AI Terrarium · 剧本导出", padX, footY + 24);
   });
   y += 54;
 

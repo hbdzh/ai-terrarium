@@ -45,7 +45,7 @@ const agentNoteEntries = computed(() => {
   const list = props.agents ?? [];
   const entries = list.map((ag, idx) => ({
     id: ag.id,
-    label: ag.label || `智能体 ${idx + 1}`,
+    label: ag.label || `角色 ${idx + 1}`,
     modelName: ag.modelName,
     note: (notesMap[ag.id] ?? "").trim(),
   }));
@@ -128,7 +128,7 @@ function cycleApprovalMode() {
   <aside
     v-if="open"
     class="h-full w-full flex flex-col bg-white overflow-hidden"
-    :class="embedded ? '' : 'md:w-[320px] lg:w-[360px] shrink-0 border-l border-black/[0.06] z-10'"
+    :class="embedded ? '' : 'md:w-[320px] lg:w-[360px] shrink-0 border-l border-black/[0.035] z-10'"
   >
     <!-- Header (hidden when embedded in mobile/desktop tab switcher) -->
     <div
@@ -140,10 +140,10 @@ function cycleApprovalMode() {
           <ClipboardList class="w-4 h-4" />
         </div>
         <div class="min-w-0">
-          <h3 class="text-xs font-semibold text-[#1D1D1F] truncate">共享实验室白板</h3>
+          <h3 class="text-xs font-semibold text-[#1D1D1F] truncate">共享白板</h3>
           <p class="text-[10.5px] text-slate-400 truncate">
             <template v-if="lastActor">{{ lastActor }}: {{ lastReason || "已更新" }}</template>
-            <template v-else>AI 共享记忆 / 设定与线索板</template>
+            <template v-else>角色共享设定与线索记录</template>
           </p>
         </div>
       </div>
@@ -152,15 +152,15 @@ function cycleApprovalMode() {
         type="button"
         @click="emit('close')"
         class="p-1.5 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition"
-        title="收起白板面板"
+        title="收起面板"
       >
         <X class="w-4 h-4" />
       </button>
     </div>
 
     <!-- Approval Mode & View Switcher -->
-    <div class="px-3.5 md:px-3 py-2.5 md:py-2 border-b border-black/[0.05] bg-white flex items-center justify-between gap-2 shrink-0">
-      <div class="flex items-center gap-0.5 p-1 md:p-0.5 rounded-full bg-[#F2F2F7] border border-black/[0.04]">
+    <div class="px-3.5 md:px-3 py-2 md:py-1.5 bg-white flex items-center justify-between gap-2 shrink-0">
+      <div class="flex items-center gap-0.5 p-1 md:p-0.5 rounded-full bg-[#F2F2F7]">
         <button
           type="button"
           @click="viewMode = 'rendered'"
@@ -177,7 +177,7 @@ function cycleApprovalMode() {
           :class="viewMode === 'diff' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
         >
           <GitCompare class="w-3.5 h-3.5 md:w-3 md:h-3" />
-          Diff
+          修改对比
           <span v-if="hasDiff" class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
         </button>
         <button
@@ -195,7 +195,7 @@ function cycleApprovalMode() {
           @click="viewMode = 'notes'"
           class="flex items-center gap-1 px-3 py-1 md:px-2 md:py-0.5 rounded-full text-[12px] md:text-[10.5px] font-medium transition whitespace-nowrap"
           :class="viewMode === 'notes' ? 'bg-violet-600 text-white' : 'text-slate-600'"
-          title="查看每位 AI 的角色私密备忘（仅本人可见）"
+          title="查看各角色的私密备忘"
         >
           <Lock class="w-3.5 h-3.5 md:w-3 md:h-3" />
           <span>备忘</span>
@@ -223,9 +223,9 @@ function cycleApprovalMode() {
         "
         :title="
           approvalMode === 'approval'
-            ? '当前：人工审批（点击切换为自动放行）'
+            ? '当前：人工审核（点击切换为自动放行）'
             : approvalMode === 'guardian'
-              ? '当前：防泄密审核（点击切换为人工审批）'
+              ? '当前：防泄密审核（点击切换为人工审核）'
               : '当前：自动放行（点击切换为防泄密审核）'
         "
       >
@@ -234,7 +234,7 @@ function cycleApprovalMode() {
         <ShieldCheck v-else class="w-3.5 h-3.5 md:w-3 md:h-3" />
         <span>{{
           approvalMode === "approval"
-            ? "人工审批"
+            ? "人工审核"
             : approvalMode === "guardian"
               ? "防泄密审核"
               : "自动放行"
@@ -243,12 +243,16 @@ function cycleApprovalMode() {
     </div>
 
     <!-- Body -->
-    <div class="flex-1 overflow-y-auto p-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))]">
+    <div class="relative flex-1 min-h-0 flex flex-col">
+      <div
+        class="pointer-events-none absolute inset-x-0 top-0 h-5 z-10 bg-gradient-to-b from-white via-white/80 to-transparent"
+      ></div>
+      <div class="flex-1 overflow-y-auto px-4 pt-3 pb-[calc(1.25rem+env(safe-area-inset-bottom))]">
       <template v-if="viewMode === 'edit'">
         <div class="h-full flex flex-col gap-2.5">
           <textarea
             v-model="draftText"
-            placeholder="在此输入或编辑共享 Markdown 白板（如：角色设定、案件线索、已确认共识...）"
+            placeholder="输入或编辑共享白板内容（支持 Markdown）"
             class="flex-1 w-full rounded-2xl border border-black/[0.08] bg-white p-3.5 text-[14px] md:text-xs font-mono leading-relaxed text-[#1D1D1F] outline-none focus:ring-2 focus:ring-[#007AFF]/30 resize-none"
           ></textarea>
           <div class="flex justify-end gap-2">
@@ -298,18 +302,18 @@ function cycleApprovalMode() {
           <div class="flex items-center justify-between gap-2 px-0.5">
             <div class="flex items-center gap-1.5 text-[12px] font-semibold text-[#1D1D1F]">
               <Lock class="w-3.5 h-3.5 text-violet-600" />
-              <span>角色私密备忘（造物主上帝视角）</span>
+              <span>角色私密备忘</span>
             </div>
-            <span class="text-[11px] text-slate-400">角色间彼此隔离</span>
+            <span class="text-[11px] text-slate-400">仅本人可见</span>
           </div>
 
           <div
             v-if="blindGuessMode"
             class="rounded-2xl border border-dashed border-violet-200 bg-violet-50/60 p-5 text-center text-xs text-violet-700 leading-relaxed space-y-1"
           >
-            <div class="font-semibold">🔒 盲猜模式已开启</div>
+            <div class="font-semibold">盲猜模式已开启</div>
             <div class="text-[11px] text-slate-500">
-              角色私密备忘已遮蔽。再次点击顶部「盲猜模式」即可揭晓全员心里账本。
+              私密备忘已隐藏，退出盲猜模式后可查看。
             </div>
           </div>
 
@@ -317,9 +321,9 @@ function cycleApprovalMode() {
             v-else-if="!enablePrivateNotes && nonEmptyNoteCount === 0"
             class="rounded-2xl border border-dashed border-slate-200 p-5 text-center text-xs text-slate-500 leading-relaxed space-y-1"
           >
-            <div>当前未开启「角色私密备忘」功能。</div>
+            <div>未开启「角色私密备忘」</div>
             <div class="text-[11px] text-slate-400">
-              可在「设置 → 调度与安全阀」或新建实验时开启，各 AI 即可记录仅自己可见的心里账本。
+              可在「设置 → 调度与安全」或新建推演时开启。
             </div>
           </div>
 
@@ -368,9 +372,8 @@ function cycleApprovalMode() {
           v-if="!boardContent.trim()"
           class="rounded-2xl border border-dashed border-slate-200 p-6 text-center text-xs text-slate-400 leading-relaxed"
         >
-          共享白板当前为空。<br />
-          白板内容已实时注入 AI 系统提示词，参与者可通过
-          <code class="px-1 py-0.5 bg-slate-100 rounded text-[11px]">update_board</code> 工具共同维护此空间。
+          共享白板为空。<br />
+          角色在对话中会通过工具自动记录关键线索与共识。
         </div>
         <div
           v-else
@@ -404,7 +407,7 @@ function cycleApprovalMode() {
             v-if="blindGuessMode"
             class="rounded-2xl border border-dashed border-violet-200 bg-violet-50/60 p-4 text-center text-[11.5px] text-violet-700"
           >
-            🔒 盲猜模式已开启，角色私密备忘已遮蔽
+            盲猜模式已开启，私密备忘已隐藏
           </div>
           <div v-else class="space-y-2">
             <div
@@ -432,6 +435,7 @@ function cycleApprovalMode() {
           </div>
         </div>
       </template>
+      </div>
     </div>
   </aside>
 </template>

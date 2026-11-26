@@ -4,6 +4,12 @@ import { X, GitBranch, Play, Check, Plus, Trash2 } from "lucide-vue-next";
 import AdaptiveModal from "./ui/AdaptiveModal.vue";
 import CharacterLibraryPopover from "./CharacterLibraryPopover.vue";
 import ExperimentTagsPicker from "./ExperimentTagsPicker.vue";
+import { DEFAULT_BASE_URL, DEFAULT_MODEL_NAME } from "../constants/providers";
+import {
+  applyApiProfileToNode,
+  resolveNodeApiProfileId,
+  syncConfigWithApiProfiles,
+} from "../utils/config";
 import {
   applyTagLocksToMechanics,
   toggleExperimentTag,
@@ -16,13 +22,14 @@ import {
   findDuplicateAgentLabel,
   nextUniqueAgentLabel,
 } from "../utils/agents";
-import type { CharacterCard, ExperimentConfig, NodeConfig } from "../types";
+import type { ApiProfile, CharacterCard, ExperimentConfig, NodeConfig } from "../types";
 
 const props = defineProps<{
   open: boolean;
   title: string;
   config: ExperimentConfig | null;
   characterCards?: CharacterCard[];
+  apiProfiles: ApiProfile[];
 }>();
 
 const emit = defineEmits<{
@@ -42,6 +49,9 @@ watch(
       draftTitle.value = t;
       const cloned: ExperimentConfig = JSON.parse(JSON.stringify(cfg));
       cloned.tags = Array.isArray(cloned.tags) ? [...cloned.tags] : [];
+      cloned.agents.forEach((a) => {
+        a.apiProfileId = resolveNodeApiProfileId(a, props.apiProfiles);
+      });
       draftConfig.value = cloned;
       errorText.value = null;
     }
@@ -86,27 +96,36 @@ function applyCard(idx: number, card: CharacterCard) {
   const parts = [card.basePrompt.trim()];
   if (inheritCardMemory.value) {
     if (card.behaviorTraits.trim()) {
-      parts.push(`【跨世界博弈特质】\n${card.behaviorTraits.trim()}`);
+      parts.push(`【行为特征】\n${card.behaviorTraits.trim()}`);
     }
     if (card.memoryImprints && card.memoryImprints.length > 0) {
       parts.push(
-        `【跨宇宙记忆烙印】\n${card.memoryImprints.map((m) => `- ${m}`).join("\n")}`
+        `【经历记忆】\n${card.memoryImprints.map((m) => `- ${m}`).join("\n")}`
       );
     }
   }
   target.systemPrompt = parts.filter(Boolean).join("\n\n");
 }
 
+function selectAgentProfile(ag: NodeConfig, profileId: string) {
+  const prof = props.apiProfiles.find((p) => p.id === profileId) ?? props.apiProfiles[0];
+  if (prof) {
+    applyApiProfileToNode(ag, prof);
+  }
+}
+
 function addAgent() {
   if (!draftConfig.value) return;
+  const prof = props.apiProfiles[0];
   const first = draftConfig.value.agents[0];
   const label = nextUniqueAgentLabel(draftConfig.value.agents);
   const newNode: NodeConfig = {
     id: `ai-${Date.now().toString(36)}-${draftConfig.value.agents.length + 1}`,
     label,
-    baseUrl: first?.baseUrl || "https://api.deepseek.com/v1",
-    apiKey: first?.apiKey || "",
-    modelName: first?.modelName || "deepseek-chat",
+    apiProfileId: prof?.id ?? null,
+    baseUrl: prof?.baseUrl || first?.baseUrl || DEFAULT_BASE_URL,
+    apiKey: prof?.apiKey || first?.apiKey || "",
+    modelName: prof?.modelName || first?.modelName || DEFAULT_MODEL_NAME,
     temperature: first?.temperature ?? 0.9,
     systemPrompt: "",
   };
@@ -122,7 +141,7 @@ function submit(autoStep: boolean) {
   if (!draftConfig.value) return;
   const dup = findDuplicateAgentLabel(draftConfig.value.agents);
   if (dup) {
-    errorText.value = `角色名称「${dup}」存在重复，请修改以区分`;
+    errorText.value = `角色名称「${dup}」存在重复，请修改后保存`;
     return;
   }
   draftConfig.value.agents.forEach((a, idx) => {
@@ -138,9 +157,11 @@ function submit(autoStep: boolean) {
   });
   Object.assign(draftConfig.value, patched);
 
+  const synced = syncConfigWithApiProfiles(draftConfig.value, props.apiProfiles);
+
   emit("saveAndContinue", {
     title: draftTitle.value.trim() || props.title,
-    config: draftConfig.value,
+    config: synced,
     autoStep,
   });
 }
@@ -149,7 +170,7 @@ function submit(autoStep: boolean) {
 <template>
   <AdaptiveModal
     :open="open && Boolean(draftConfig)"
-    title="平行宇宙分支变量微调"
+    title="世界线微调"
     max-width-class="max-w-2xl"
     mobile-presentation="fullscreen"
     @close="emit('close')"
@@ -161,8 +182,8 @@ function submit(autoStep: boolean) {
             <GitBranch class="w-4 h-4" />
           </div>
           <div class="min-w-0">
-            <h3 class="text-[14px] font-semibold text-[#1D1D1F] truncate">平行宇宙分支微调</h3>
-            <p class="text-[11px] text-slate-400 truncate">可替换角色、改写底牌、切换模型或标签后继续推演</p>
+            <h3 class="text-[14px] font-semibold text-[#1D1D1F] truncate">世界线微调</h3>
+            <p class="text-[11px] text-slate-400 truncate">调整角色设定、模型或标签后继续</p>
           </div>
         </div>
         <button
@@ -182,7 +203,7 @@ function submit(autoStep: boolean) {
 
       <div class="rounded-2xl bg-white p-4 border border-black/[0.05] space-y-3">
         <div>
-          <label class="block text-[12px] font-medium text-slate-600 mb-1">分支实验标题</label>
+          <label class="block text-[12px] font-medium text-slate-600 mb-1">分支标题</label>
           <input
             v-model="draftTitle"
             class="w-full h-9 rounded-xl border border-black/[0.08] bg-[#F5F5F7] focus:bg-white px-3 text-[13.5px] font-medium text-[#1D1D1F] outline-none"
@@ -201,7 +222,7 @@ function submit(autoStep: boolean) {
       <div class="space-y-2.5">
         <div class="flex items-center justify-between px-0.5">
           <span class="text-[12.5px] font-semibold text-[#1D1D1F]">
-            角色变量（{{ draftConfig.agents.length }} 位）
+            角色配置（{{ draftConfig.agents.length }} 位）
           </span>
           <button
             type="button"
@@ -209,7 +230,7 @@ function submit(autoStep: boolean) {
             class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white border border-black/[0.08] text-[11.5px] font-medium text-[#1D1D1F] hover:bg-black/[0.04]"
           >
             <Plus class="w-3 h-3" />
-            <span>新增角色</span>
+            <span>添加角色</span>
           </button>
         </div>
 
@@ -234,7 +255,7 @@ function submit(autoStep: boolean) {
                 :cards="characterCards"
                 :inherit-memory="inheritCardMemory"
                 :show-count="false"
-                trigger-label="从灵魂库替换"
+                trigger-label="从角色库导入"
                 @update:inherit-memory="inheritCardMemory = $event"
                 @select="applyCard(idx, $event)"
               />
@@ -249,23 +270,23 @@ function submit(autoStep: boolean) {
             </div>
           </div>
 
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <input
-              v-model="ag.modelName"
-              placeholder="Model Name"
-              class="h-8 rounded-lg border border-black/[0.08] bg-[#F7F7FA] focus:bg-white px-2.5 text-[12px] font-mono text-[#1D1D1F] outline-none"
-            />
-            <input
-              v-model="ag.baseUrl"
-              placeholder="Base URL"
-              class="h-8 rounded-lg border border-black/[0.08] bg-[#F7F7FA] focus:bg-white px-2.5 text-[12px] font-mono text-[#1D1D1F] outline-none"
-            />
+          <div v-if="apiProfiles.length > 0" class="flex items-center justify-between gap-2">
+            <span class="text-[11.5px] font-medium text-slate-500 shrink-0">使用 API</span>
+            <select
+              :value="ag.apiProfileId || apiProfiles[0]?.id"
+              @change="selectAgentProfile(ag, ($event.target as HTMLSelectElement).value)"
+              class="flex-1 max-w-[260px] h-8 rounded-lg border border-black/[0.08] bg-[#F7F7FA] focus:bg-white px-2.5 text-[12px] text-[#1D1D1F] outline-none"
+            >
+              <option v-for="prof in apiProfiles" :key="prof.id" :value="prof.id">
+                {{ prof.name }} ({{ prof.modelName }})
+              </option>
+            </select>
           </div>
 
           <textarea
             v-model="ag.systemPrompt"
             rows="2"
-            placeholder="改写该分支下的角色底牌或立场..."
+            placeholder="调整该分支的角色设定或立场..."
             class="w-full resize-none rounded-xl border border-black/[0.08] bg-[#F5F5F7] focus:bg-white px-3 py-2 text-[12.5px] leading-relaxed text-[#1D1D1F] outline-none"
           ></textarea>
         </div>
@@ -295,7 +316,7 @@ function submit(autoStep: boolean) {
           class="h-9 flex items-center gap-1.5 px-4 rounded-xl text-[12.5px] font-semibold bg-[#1D1D1F] hover:bg-black text-white"
         >
           <Play class="w-3.5 h-3.5 fill-current" />
-          <span>保存并推演一轮</span>
+          <span>保存并生成下一轮</span>
         </button>
       </div>
     </template>

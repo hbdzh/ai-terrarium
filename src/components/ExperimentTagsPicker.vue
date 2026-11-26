@@ -26,7 +26,7 @@ const selectedSet = computed(() => new Set(props.tags));
 
 const activeHint = computed(() => {
   if (props.tags.length === 0) {
-    return "未打标签 · 全开关自由解锁";
+    return "未设标签 · 规则自由调整";
   }
   return props.tags
     .map((id) => {
@@ -41,7 +41,7 @@ const activeHint = computed(() => {
   <div class="space-y-2.5">
     <div class="flex items-center justify-between gap-2">
       <div class="flex items-center gap-2 min-w-0">
-        <span class="text-[13px] font-semibold text-[#1D1D1F]">实验定调标签</span>
+        <span class="text-[13px] font-semibold text-[#1D1D1F]">剧本标签</span>
         <span
           class="px-2 py-0.5 rounded-full text-[11px] font-medium truncate"
           :class="
@@ -50,7 +50,7 @@ const activeHint = computed(() => {
               : 'bg-[#007AFF]/10 text-[#0062CC]'
           "
         >
-          {{ tags.length === 0 ? "未打标签 · 全开关自由解锁" : `已选 ${tags.length} 项` }}
+          {{ tags.length === 0 ? "未设标签 · 规则自由调整" : `已选 ${tags.length} 项` }}
         </span>
       </div>
 
@@ -59,16 +59,16 @@ const activeHint = computed(() => {
         type="button"
         @click="emit('clear')"
         class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.05] transition shrink-0"
-        title="清空所有定调标签，恢复全开关自由解锁"
+        title="清空已选标签"
       >
         <RotateCcw class="w-3 h-3" />
-        <span>清空标签</span>
+        <span>清空</span>
       </button>
     </div>
 
     <!-- Row 1: 8 Main Tone Tags (0 or 1, single-select) -->
     <div class="space-y-1">
-      <div class="text-[11px] text-slate-400">主定调（8 选 0 或 1，再次点击取消）</div>
+      <div class="text-[11px] text-slate-400">主基调（单选，再点取消）</div>
       <div class="flex flex-wrap gap-1.5">
         <button
           v-for="tag in MAIN_TONE_TAGS"
@@ -90,7 +90,7 @@ const activeHint = computed(() => {
 
     <!-- Row 2: 3 Boundary Mutually Exclusive Pairs -->
     <div class="space-y-1">
-      <div class="text-[11px] text-slate-400">附加行为边界（每组可选 0 或 1 个）</div>
+      <div class="text-[11px] text-slate-400">附加规则（每组可选 1 项）</div>
       <div class="flex flex-wrap items-center gap-2">
         <div
           v-for="pair in BOUNDARY_TAG_PAIRS"
