@@ -7,9 +7,63 @@
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
     <title>AI 生态观察箱 · AI Terrarium</title>
+    <script>
+      (function () {
+        try {
+          var pref = localStorage.getItem("ai-terrarium-theme") || "system";
+          var sysDark =
+            window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var isDark = pref === "dark" || (pref === "system" && sysDark);
+          if (isDark) {
+            document.documentElement.classList.add("dark");
+            document.documentElement.style.colorScheme = "dark";
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
-  <body class="bg-[#F6F6F8] text-[#1D1D1F] antialiased selection:bg-[#007AFF]/15 selection:text-[#0055B3]">
-    <div id="app"></div>
+  <body class="bg-transparent text-[#1D1D1F] antialiased">
+    <div id="app">
+      <!-- Instant pre-hydration app shell to prevent white/dark flash during WebView startup -->
+      <div class="boot-shell">
+        <div class="boot-sidebar">
+          <div class="boot-skel" style="height:28px;width:130px;border-radius:8px;opacity:0.9;"></div>
+          <div class="boot-skel" style="height:34px;width:100%;border-radius:10px;margin-top:6px;opacity:0.75;"></div>
+          <div class="boot-skel" style="height:34px;width:85%;border-radius:10px;opacity:0.55;"></div>
+        </div>
+        <div class="boot-main">
+          <div class="boot-header">
+            <div class="boot-skel" style="height:18px;width:180px;border-radius:6px;opacity:0.8;"></div>
+          </div>
+          <div style="flex:1;display:flex;align-items:center;justify-content:center;">
+            <div style="width:22px;height:22px;border:2px solid rgba(128,128,128,0.2);border-top-color:#007AFF;border-radius:50%;animation:boot-spin 0.7s linear infinite;"></div>
+          </div>
+        </div>
+      </div>
+      <style>
+        .boot-shell { display:flex;height:100vh;height:100dvh;width:100vw;overflow:hidden;background:rgba(255,255,255,0.68);font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Microsoft YaHei',sans-serif; }
+        .boot-sidebar { width:248px;flex-shrink:0;background:#F6F6F8;border-right:1px solid rgba(0,0,0,0.05);padding:16px 12px;display:flex;flex-direction:column;gap:10px; }
+        .boot-main { flex:1;min-width:0;display:flex;flex-direction:column;background:#FFFFFF; }
+        .boot-header { height:52px;border-bottom:1px solid rgba(0,0,0,0.05);display:flex;align-items:center;padding:0 20px;gap:10px; }
+        .boot-skel { background:rgba(0,0,0,0.05); }
+        html.dark .boot-shell { background:rgba(20,20,23,0.72); }
+        html.dark .boot-sidebar { background:#141417;border-right-color:rgba(255,255,255,0.06); }
+        html.dark .boot-main { background:#18181B; }
+        html.dark .boot-header { border-bottom-color:rgba(255,255,255,0.06); }
+        html.dark .boot-skel { background:rgba(255,255,255,0.07); }
+        @keyframes boot-spin { to { transform: rotate(360deg); } }
+        @media (max-width: 1023px) { .boot-sidebar { display: none !important; } }
+      </style>
+    </div>
+    <script>
+      requestAnimationFrame(function () {
+        var internals = window.__TAURI_INTERNALS__;
+        if (internals && typeof internals.invoke === "function") {
+          internals.invoke("show_main_window").catch(function () {});
+        }
+      });
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

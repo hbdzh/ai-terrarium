@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::compactor::select_compactor_node;
 use crate::llm::{resolve_chat_completions_url, ApiChatMessage};
-use crate::models::{CrisisCard, ExperimentConfig, ExperimentDetail, SpeakerRole, TimelineMessage};
+use crate::models::{
+    CrisisCard, ExperimentConfig, ExperimentDetail, RelationshipEdge, SpeakerRole, TimelineMessage,
+};
 use crate::sanitizer::strip_think_tags;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -16,6 +18,17 @@ pub struct ReflectionWhisper {
     pub agent_label: String,
     #[serde(default)]
     pub whisper: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DistilledImprint {
+    #[serde(default, alias = "agent_id")]
+    pub agent_id: String,
+    #[serde(default, alias = "agent_label")]
+    pub agent_label: String,
+    #[serde(default)]
+    pub imprint: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -38,6 +51,10 @@ pub struct ObserverJsonResult {
     pub crisis_cards: Vec<CrisisCard>,
     #[serde(default)]
     pub reflection_whispers: Vec<ReflectionWhisper>,
+    #[serde(default)]
+    pub relationship_matrix: Vec<RelationshipEdge>,
+    #[serde(default)]
+    pub director_event: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,7 +222,70 @@ pub fn parse_observer_json(raw: &str) -> Result<ObserverJsonResult> {
         })
         .collect();
 
+    parsed.relationship_matrix = parsed
+        .relationship_matrix
+        .into_iter()
+        .filter_map(|mut edge| {
+            edge.from = edge.from.trim().to_string();
+            edge.to = edge.to.trim().to_string();
+            edge.attitude_tag = edge.attitude_tag.trim().chars().take(24).collect();
+            if edge.from.is_empty() || edge.to.is_empty() || edge.from == edge.to {
+                return None;
+            }
+            edge.trust_score = edge.trust_score.clamp(-100, 100);
+            if edge.attitude_tag.is_empty() {
+                edge.attitude_tag = if edge.trust_score < -20 {
+                    "暗中戒备".to_string()
+                } else if edge.trust_score > 25 {
+                    "初步信任".to_string()
+                } else {
+                    "谨慎试探".to_string()
+                };
+            }
+            Some(edge)
+        })
+        .take(12)
+        .collect();
+
+    parsed.director_event = parsed
+        .director_event
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     Ok(parsed)
+}
+
+pub fn build_observer_tag_calibration(tags: &[String]) -> String {
+    if tags.is_empty() {
+        return String::new();
+    }
+    let mut rules: Vec<&'static str> = Vec::new();
+    for t in tags {
+        match t.trim() {
+            "硬核科研" => rules.push("- 【硬核科研】严厉惩罚偏离核心命题的闲聊或无端审讯；若出现跑题水字数，直接拉高 stagnation_index。"),
+            "日常瞎侃" => rules.push("- 【日常瞎侃】宽容自然跑题、生活吐槽与话题跳跃；只要有活人感与真实流动，不判高僵化。"),
+            "悬疑推理" => rules.push("- 【悬疑推理】重点观察信息差试探、隐瞒与微表情博弈；表面客套而实则怀疑时，在 relationship_matrix 中如实给出低信任或负分。"),
+            "哲学思辨" => rules.push("- 【哲学思辨】严厉惩罚廉价共识与敷衍夸赞；鼓励以反例推进抽象纵深。"),
+            "科幻推演" => rules.push("- 【科幻推演】聚焦设定推演严密性与边界后果，避免空洞煽情。"),
+            "阵营博弈" => rules.push("- 【阵营博弈】重点追踪利益分化、拉拢与暗中背刺，在 relationship_matrix 体现阵营信任波动。"),
+            "荒诞喜剧" => rules.push("- 【荒诞喜剧】宽容跳跃与反差幽默，只要角色一本正经推进荒诞逻辑即属良性演化。"),
+            "治愈夜话" => rules.push("- 【治愈夜话】宽容温和倾诉与低冲突节奏，不因火药味低而惩罚评分。"),
+            "严防跑题" => rules.push("- 【严防跑题】对偏离主线话题零容忍，跑题即明显提升 stagnation_index。"),
+            "自由发散" => rules.push("- 【自由发散】允许跨话题跳跃与自由联想。"),
+            "短句快节奏" => rules.push("- 【短句快节奏】重点考察互动节奏是否明快，不苛求长篇论证。"),
+            "深度长推演" => rules.push("- 【深度长推演】惩罚浅层敷衍短答，鼓励完整逻辑推演。"),
+            _ => {}
+        }
+    }
+    if rules.is_empty() {
+        format!("\n\n【本局实验标签】{}", tags.join(" · "))
+    } else {
+        format!(
+            "\n\n【本局定调与评分校准（标签：{}）】\n{}",
+            tags.join(" · "),
+            rules.join("\n")
+        )
+    }
 }
 
 pub async fn run_observer_analysis(
@@ -234,7 +314,10 @@ pub async fn run_observer_analysis(
             SpeakerRole::GodPublic => "[造物主·路人降临]".to_string(),
             SpeakerRole::GodSystem => "[造物主·环境旁白]".to_string(),
             SpeakerRole::GodWhisper => {
-                format!("[造物主·低语→{}]", config.agent_label(m.agent_id.as_deref()))
+                format!(
+                    "[造物主·低语→{}]",
+                    config.agent_label(m.agent_id.as_deref())
+                )
             }
         };
         transcript.push_str(&format!("{}: {}\n\n", label, clean));
@@ -266,8 +349,22 @@ pub async fn run_observer_analysis(
         String::new()
     };
 
+    let tag_calibration = build_observer_tag_calibration(&config.tags);
+    let cast_names = config
+        .agents
+        .iter()
+        .map(|a| a.label.as_str())
+        .collect::<Vec<_>>()
+        .join("、");
+
+    let director_instruction = if config.enable_auto_director {
+        "\n\n【戏剧情境导演模式已开启】当检测到对话陷入高僵化客套循环（stagnation_index >= 70）或连续多轮缺乏实质新信息推进时，请结合当前剧本世界观、场景物理规则与定调标签，在 JSON 中额外输出 \"director_event\" 字段：一条 40~90 字、完全符合当前现场物理规则的客观突发环境事件描写（例如便利店推门闯入受伤陌生人、实验室捕获第二波异常脉冲等），严禁出现“请推翻共识”等元指令或说教；若剧情推进顺畅无需加戏则设为 null。"
+    } else {
+        ""
+    };
+
     let system_prompt = format!(
-        "{}\n\n你必须只输出严格合法的 JSON 对象，禁止输出任何 Markdown 围栏或多余解释文字，字段必须包含：\n\
+        "{}\n\n当前参演角色：{}\n你必须只输出严格合法的 JSON 对象，禁止输出任何 Markdown 围栏或多余解释文字，字段必须包含：\n\
         {{\n  \
           \"tags\": [\"标签1\", \"标签2\"],\n  \
           \"depth_stage\": \"根据当前剧情氛围提炼的4字阶段词（如：气氛铺垫、暗流试探、线索浮现、真相逼近、观点交锋、荒诞升级）\",\n  \
@@ -275,15 +372,21 @@ pub async fn run_observer_analysis(
           \"tension_score\": 50,\n  \
           \"abstraction_score\": 40,\n  \
           \"stagnation_index\": 20,\n  \
+          \"relationship_matrix\": [\n    \
+            {{ \"from\": \"角色A\", \"to\": \"角色B\", \"trust_score\": -35, \"attitude_tag\": \"表面客套暗中试探\" }}\n  \
+          ],\n  \
           \"crisis_cards\": [\n    \
             {{ \"title\": \"短标题(8字内)\", \"kind\": \"GodSystem\", \"content\": \"具体可直接注入对话的突发事件或路人发言(40~80字)\" }},\n    \
             {{ \"title\": \"短标题2\", \"kind\": \"GodPublic\", \"content\": \"...\" }},\n    \
             {{ \"title\": \"短标题3\", \"kind\": \"GodSystem\", \"content\": \"...\" }}\n  \
           ]\n\
         }}\n\
-        评分说明：tension_score 为火药味/冲突指数(0~100)，abstraction_score 为哲学/概念抽象度(0~100)，stagnation_index 为复读/客套僵化指数(0~100，>80表示陷入死循环)。crisis_cards 请紧扣当前剧情现场生成 3 张截然不同风格的破局/转折事件卡。{}{}",
+        评分说明：tension_score 为火药味/冲突指数(0~100)，abstraction_score 为哲学/概念抽象度(0~100)，stagnation_index 为复读/客套僵化指数(0~100，>80表示陷入死循环)。relationship_matrix 请基于对话暗流评估参演角色两两之间的实时信任度（trust_score 范围 -100 到 100，负分代表猜忌/敌意，正分代表信任/同盟）与简短心理定性 attitude_tag（12字以内）。crisis_cards 请紧扣当前剧情现场生成 3 张截然不同风格的破局/转折事件卡。{}{}{}{}",
         node_c.system_prompt.trim(),
+        cast_names,
+        tag_calibration,
         arc_instruction,
+        director_instruction,
         reflection_instruction
     );
 
@@ -475,7 +578,9 @@ pub async fn generate_final_report_markdown(
     Ok(report)
 }
 
-pub fn select_utility_node<'a>(config: &'a ExperimentConfig) -> Option<&'a crate::models::NodeConfig> {
+pub fn select_utility_node<'a>(
+    config: &'a ExperimentConfig,
+) -> Option<&'a crate::models::NodeConfig> {
     config
         .agents
         .iter()
@@ -592,7 +697,9 @@ pub async fn generate_scenario_from_idea(
     idea: &str,
 ) -> Result<GeneratedScenario> {
     let Some(node) = select_utility_node(config) else {
-        return Err(anyhow!("请先在「设置」中为至少一个 AI 节点或观察员 C 配置 API Key"));
+        return Err(anyhow!(
+            "请先在「设置」中为至少一个 AI 节点或观察员 C 配置 API Key"
+        ));
     };
 
     let system_prompt = "你是注重真实生活质感与强口语交锋的多智能体沙盒编剧。请根据用户的一句话脑洞，生成一个信息不对称、张力饱满、全员说人话的对话剧本。\n\
@@ -721,7 +828,9 @@ pub fn extract_agent_traits_from_report(report: &str, agent_label: &str) -> Stri
     let mut capturing = false;
     for line in lines {
         let trimmed = line.trim();
-        if trimmed.starts_with('#') && (trimmed.contains("核心转折") || trimmed.contains("高光金句")) {
+        if trimmed.starts_with('#')
+            && (trimmed.contains("核心转折") || trimmed.contains("高光金句"))
+        {
             capturing = false;
         }
         if trimmed.contains(label)
@@ -750,6 +859,213 @@ pub fn extract_agent_traits_from_report(report: &str, agent_label: &str) -> Stri
     }
     let joined = matched.join("\n");
     joined.chars().take(280).collect()
+}
+
+#[derive(Deserialize)]
+struct DistilledImprintsEnvelope {
+    #[serde(default)]
+    imprints: Vec<DistilledImprint>,
+}
+
+pub fn parse_distilled_imprints_json(raw: &str) -> Result<Vec<DistilledImprint>> {
+    let cleaned = strip_markdown_fences(raw);
+    let candidate = if let (Some(start), Some(end)) = (cleaned.find('{'), cleaned.rfind('}')) {
+        if start <= end {
+            &cleaned[start..=end]
+        } else {
+            cleaned.as_str()
+        }
+    } else {
+        cleaned.as_str()
+    };
+    let parsed: DistilledImprintsEnvelope =
+        serde_json::from_str(candidate).with_context(|| format!("提炼记忆烙印返回非合法 JSON: {}", raw))?;
+    Ok(parsed
+        .imprints
+        .into_iter()
+        .filter_map(|mut item| {
+            item.agent_id = item.agent_id.trim().to_string();
+            item.agent_label = item.agent_label.trim().to_string();
+            item.imprint = item.imprint.trim().chars().take(120).collect();
+            if item.imprint.is_empty() || (item.agent_id.is_empty() && item.agent_label.is_empty()) {
+                None
+            } else {
+                Some(item)
+            }
+        })
+        .collect())
+}
+
+/// 调用观察员 C / 可用推理节点，结合本局对话自动为参演角色各提炼 1 条高浓度跨宇宙经历烙印。
+pub async fn distill_memory_imprints(
+    client: &Client,
+    detail: &ExperimentDetail,
+) -> Result<Vec<DistilledImprint>> {
+    if detail.messages.is_empty() {
+        return Err(anyhow!("当前实验尚无对话记录，无法提炼记忆烙印"));
+    }
+    let Some(node) = select_compactor_node(&detail.config) else {
+        return Err(anyhow!("请先为观察员 C 或至少一个 AI 节点配置 API Key"));
+    };
+
+    let roster = detail
+        .config
+        .agents
+        .iter()
+        .map(|a| format!("- id: \"{}\", label: \"{}\"", a.id, a.label))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut transcript = String::new();
+    let start = detail.messages.len().saturating_sub(45);
+    for m in &detail.messages[start..] {
+        let clean = strip_think_tags(&m.content);
+        let speaker = match m.role {
+            SpeakerRole::Ai => format!("[{}]", detail.config.agent_label(m.agent_id.as_deref())),
+            SpeakerRole::GodSystem => "[环境旁白]".to_string(),
+            SpeakerRole::GodPublic => "[路人]".to_string(),
+            SpeakerRole::GodWhisper => continue,
+        };
+        transcript.push_str(&format!("{}: {}\n", speaker, clean));
+    }
+
+    let system_prompt = format!(
+        "你是跨宇宙灵魂档案管理员。请结合本局对话经历，为下列每位参演角色各提炼 1 条高浓度「跨世界经历烙印」（20~70字，第一/第三人称性格沉淀皆可，聚焦本局形成的执念、本能敏感点、看破的套路或标志性遭遇，例如：“曾在密闭空间识破潜逃者微表情，对随身携带银色手提箱有本能职业敏感”）。\n\
+        参演角色列表：\n{}\n\n\
+        必须只输出严格合法 JSON 对象：\n\
+        {{\"imprints\": [{{\"agentId\": \"AiA\", \"agentLabel\": \"角色名\", \"imprint\": \"高浓度记忆烙印\"}}]}}",
+        roster
+    );
+
+    let mut user_prompt = format!("实验标题：{}\n", detail.title);
+    if !detail.final_report.trim().is_empty() {
+        user_prompt.push_str(&format!("【复盘简报摘要】\n{}\n\n", detail.final_report.trim()));
+    }
+    user_prompt.push_str(&format!("【本局对话实录】\n{}", transcript));
+
+    let raw = call_json_completion(client, node, &system_prompt, &user_prompt, 0.3).await?;
+    let imprints = parse_distilled_imprints_json(&raw)?;
+    if imprints.is_empty() {
+        return Err(anyhow!("未能提炼出有效的角色记忆烙印"));
+    }
+    Ok(imprints)
+}
+
+/// 对比同源父分支或兄弟分支在相同分叉点之后的演化分歧，生成《世界线分歧对照报告》。
+pub async fn generate_worldline_comparison_markdown(
+    client: &Client,
+    exp_a: &ExperimentDetail,
+    exp_b: &ExperimentDetail,
+) -> Result<String> {
+    let Some(node) = select_compactor_node(&exp_a.config).or_else(|| select_compactor_node(&exp_b.config)) else {
+        return Err(anyhow!("请先为观察员 C 或至少一个 AI 节点配置 API Key"));
+    };
+
+    let mut diverge_turn = exp_a.fork_turn.or(exp_b.fork_turn).unwrap_or(0);
+    if diverge_turn == 0 {
+        let min_len = exp_a.messages.len().min(exp_b.messages.len());
+        for i in 0..min_len {
+            if exp_a.messages[i].content != exp_b.messages[i].content
+                || exp_a.messages[i].agent_id != exp_b.messages[i].agent_id
+            {
+                break;
+            }
+            diverge_turn = exp_a.messages[i].turn_number;
+        }
+    }
+
+    let format_timeline = |exp: &ExperimentDetail| -> String {
+        let mut s = format!(
+            "标题：{}\n总轮数：{} 轮\n标签：{}\n参演角色：{}\n",
+            exp.title,
+            exp.total_turns,
+            if exp.config.tags.is_empty() {
+                "无".to_string()
+            } else {
+                exp.config.tags.join(" / ")
+            },
+            exp.config
+                .agents
+                .iter()
+                .map(|a| format!("{}({})", a.label, a.model_name))
+                .collect::<Vec<_>>()
+                .join("、")
+        );
+        if !exp.board_content.trim().is_empty() {
+            s.push_str(&format!("最终共享白板：{}\n", exp.board_content.trim()));
+        }
+        s.push_str("分叉点后关键对话：\n");
+        let after: Vec<_> = exp
+            .messages
+            .iter()
+            .filter(|m| m.turn_number >= diverge_turn)
+            .take(32)
+            .collect();
+        for m in after {
+            let clean = strip_think_tags(&m.content);
+            let speaker = match m.role {
+                SpeakerRole::Ai => format!("[#{} {}]", m.turn_number, exp.config.agent_label(m.agent_id.as_deref())),
+                SpeakerRole::GodSystem => "[环境旁白]".to_string(),
+                SpeakerRole::GodPublic => "[路人]".to_string(),
+                SpeakerRole::GodWhisper => format!("[低语→{}]", exp.config.agent_label(m.agent_id.as_deref())),
+            };
+            s.push_str(&format!("{}: {}\n", speaker, clean));
+        }
+        s
+    };
+
+    let system_prompt = "你是平行宇宙观测首席观察员。请对比两条同源世界线在相同分叉点之后的演化走向，生成结构清晰、洞察犀利的中文《世界线分歧对照报告》（Markdown 格式），必须包含：\n\
+        1. **分叉点与变量差异**：简述分叉轮次以及两条世界线在角色设定、模型或标签上的变量变化\n\
+        2. **关键转折与蝴蝶效应**：对比分叉后导致剧情走向分道扬镳的 2~3 个关键节点\n\
+        3. **信息差与暗涌关系演化差异**：对比双方在试探、信任度与秘密揭露上的不同路径\n\
+        4. **最终结局与实验结论对照**：总结两版平行宇宙的结局差异及变量因果";
+
+    let user_prompt = format!(
+        "共同参考分叉轮次：约第 {} 轮\n\n=== 世界线 A（当前） ===\n{}\n\n=== 世界线 B（对照） ===\n{}",
+        diverge_turn,
+        format_timeline(exp_a),
+        format_timeline(exp_b)
+    );
+
+    let url = resolve_chat_completions_url(&node.base_url);
+    let api_messages = vec![
+        ApiChatMessage::text("system", system_prompt),
+        ApiChatMessage::text("user", user_prompt),
+    ];
+    let body = ObserverChatRequest {
+        model: node.model_name.trim(),
+        messages: &api_messages,
+        temperature: 0.35,
+        stream: false,
+        response_format: None,
+    };
+
+    let resp = client
+        .post(&url)
+        .timeout(std::time::Duration::from_secs(120))
+        .bearer_auth(node.api_key.trim())
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("生成世界线分歧对照报告请求 {} 失败", url))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("世界线分歧对照 API 错误 ({}): {}", status, err));
+    }
+
+    let parsed: NonStreamResponse = resp.json().await.context("解析世界线对照报告响应失败")?;
+    let report = parsed
+        .choices
+        .into_iter()
+        .next()
+        .map(|c| strip_think_tags(&c.message.content))
+        .unwrap_or_default();
+    if report.trim().is_empty() {
+        return Err(anyhow!("观察员未返回有效世界线对照报告"));
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -822,5 +1138,37 @@ mod tests {
         let report = "## 3. 智能体行为画像\n- **阿哲**: 表面插科打诨，实则步步试探对方底细。\n- **老陈**: 沉稳施压，善于反向设套。";
         let traits = extract_agent_traits_from_report(report, "阿哲");
         assert!(traits.contains("步步试探"));
+    }
+
+    #[test]
+    fn test_parse_relationship_matrix_director_event_and_distill_imprints() {
+        let raw = r#"{
+            "note": "表面和气实则互相提防。",
+            "tension_score": 68,
+            "stagnation_index": 82,
+            "relationship_matrix": [
+                {"from": "阿哲", "to": "老陈", "trust_score": -150, "attitude_tag": "高度戒备"},
+                {"from": "老陈", "to": "阿哲", "trust_score": 25, "attitude_tag": "表面客套暗中试探"},
+                {"from": "阿哲", "to": "阿哲", "trust_score": 100, "attitude_tag": "忽略自己"}
+            ],
+            "director_event": "便利店玻璃门忽然被风撞开，一个浑身湿透的外卖员扶着流血的胳膊闯了进来。"
+        }"#;
+        let parsed = parse_observer_json(raw).unwrap();
+        assert_eq!(parsed.relationship_matrix.len(), 2);
+        assert_eq!(parsed.relationship_matrix[0].trust_score, -100);
+        assert_eq!(parsed.relationship_matrix[0].attitude_tag, "高度戒备");
+        assert_eq!(parsed.relationship_matrix[1].trust_score, 25);
+        assert!(parsed.director_event.as_deref().unwrap().contains("外卖员"));
+
+        let cal = build_observer_tag_calibration(&["硬核科研".to_string(), "严防跑题".to_string()]);
+        assert!(cal.contains("硬核科研"));
+        assert!(cal.contains("严防跑题"));
+
+        let imp_raw = r#"```json
+        {"imprints":[{"agentId":"AiA","agentLabel":"阿哲","imprint":"曾在暴雨夜便利店死守仓库门，对手机定位追踪声音极其敏感。"}]}
+        ```"#;
+        let imps = parse_distilled_imprints_json(imp_raw).unwrap();
+        assert_eq!(imps.len(), 1);
+        assert_eq!(imps[0].agent_label, "阿哲");
     }
 }

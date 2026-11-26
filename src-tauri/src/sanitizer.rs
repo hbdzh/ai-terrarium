@@ -137,6 +137,77 @@ pub fn strip_think_tags(raw: &str) -> String {
     cleaned.trim().to_string()
 }
 
+/// 剥离模型在多人对话中误模仿历史记录而生成的开头发言人前缀，例如 `[智能体 3]: ` 或 `智能体 3： `。
+pub fn strip_leading_speaker_prefix(
+    raw: &str,
+    speaker_label: &str,
+    all_labels: &[&str],
+) -> String {
+    let mut current = raw.trim_start();
+    let trimmed_speaker = speaker_label.trim();
+
+    loop {
+        let mut stripped_any = false;
+
+        // 1. 匹配带方括号的 `[任意角色名]:` / `[任意角色名]：` / `【任意角色名】：`
+        for &lbl in all_labels {
+            let l = lbl.trim();
+            if l.is_empty() {
+                continue;
+            }
+            for (open_br, close_br) in [("[", "]"), ("【", "】")] {
+                if let Some(after_open) = current.strip_prefix(open_br) {
+                    if let Some(after_label) = after_open.strip_prefix(l) {
+                        if let Some(after_close) = after_label.strip_prefix(close_br) {
+                            let after_ws = after_close.trim_start();
+                            if let Some(rest) = after_ws
+                                .strip_prefix(':')
+                                .or_else(|| after_ws.strip_prefix('：'))
+                            {
+                                current = rest.trim_start();
+                                stripped_any = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if stripped_any {
+                break;
+            }
+        }
+
+        if stripped_any {
+            continue;
+        }
+
+        // 2. 匹配不带括号但严格以自身名字+冒号开头的情况，例如 `智能体 3：` / `智能体 3:`
+        if !trimmed_speaker.is_empty() {
+            if let Some(after_label) = current.strip_prefix(trimmed_speaker) {
+                let after_ws = after_label.trim_start_matches(' ');
+                if let Some(rest) = after_ws
+                    .strip_prefix(':')
+                    .or_else(|| after_ws.strip_prefix('：'))
+                {
+                    let trimmed_rest = rest.trim_start();
+                    if !trimmed_rest.is_empty() {
+                        current = trimmed_rest;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        break;
+    }
+
+    if current.len() == raw.len() {
+        raw.to_string()
+    } else {
+        current.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +261,22 @@ mod tests {
     fn test_strip_think_tags_cleans_history() {
         let raw = "<THINK>隐秘推理</THINK>\n\n这是公开观点。<think>补充想法</think>结尾。";
         assert_eq!(strip_think_tags(raw), "这是公开观点。结尾。");
+    }
+
+    #[test]
+    fn test_strip_leading_speaker_prefix() {
+        let labels = ["智能体 1", "智能体 3", "智能体 4"];
+        assert_eq!(
+            strip_leading_speaker_prefix("[智能体 3]: 说句大白话——我判断不了", "智能体 3", &labels),
+            "说句大白话——我判断不了"
+        );
+        assert_eq!(
+            strip_leading_speaker_prefix("智能体 3：我觉得也是", "智能体 3", &labels),
+            "我觉得也是"
+        );
+        assert_eq!(
+            strip_leading_speaker_prefix("智能体 4 说得对，我也赞成", "智能体 3", &labels),
+            "智能体 4 说得对，我也赞成"
+        );
     }
 }

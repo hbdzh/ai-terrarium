@@ -5,7 +5,7 @@
   "identifier": "com.aiterrarium.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -20,7 +20,9 @@
         "minWidth": 1100,
         "minHeight": 700,
         "resizable": true,
-        "center": true
+        "center": true,
+        "transparent": true,
+        "visible": false
       }
     ],
     "security": {

@@ -154,7 +154,10 @@ pub fn split_compactable_messages<'a>(
         return None;
     }
 
-    let new_until_seq = to_compact.last().map(|m| m.seq).unwrap_or(compacted_until_seq);
+    let new_until_seq = to_compact
+        .last()
+        .map(|m| m.seq)
+        .unwrap_or(compacted_until_seq);
     Some((to_compact, new_until_seq))
 }
 

@@ -8,21 +8,32 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::models::{
-    builtin_presets, ActivePrivateRoom, BoardApprovalMode, CharacterCard, CrisisCard,
-    ExperimentConfig, ExperimentDetail, ExperimentSummary, ObserverNote, PresetTemplate,
-    SpeakerRole, TimelineMessage, TurnSnapshot, DEFAULT_CORE_ENGINE_PROMPT,
+    builtin_character_cards, builtin_presets, is_pass_notice, ActivePrivateRoom, BoardApprovalMode,
+    CharacterCard, CrisisCard, ExperimentConfig, ExperimentDetail, ExperimentSummary, ObserverNote,
+    PresetTemplate, RelationshipEdge, SpeakerRole, TimelineMessage, TurnSnapshot, UiPrefs,
+    DEFAULT_CORE_ENGINE_PROMPT, LEGACY_CORE_ENGINE_PROMPT,
 };
+use crate::sanitizer::strip_think_tags;
 
 const CORE_ENGINE_PROMPT_KEY: &str = "core_engine_prompt";
+const UI_PREFS_KEY: &str = "ui_prefs";
 const BUILTIN_PRESETS_VERSION_KEY: &str = "builtin_presets_version";
-const CURRENT_BUILTIN_PRESETS_VERSION: &str = "3";
+const CURRENT_BUILTIN_PRESETS_VERSION: &str = "5";
 
 fn is_legacy_unmodified_builtin(p: &PresetTemplate) -> bool {
     match p.id.as_str() {
+        "free" => {
+            p.is_builtin && p.recommended_config.is_none() && p.global_system_prompt.is_empty()
+        }
+        "late_night_friends" => p.is_builtin && p.recommended_config.is_none(),
         "casual_chat" => {
-            p.global_system_prompt
-                == "你们正在一间深夜便利店里对话。请像真人发微信一样自然口语化，每次严格 3～5 句话（不超过 120 字），适当带动作括号描写（如（拧开瓶盖）（瞥了一眼门外）），禁止引文挑刺、禁止学术黑话、禁止客套说教与总结升华。"
+            (p.is_builtin && p.recommended_config.is_none())
+                || p.global_system_prompt
+                    == "你们正在一间深夜便利店里对话。请像真人发微信一样自然口语化，每次严格 3～5 句话（不超过 120 字），适当带动作括号描写（如（拧开瓶盖）（瞥了一眼门外）），禁止引文挑刺、禁止学术黑话、禁止客套说教与总结升华。"
                 || p.global_system_prompt.starts_with("【场景背景】深夜暴雨停电的街角便利店。")
+        }
+        "shared_apartment" | "space_station" | "missing_usb" => {
+            p.is_builtin && p.recommended_config.is_none()
         }
         "philosophy" => {
             (p.global_system_prompt
@@ -58,6 +69,10 @@ impl Database {
         let conn = Connection::open(path).context("failed to open sqlite database")?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA cache_size = -16000;
+             PRAGMA busy_timeout = 5000;
              PRAGMA foreign_keys = ON;",
         )?;
         let db = Self {
@@ -160,6 +175,7 @@ impl Database {
                 base_prompt TEXT NOT NULL DEFAULT '',
                 behavior_traits TEXT NOT NULL DEFAULT '',
                 source_experiment_title TEXT NOT NULL DEFAULT '',
+                is_builtin INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
 
@@ -176,6 +192,15 @@ impl Database {
             "INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES (?1, ?2, ?3)",
             params![CORE_ENGINE_PROMPT_KEY, DEFAULT_CORE_ENGINE_PROMPT, now],
         )?;
+        conn.execute(
+            "UPDATE app_settings SET value = ?1, updated_at = ?2 WHERE key = ?3 AND value = ?4",
+            params![
+                DEFAULT_CORE_ENGINE_PROMPT,
+                now,
+                CORE_ENGINE_PROMPT_KEY,
+                LEGACY_CORE_ENGINE_PROMPT
+            ],
+        )?;
 
         let preset_version: Option<String> = conn
             .query_row(
@@ -185,7 +210,14 @@ impl Database {
             )
             .optional()?;
         if preset_version.as_deref() != Some(CURRENT_BUILTIN_PRESETS_VERSION) {
-            for obsolete_id in ["philosophy", "scifi", "absurd"] {
+            for obsolete_id in [
+                "philosophy",
+                "scifi",
+                "absurd",
+                "shared_apartment",
+                "space_station",
+                "missing_usb",
+            ] {
                 let existing_obsolete: Option<String> = conn
                     .query_row(
                         "SELECT data_json FROM preset_templates WHERE id = ?1",
@@ -210,7 +242,11 @@ impl Database {
                  ON CONFLICT(key) DO UPDATE SET
                     value = excluded.value,
                     updated_at = excluded.updated_at",
-                params![BUILTIN_PRESETS_VERSION_KEY, CURRENT_BUILTIN_PRESETS_VERSION, now],
+                params![
+                    BUILTIN_PRESETS_VERSION_KEY,
+                    CURRENT_BUILTIN_PRESETS_VERSION,
+                    now
+                ],
             )?;
         }
 
@@ -234,13 +270,25 @@ impl Database {
                     )?;
                 }
                 Some(old_json) => {
-                    if let Ok(old_preset) = serde_json::from_str::<PresetTemplate>(&old_json) {
+                    if let Ok(mut old_preset) = serde_json::from_str::<PresetTemplate>(&old_json) {
                         if is_legacy_unmodified_builtin(&old_preset) {
                             conn.execute(
                                 "UPDATE preset_templates
                                  SET sort_order = ?1, data_json = ?2, updated_at = ?3
                                  WHERE id = ?4",
                                 params![idx as i64, data_json, now, preset.id],
+                            )?;
+                        } else if old_preset.is_builtin
+                            && old_preset.tags.is_empty()
+                            && !preset.tags.is_empty()
+                        {
+                            old_preset.tags = preset.tags.clone();
+                            let patched_json = serde_json::to_string(&old_preset)?;
+                            conn.execute(
+                                "UPDATE preset_templates
+                                 SET sort_order = ?1, data_json = ?2, updated_at = ?3
+                                 WHERE id = ?4",
+                                params![idx as i64, patched_json, now, preset.id],
                             )?;
                         } else {
                             conn.execute(
@@ -271,11 +319,28 @@ impl Database {
                 [],
             )?;
         }
-        if !cols.iter().any(|c| c == "raw_prompt_json") {
+
+        // Migrate older databases lacking character_cards.is_builtin, then seed built-in character cards
+        let mut cc_stmt = conn.prepare("PRAGMA table_info(character_cards)")?;
+        let cc_cols: Vec<String> = cc_stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        if !cc_cols.iter().any(|c| c == "is_builtin") {
             conn.execute(
-                "ALTER TABLE messages ADD COLUMN raw_prompt_json TEXT",
+                "ALTER TABLE character_cards ADD COLUMN is_builtin INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
+        }
+        if !cc_cols.iter().any(|c| c == "memory_imprints_json") {
+            conn.execute(
+                "ALTER TABLE character_cards ADD COLUMN memory_imprints_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
+        }
+        self.seed_builtin_character_cards_conn(&conn)?;
+        if !cols.iter().any(|c| c == "raw_prompt_json") {
+            conn.execute("ALTER TABLE messages ADD COLUMN raw_prompt_json TEXT", [])?;
         }
         if !cols.iter().any(|c| c == "room_id") {
             conn.execute(
@@ -338,6 +403,18 @@ impl Database {
                 [],
             )?;
         }
+        if !exp_cols.iter().any(|c| c == "parent_experiment_id") {
+            conn.execute(
+                "ALTER TABLE experiments ADD COLUMN parent_experiment_id TEXT",
+                [],
+            )?;
+        }
+        if !exp_cols.iter().any(|c| c == "fork_turn") {
+            conn.execute(
+                "ALTER TABLE experiments ADD COLUMN fork_turn INTEGER",
+                [],
+            )?;
+        }
 
         let mut snap_stmt = conn.prepare("PRAGMA table_info(turn_snapshots)")?;
         let snap_cols: Vec<String> = snap_stmt
@@ -393,6 +470,12 @@ impl Database {
                 [],
             )?;
         }
+        if !obs_cols.iter().any(|c| c == "relationship_matrix_json") {
+            conn.execute(
+                "ALTER TABLE observer_notes ADD COLUMN relationship_matrix_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -425,6 +508,38 @@ impl Database {
 
     pub fn reset_core_engine_prompt(&self) -> Result<String> {
         self.save_core_engine_prompt(DEFAULT_CORE_ENGINE_PROMPT)
+    }
+
+    pub fn get_ui_prefs(&self) -> Result<UiPrefs> {
+        let conn = self.conn.lock().unwrap();
+        let val: Option<String> = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                params![UI_PREFS_KEY],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(json) = val {
+            if let Ok(prefs) = serde_json::from_str::<UiPrefs>(&json) {
+                return Ok(prefs);
+            }
+        }
+        Ok(UiPrefs::default())
+    }
+
+    pub fn save_ui_prefs(&self, prefs: &UiPrefs) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let json = serde_json::to_string(prefs)?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at",
+            params![UI_PREFS_KEY, json, now],
+        )?;
+        Ok(())
     }
 
     pub fn list_presets(&self) -> Result<Vec<PresetTemplate>> {
@@ -466,11 +581,10 @@ impl Database {
             let sort_order = match existing_order {
                 Some(o) => o,
                 None => {
-                    let max_o: Option<i64> = conn.query_row(
-                        "SELECT MAX(sort_order) FROM preset_templates",
-                        [],
-                        |r| r.get(0),
-                    )?;
+                    let max_o: Option<i64> =
+                        conn.query_row("SELECT MAX(sort_order) FROM preset_templates", [], |r| {
+                            r.get(0)
+                        })?;
                     max_o.unwrap_or(0) + 1
                 }
             };
@@ -513,7 +627,11 @@ impl Database {
         self.create_experiment("自由漫谈 #01", &cfg)
     }
 
-    pub fn create_experiment(&self, title: &str, config: &ExperimentConfig) -> Result<ExperimentDetail> {
+    pub fn create_experiment(
+        &self,
+        title: &str,
+        config: &ExperimentConfig,
+    ) -> Result<ExperimentDetail> {
         let mut normalized = config.clone();
         normalized.normalize();
 
@@ -539,7 +657,7 @@ impl Database {
     pub fn list_experiments(&self) -> Result<Vec<ExperimentSummary>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, title, total_turns, total_tokens, next_speaker, created_at, updated_at
+            "SELECT id, title, total_turns, total_tokens, next_speaker, parent_experiment_id, fork_turn, created_at, updated_at
              FROM experiments
              ORDER BY updated_at DESC",
         )?;
@@ -550,8 +668,10 @@ impl Database {
                 total_turns: row.get(2)?,
                 total_tokens: row.get(3)?,
                 next_speaker: row.get(4)?,
-                created_at: row.get(5)?,
-                updated_at: row.get(6)?,
+                parent_experiment_id: row.get(5)?,
+                fork_turn: row.get::<_, Option<i64>>(6)?.map(|v| v.max(0) as u32),
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             })
         })?;
         let mut items = Vec::new();
@@ -568,7 +688,7 @@ impl Database {
                 "SELECT id, title, config_json, total_turns, total_tokens, next_speaker,
                         board_content, board_prev_content, compacted_summary, compacted_until_seq,
                         final_report, created_at, updated_at, private_notes_json,
-                        active_room_json, room_members_json
+                        active_room_json, room_members_json, parent_experiment_id, fork_turn
                  FROM experiments WHERE id = ?1",
                 params![id],
                 |row| {
@@ -589,6 +709,8 @@ impl Database {
                         row.get::<_, String>(13)?,
                         row.get::<_, String>(14)?,
                         row.get::<_, String>(15)?,
+                        row.get::<_, Option<String>>(16)?,
+                        row.get::<_, Option<i64>>(17)?,
                     ))
                 },
             )
@@ -652,7 +774,7 @@ impl Database {
         let mut obs_stmt = conn.prepare(
             "SELECT id, experiment_id, trigger_turn, tags_json, depth_stage, note,
                     tension_score, abstraction_score, stagnation_index, perturbation_injected,
-                    crisis_cards_json, created_at, narrative_act
+                    crisis_cards_json, created_at, narrative_act, relationship_matrix_json
              FROM observer_notes
              WHERE experiment_id = ?1
              ORDER BY trigger_turn DESC, created_at DESC",
@@ -661,7 +783,11 @@ impl Database {
             let tags_str: String = r.get(3)?;
             let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
             let cards_str: String = r.get(10)?;
-            let crisis_cards: Vec<CrisisCard> = serde_json::from_str(&cards_str).unwrap_or_default();
+            let crisis_cards: Vec<CrisisCard> =
+                serde_json::from_str(&cards_str).unwrap_or_default();
+            let matrix_str: String = r.get(13)?;
+            let relationship_matrix: Vec<RelationshipEdge> =
+                serde_json::from_str(&matrix_str).unwrap_or_default();
             Ok(ObserverNote {
                 id: r.get(0)?,
                 experiment_id: r.get(1)?,
@@ -675,6 +801,7 @@ impl Database {
                 stagnation_index: r.get::<_, i64>(8)?.clamp(0, 100) as u8,
                 perturbation_injected: r.get::<_, i64>(9)? != 0,
                 crisis_cards,
+                relationship_matrix,
                 created_at: r.get(11)?,
             })
         })?;
@@ -690,6 +817,8 @@ impl Database {
             total_turns: row.3,
             total_tokens: row.4,
             next_speaker: row.5,
+            parent_experiment_id: row.16,
+            fork_turn: row.17.map(|v| v.max(0) as u32),
             board_content: row.6,
             board_prev_content: row.7,
             private_notes,
@@ -777,7 +906,9 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id FROM messages WHERE experiment_id = ?1 AND turn_number <= ?2 ORDER BY seq ASC",
         )?;
-        let rows = stmt.query_map(params![experiment_id, turn_number], |r| r.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![experiment_id, turn_number], |r| {
+            r.get::<_, String>(0)
+        })?;
         let mut message_ids = Vec::new();
         for r in rows {
             message_ids.push(r?);
@@ -810,7 +941,12 @@ impl Database {
         })
     }
 
-    pub fn update_experiment(&self, id: &str, title: &str, config: &ExperimentConfig) -> Result<()> {
+    pub fn update_experiment(
+        &self,
+        id: &str,
+        title: &str,
+        config: &ExperimentConfig,
+    ) -> Result<()> {
         let mut normalized = config.clone();
         normalized.normalize();
         let now = Utc::now().to_rfc3339();
@@ -827,7 +963,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let deleted = conn.execute("DELETE FROM experiments WHERE id = ?1", params![id])?;
         if deleted > 0 {
-            let _ = conn.execute_batch("VACUUM;");
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE); PRAGMA optimize;");
         }
         Ok(())
     }
@@ -900,6 +1036,20 @@ impl Database {
             )
             .optional()?;
         Ok(res.flatten())
+    }
+
+    pub fn set_experiment_lineage(
+        &self,
+        experiment_id: &str,
+        parent_experiment_id: &str,
+        fork_turn: u32,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE experiments SET parent_experiment_id = ?1, fork_turn = ?2 WHERE id = ?3",
+            params![parent_experiment_id, fork_turn as i64, experiment_id],
+        )?;
+        Ok(())
     }
 
     pub fn update_experiment_state_for_fork(
@@ -1153,21 +1303,48 @@ impl Database {
         Ok(())
     }
 
+    fn seed_builtin_character_cards_conn(&self, conn: &Connection) -> Result<()> {
+        for card in builtin_character_cards() {
+            let imprints_json = serde_json::to_string(&card.memory_imprints)?;
+            conn.execute(
+                "INSERT OR IGNORE INTO character_cards (id, name, base_prompt, behavior_traits, memory_imprints_json, source_experiment_title, is_builtin, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    card.id,
+                    card.name,
+                    card.base_prompt,
+                    card.behavior_traits,
+                    imprints_json,
+                    card.source_experiment_title,
+                    if card.is_builtin { 1i64 } else { 0i64 },
+                    card.created_at,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn list_character_cards(&self) -> Result<Vec<CharacterCard>> {
         let conn = self.conn.lock().unwrap();
+        self.seed_builtin_character_cards_conn(&conn)?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, base_prompt, behavior_traits, source_experiment_title, created_at
+            "SELECT id, name, base_prompt, behavior_traits, memory_imprints_json, source_experiment_title, is_builtin, created_at
              FROM character_cards
-             ORDER BY created_at DESC",
+             ORDER BY is_builtin ASC, created_at DESC, id ASC",
         )?;
         let rows = stmt.query_map([], |r| {
+            let imprints_str: String = r.get(4)?;
+            let memory_imprints: Vec<String> =
+                serde_json::from_str(&imprints_str).unwrap_or_default();
             Ok(CharacterCard {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 base_prompt: r.get(2)?,
                 behavior_traits: r.get(3)?,
-                source_experiment_title: r.get(4)?,
-                created_at: r.get(5)?,
+                memory_imprints,
+                source_experiment_title: r.get(5)?,
+                is_builtin: r.get::<_, i64>(6).unwrap_or(0) != 0,
+                created_at: r.get(7)?,
             })
         })?;
         let mut items = Vec::new();
@@ -1178,24 +1355,50 @@ impl Database {
     }
 
     pub fn save_character_card(&self, card: &CharacterCard) -> Result<Vec<CharacterCard>> {
+        let imprints_json = serde_json::to_string(&card.memory_imprints)?;
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO character_cards (id, name, base_prompt, behavior_traits, source_experiment_title, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO character_cards (id, name, base_prompt, behavior_traits, memory_imprints_json, source_experiment_title, is_builtin, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     base_prompt = excluded.base_prompt,
                     behavior_traits = excluded.behavior_traits,
-                    source_experiment_title = excluded.source_experiment_title",
+                    memory_imprints_json = excluded.memory_imprints_json,
+                    source_experiment_title = excluded.source_experiment_title,
+                    is_builtin = excluded.is_builtin",
                 params![
                     card.id,
                     card.name,
                     card.base_prompt,
                     card.behavior_traits,
+                    imprints_json,
                     card.source_experiment_title,
+                    if card.is_builtin { 1i64 } else { 0i64 },
                     card.created_at,
                 ],
+            )?;
+        }
+        self.list_character_cards()
+    }
+
+    pub fn update_character_card_imprints(
+        &self,
+        card_id: &str,
+        memory_imprints: Vec<String>,
+    ) -> Result<Vec<CharacterCard>> {
+        let cleaned: Vec<String> = memory_imprints
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let imprints_json = serde_json::to_string(&cleaned)?;
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE character_cards SET memory_imprints_json = ?1 WHERE id = ?2",
+                params![imprints_json, card_id],
             )?;
         }
         self.list_character_cards()
@@ -1204,7 +1407,10 @@ impl Database {
     pub fn delete_character_card(&self, id: &str) -> Result<Vec<CharacterCard>> {
         {
             let conn = self.conn.lock().unwrap();
-            conn.execute("DELETE FROM character_cards WHERE id = ?1", params![id])?;
+            conn.execute(
+                "DELETE FROM character_cards WHERE id = ?1 AND is_builtin = 0",
+                params![id],
+            )?;
         }
         self.list_character_cards()
     }
@@ -1225,8 +1431,7 @@ impl Database {
             )
             .optional()?
             .context("experiment not found")?;
-        let mut map: HashMap<String, String> =
-            serde_json::from_str(&raw_json).unwrap_or_default();
+        let mut map: HashMap<String, String> = serde_json::from_str(&raw_json).unwrap_or_default();
         let trimmed: String = note.trim().chars().take(150).collect();
         if trimmed.is_empty() {
             map.remove(agent_id);
@@ -1294,13 +1499,14 @@ impl Database {
     pub fn append_observer_note(&self, note: &ObserverNote) -> Result<()> {
         let tags_json = serde_json::to_string(&note.tags)?;
         let cards_json = serde_json::to_string(&note.crisis_cards)?;
+        let matrix_json = serde_json::to_string(&note.relationship_matrix)?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO observer_notes (
                 id, experiment_id, trigger_turn, tags_json, depth_stage, narrative_act, note,
                 tension_score, abstraction_score, stagnation_index, perturbation_injected,
-                crisis_cards_json, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                crisis_cards_json, relationship_matrix_json, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 note.id,
                 note.experiment_id,
@@ -1314,6 +1520,7 @@ impl Database {
                 note.stagnation_index as i64,
                 if note.perturbation_injected { 1 } else { 0 },
                 cards_json,
+                matrix_json,
                 note.created_at,
             ],
         )?;
@@ -1347,6 +1554,33 @@ impl Database {
             out.push_str(detail.board_content.trim());
             out.push_str("\n\n");
         }
+        let mut note_entries: Vec<(String, String)> = Vec::new();
+        for agent in &detail.config.agents {
+            if let Some(note) = detail.private_notes.get(&agent.id) {
+                let trimmed = note.trim();
+                if !trimmed.is_empty() {
+                    note_entries.push((agent.label.clone(), trimmed.to_string()));
+                }
+            }
+        }
+        let known_ids: std::collections::HashSet<&str> =
+            detail.config.agents.iter().map(|a| a.id.as_str()).collect();
+        let mut extra_notes: Vec<(&String, &String)> = detail
+            .private_notes
+            .iter()
+            .filter(|(k, v)| !known_ids.contains(k.as_str()) && !v.trim().is_empty())
+            .collect();
+        extra_notes.sort_by(|a, b| a.0.cmp(b.0));
+        for (id, note) in extra_notes {
+            note_entries.push((id.clone(), note.trim().to_string()));
+        }
+        if !note_entries.is_empty() {
+            out.push_str("---\n\n## 角色私密备忘\n\n");
+            for (label, note) in note_entries {
+                out.push_str(&format!("- **{}**: {}\n", label, note));
+            }
+            out.push('\n');
+        }
         out.push_str("---\n\n## 对话演化与干预实录\n\n");
 
         let mut notes_sorted = detail.observer_notes.clone();
@@ -1374,10 +1608,16 @@ impl Database {
                     out.push_str(&format!("{}\n\n", msg.content));
                 }
                 SpeakerRole::GodSystem => {
-                    out.push_str(&format!("> 🌐 **[造物主 · 环境旁白]**: {}\n\n", msg.content));
+                    out.push_str(&format!(
+                        "> 🌐 **[造物主 · 环境旁白]**: {}\n\n",
+                        msg.content
+                    ));
                 }
                 SpeakerRole::GodPublic => {
-                    out.push_str(&format!("> 👤 **[造物主 · 路人降临]**: {}\n\n", msg.content));
+                    out.push_str(&format!(
+                        "> 👤 **[造物主 · 路人降临]**: {}\n\n",
+                        msg.content
+                    ));
                 }
                 SpeakerRole::GodWhisper => {
                     let target = detail.config.agent_label(msg.agent_id.as_deref());
@@ -1438,6 +1678,116 @@ impl Database {
 
         Ok(out)
     }
+
+    /// 导出「纯享剧本模式」Markdown：剥离所有 `<think>` 幕后心声、Token 统计与调试元数据，
+    /// 仅保留剧本标题、定调标签、角色台词（干净剧本对白排版）、环境旁白、私密里屋标记与观察员阶段手记。
+    pub fn export_pure_script_markdown(&self, experiment_id: &str) -> Result<String> {
+        let detail = self.get_experiment_detail(experiment_id)?;
+        let mut out = String::new();
+
+        out.push_str(&format!("# {}\n\n", detail.title));
+        if !detail.config.tags.is_empty() {
+            out.push_str(&format!(
+                "> **定调标签**：{}\n\n",
+                detail.config.tags.join(" · ")
+            ));
+        }
+
+        let cast: Vec<String> = detail
+            .config
+            .agents
+            .iter()
+            .map(|a| format!("**{}**", a.label))
+            .collect();
+        if !cast.is_empty() {
+            out.push_str(&format!("**参演角色**：{}\n\n", cast.join(" / ")));
+        }
+
+        if !detail.board_content.trim().is_empty() {
+            out.push_str("---\n\n## 现场线索与共识\n\n");
+            out.push_str(detail.board_content.trim());
+            out.push_str("\n\n");
+        }
+
+        out.push_str("---\n\n## 剧本正文\n\n");
+
+        let mut notes_sorted = detail.observer_notes.clone();
+        notes_sorted.sort_by_key(|n| n.trigger_turn);
+        let mut note_idx = 0usize;
+        let mut last_room = "main".to_string();
+
+        for msg in &detail.messages {
+            let clean_body = strip_think_tags(&msg.content);
+            match msg.role {
+                SpeakerRole::Ai => {
+                    if msg.room_id != "main" && msg.room_id != last_room {
+                        let members_desc = detail
+                            .room_members
+                            .get(&msg.room_id)
+                            .map(|ids| {
+                                ids.iter()
+                                    .map(|id| detail.config.agent_label(Some(id)))
+                                    .collect::<Vec<_>>()
+                                    .join(" × ")
+                            })
+                            .unwrap_or_else(|| "里屋密谈".to_string());
+                        out.push_str(&format!("> 🔒 **【私密里屋 · {}】**\n\n", members_desc));
+                    }
+                    last_room = msg.room_id.clone();
+
+                    let label = detail.config.agent_label(msg.agent_id.as_deref());
+                    let room_tag = if msg.room_id != "main" {
+                        " *(里屋)*"
+                    } else {
+                        ""
+                    };
+                    out.push_str(&format!("**{}{}**：\n{}\n\n", label, room_tag, clean_body));
+                }
+                SpeakerRole::GodSystem => {
+                    if is_pass_notice(msg) {
+                        out.push_str(&format!("> *{}*\n\n", clean_body));
+                    } else {
+                        out.push_str(&format!("> 🌐 **【环境旁白】** {}\n\n", clean_body));
+                    }
+                }
+                SpeakerRole::GodPublic => {
+                    out.push_str(&format!("> 👤 **【路人】** {}\n\n", clean_body));
+                }
+                SpeakerRole::GodWhisper => {
+                    // 纯享剧本模式不暴露造物主后台低语或调试提示
+                }
+            }
+
+            if msg.role.is_ai() {
+                while note_idx < notes_sorted.len()
+                    && notes_sorted[note_idx].trigger_turn <= msg.turn_number
+                {
+                    let n = &notes_sorted[note_idx];
+                    let act = if n.narrative_act.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!("{} · ", n.narrative_act.trim())
+                    };
+                    out.push_str(&format!(
+                        "---\n\n> 🔭 **观察员阶段手记**（第 {} 轮 · {}{}）：{}\n\n",
+                        n.trigger_turn, act, n.depth_stage, n.note
+                    ));
+                    note_idx += 1;
+                }
+            }
+        }
+
+        while note_idx < notes_sorted.len() {
+            let n = &notes_sorted[note_idx];
+            out.push_str(&format!(
+                "---\n\n> 🔭 **观察员阶段手记**（第 {} 轮 · {}）：{}\n\n",
+                n.trigger_turn, n.depth_stage, n.note
+            ));
+            note_idx += 1;
+        }
+
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -1471,7 +1821,8 @@ mod tests {
             created_at: Utc::now().to_rfc3339(),
         };
         db.append_message(&msg1).unwrap();
-        db.update_experiment_progress(&exp.id, 1, 120, "AiB").unwrap();
+        db.update_experiment_progress(&exp.id, 1, 120, "AiB")
+            .unwrap();
 
         let note = ObserverNote {
             id: "n1".to_string(),
@@ -1486,6 +1837,12 @@ mod tests {
             stagnation_index: 15,
             perturbation_injected: false,
             crisis_cards: vec![],
+            relationship_matrix: vec![RelationshipEdge {
+                from: "智能体 1".to_string(),
+                to: "智能体 2".to_string(),
+                trust_score: 35,
+                attitude_tag: "谨慎试探".to_string(),
+            }],
             created_at: Utc::now().to_rfc3339(),
         };
         db.append_observer_note(&note).unwrap();
@@ -1494,6 +1851,13 @@ mod tests {
         assert!(md.contains("时间是一条不回头的河。"));
         assert!(md.contains("观察员手记"));
         assert!(md.contains("破冰试探"));
+
+        let pure_md = db.export_pure_script_markdown(&exp.id).unwrap();
+        assert!(pure_md.contains("时间是一条不回头的河。"));
+        assert!(pure_md.contains("观察员阶段手记"));
+        assert!(!pure_md.contains("先构思一个流动的意象"));
+        assert!(!pure_md.contains("120 tok"));
+        assert!(!pure_md.contains("deepseek-chat"));
 
         let exp2 = db
             .create_experiment("测试实验2", &ExperimentConfig::default())
@@ -1508,29 +1872,51 @@ mod tests {
         assert_eq!(saved_note.chars().count(), 150);
         assert_eq!(map.get("AiA").unwrap().chars().count(), 150);
         let reloaded = db.get_experiment_detail(&exp.id).unwrap();
-        assert_eq!(reloaded.private_notes.get("AiA").unwrap().chars().count(), 150);
+        assert_eq!(
+            reloaded.private_notes.get("AiA").unwrap().chars().count(),
+            150
+        );
+        assert_eq!(reloaded.observer_notes[0].relationship_matrix.len(), 1);
+        assert_eq!(reloaded.observer_notes[0].relationship_matrix[0].trust_score, 35);
+        let md_with_notes = db.export_markdown(&exp.id).unwrap();
+        assert!(md_with_notes.contains("## 角色私密备忘"));
+        assert!(md_with_notes.contains("记"));
 
-        // Character cards CRUD
+        // Character cards CRUD & memory imprints
         let card = CharacterCard {
             id: "card-1".to_string(),
             name: "阿哲".to_string(),
             base_prompt: "便利店夜班店员".to_string(),
             behavior_traits: "嘴硬心细、善于反套话".to_string(),
+            memory_imprints: vec!["曾在暴雨夜藏过黑背包".to_string()],
             source_experiment_title: exp.title.clone(),
+            is_builtin: false,
             created_at: Utc::now().to_rfc3339(),
         };
         let cards = db.save_character_card(&card).unwrap();
-        assert_eq!(cards.len(), 1);
+        assert_eq!(cards.len(), 17);
         assert_eq!(cards[0].name, "阿哲");
+        assert_eq!(cards[0].memory_imprints.len(), 1);
+        let updated_imprints = db
+            .update_character_card_imprints(
+                "card-1",
+                vec!["烙印1".to_string(), "烙印2".to_string()],
+            )
+            .unwrap();
+        assert_eq!(updated_imprints[0].memory_imprints, vec!["烙印1", "烙印2"]);
         let after_del = db.delete_character_card("card-1").unwrap();
-        assert!(after_del.is_empty());
+        assert_eq!(after_del.len(), 16);
+        let after_builtin_del = db
+            .delete_character_card("builtin-char-01-wang-jianguo")
+            .unwrap();
+        assert_eq!(after_builtin_del.len(), 16);
 
         db.delete_experiment(&exp2.id).unwrap();
         assert_eq!(db.list_experiments().unwrap().len(), 1);
     }
 
     #[test]
-    fn test_legacy_v2_builtin_presets_migrate_cleanly_to_v3() {
+    fn test_legacy_v2_builtin_presets_migrate_cleanly_to_v4() {
         let db = Database::open_in_memory().unwrap();
         {
             let conn = db.conn.lock().unwrap();
@@ -1546,8 +1932,10 @@ mod tests {
                 description: "old".to_string(),
                 global_system_prompt: "【场景背景】高密度哲学思辨圆桌。\nold".to_string(),
                 initial_topic: String::new(),
+                tags: vec![],
                 agent_prompts: vec![],
                 is_builtin: true,
+                recommended_config: None,
                 node_a_label: "感性直觉派".to_string(),
                 node_a_prompt: "old".to_string(),
                 node_b_label: "理性解构派".to_string(),
@@ -1556,17 +1944,22 @@ mod tests {
             conn.execute(
                 "INSERT INTO preset_templates (id, sort_order, data_json, updated_at)
                  VALUES (?1, 2, ?2, '2026-01-01T00:00:00Z')",
-                params!["philosophy", serde_json::to_string(&old_philosophy).unwrap()],
+                params![
+                    "philosophy",
+                    serde_json::to_string(&old_philosophy).unwrap()
+                ],
             )
             .unwrap();
         }
 
         db.init_schema().unwrap();
         let migrated = db.list_presets().unwrap();
+        assert_eq!(migrated.len(), 12);
         assert!(!migrated.iter().any(|p| p.id == "philosophy"));
         assert!(migrated.iter().any(|p| p.id == "late_night_friends"));
-        assert!(migrated.iter().any(|p| p.id == "shared_apartment"));
-        assert!(migrated.iter().any(|p| p.id == "space_station"));
-        assert!(migrated.iter().any(|p| p.id == "missing_usb"));
+        assert!(migrated.iter().any(|p| p.id == "ai_night_slacking"));
+        assert!(migrated.iter().any(|p| p.id == "green_train_sleeper"));
+        assert!(migrated.iter().any(|p| p.id == "neutrino_anomaly"));
+        assert!(migrated.iter().any(|p| p.id == "heat_death_ark"));
     }
 }

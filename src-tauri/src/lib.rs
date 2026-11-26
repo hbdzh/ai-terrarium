@@ -7,6 +7,8 @@ mod observer;
 mod sandbox_tools;
 mod sanitizer;
 mod snapshot;
+#[cfg(target_os = "windows")]
+mod win_chrome;
 
 use std::sync::Arc;
 
@@ -18,9 +20,9 @@ use uuid::Uuid;
 use crate::db::Database;
 use crate::engine::TerrariumEngine;
 use crate::models::{
-    ActivePrivateRoom, BoardApprovalMode, CharacterCard, EngineState, ExperimentConfig,
+    ActivePrivateRoom, BoardApprovalMode, CharacterCard, DiffLine, EngineState, ExperimentConfig,
     ExperimentDetail, ExperimentSummary, InterventionInput, PresetTemplate, ScenarioPackage,
-    StreamEvent, TurnSnapshot,
+    StreamEvent, TurnSnapshot, UiPrefs,
 };
 use crate::observer::GeneratedScenario;
 use crate::sandbox_tools::ApprovalDecision;
@@ -36,10 +38,7 @@ fn get_core_engine_prompt(state: State<'_, AppState>) -> Result<String, String> 
 }
 
 #[tauri::command]
-fn save_core_engine_prompt(
-    state: State<'_, AppState>,
-    prompt: String,
-) -> Result<String, String> {
+fn save_core_engine_prompt(state: State<'_, AppState>, prompt: String) -> Result<String, String> {
     state
         .db
         .save_core_engine_prompt(&prompt)
@@ -83,7 +82,10 @@ fn delete_preset(
     state: State<'_, AppState>,
     preset_id: String,
 ) -> Result<Vec<PresetTemplate>, String> {
-    state.db.delete_preset(&preset_id).map_err(|e| e.to_string())
+    state
+        .db
+        .delete_preset(&preset_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -115,6 +117,7 @@ async fn create_experiment(
     title: String,
     config: ExperimentConfig,
 ) -> Result<ExperimentDetail, String> {
+    config.validate_unique_agent_labels()?;
     let detail = state
         .db
         .create_experiment(title.trim(), &config)
@@ -143,6 +146,7 @@ fn update_experiment(
     title: String,
     config: ExperimentConfig,
 ) -> Result<ExperimentDetail, String> {
+    config.validate_unique_agent_labels()?;
     state
         .db
         .update_experiment(&experiment_id, title.trim(), &config)
@@ -247,8 +251,183 @@ fn export_experiment_markdown(
 }
 
 #[tauri::command]
-fn save_markdown_to_file(path: String, content: String) -> Result<(), String> {
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+fn export_pure_script_markdown(
+    state: State<'_, AppState>,
+    experiment_id: String,
+) -> Result<String, String> {
+    state
+        .db
+        .export_pure_script_markdown(&experiment_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_binary_to_file(
+    app: tauri::AppHandle,
+    path: String,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    use std::io::Write;
+    use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
+
+    let file_path = path
+        .parse::<FilePath>()
+        .unwrap_or_else(|_| FilePath::Path(std::path::PathBuf::from(&path)));
+
+    let mut opts = OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+
+    let mut file = match app.fs().open(file_path.clone(), opts) {
+        Ok(f) => f,
+        Err(_) => {
+            let mut fallback_opts = OpenOptions::new();
+            fallback_opts.write(true).create(true);
+            app.fs()
+                .open(file_path, fallback_opts)
+                .map_err(|e| e.to_string())?
+        }
+    };
+
+    file.write_all(&data).map_err(|e| e.to_string())?;
+    file.flush().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_markdown_to_file(
+    app: tauri::AppHandle,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    use std::io::Write;
+    use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
+
+    let file_path = path
+        .parse::<FilePath>()
+        .unwrap_or_else(|_| FilePath::Path(std::path::PathBuf::from(&path)));
+
+    let mut opts = OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+
+    let mut file = match app.fs().open(file_path.clone(), opts) {
+        Ok(f) => f,
+        Err(_) => {
+            // Some Android ContentProviders reject "wt" mode; retry with "w"
+            let mut fallback_opts = OpenOptions::new();
+            fallback_opts.write(true).create(true);
+            app.fs()
+                .open(file_path, fallback_opts)
+                .map_err(|e| e.to_string())?
+        }
+    };
+
+    file.write_all(content.as_bytes())
+        .map_err(|e| e.to_string())?;
+    file.flush().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn read_text_file(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    use std::io::Read;
+    use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
+
+    let file_path = path
+        .parse::<FilePath>()
+        .unwrap_or_else(|_| FilePath::Path(std::path::PathBuf::from(&path)));
+
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    let mut file = app.fs().open(file_path, opts).map_err(|e| e.to_string())?;
+    let mut text = String::new();
+    file.read_to_string(&mut text).map_err(|e| e.to_string())?;
+    Ok(text)
+}
+
+#[tauri::command]
+fn compute_line_diff(old_text: String, new_text: String) -> Vec<DiffLine> {
+    let a: Vec<&str> = old_text.lines().collect();
+    let b: Vec<&str> = new_text.lines().collect();
+    let m = a.len();
+    let n = b.len();
+
+    if m * n > 400_000 {
+        let mut out = Vec::with_capacity(m + n);
+        for line in a {
+            out.push(DiffLine {
+                kind: "removed".to_string(),
+                text: line.to_string(),
+            });
+        }
+        for line in b {
+            out.push(DiffLine {
+                kind: "added".to_string(),
+                text: line.to_string(),
+            });
+        }
+        return out;
+    }
+
+    let mut dp = vec![0usize; (m + 1) * (n + 1)];
+    let cols = n + 1;
+    for i in (0..m).rev() {
+        for j in (0..n).rev() {
+            dp[i * cols + j] = if a[i] == b[j] {
+                dp[(i + 1) * cols + (j + 1)] + 1
+            } else {
+                dp[(i + 1) * cols + j].max(dp[i * cols + (j + 1)])
+            };
+        }
+    }
+
+    let mut out = Vec::with_capacity(m + n);
+    let mut i = 0;
+    let mut j = 0;
+    while i < m && j < n {
+        if a[i] == b[j] {
+            out.push(DiffLine {
+                kind: "same".to_string(),
+                text: a[i].to_string(),
+            });
+            i += 1;
+            j += 1;
+        } else if dp[(i + 1) * cols + j] >= dp[i * cols + (j + 1)] {
+            out.push(DiffLine {
+                kind: "removed".to_string(),
+                text: a[i].to_string(),
+            });
+            i += 1;
+        } else {
+            out.push(DiffLine {
+                kind: "added".to_string(),
+                text: b[j].to_string(),
+            });
+            j += 1;
+        }
+    }
+    while i < m {
+        out.push(DiffLine {
+            kind: "removed".to_string(),
+            text: a[i].to_string(),
+        });
+        i += 1;
+    }
+    while j < n {
+        out.push(DiffLine {
+            kind: "added".to_string(),
+            text: b[j].to_string(),
+        });
+        j += 1;
+    }
+    out
+}
+
+#[tauri::command]
+fn get_ui_prefs(state: State<'_, AppState>) -> Result<UiPrefs, String> {
+    state.db.get_ui_prefs().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_ui_prefs(state: State<'_, AppState>, prefs: UiPrefs) -> Result<(), String> {
+    state.db.save_ui_prefs(&prefs).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -256,6 +435,7 @@ async fn fork_experiment(
     state: State<'_, AppState>,
     source_exp_id: String,
     target_turn: u32,
+    target_message_id: Option<String>,
     edit_message_id: Option<String>,
     edit_content: Option<String>,
 ) -> Result<ExperimentDetail, String> {
@@ -263,10 +443,11 @@ async fn fork_experiment(
         (Some(id), Some(content)) if !content.trim().is_empty() => Some((id, content)),
         _ => None,
     };
-    let forked = crate::snapshot::fork_experiment_at_turn(
+    let forked = crate::snapshot::fork_experiment_at_turn_or_message(
         &state.db,
         &source_exp_id,
         target_turn,
+        target_message_id,
         edit_override,
     )
     .map_err(|e| e.to_string())?;
@@ -520,27 +701,171 @@ fn save_agent_to_character_library(
     state: State<'_, AppState>,
     experiment_id: String,
     agent_id: String,
+    label_override: Option<String>,
+    prompt_override: Option<String>,
 ) -> Result<Vec<CharacterCard>, String> {
     let detail = state
         .db
         .get_experiment_detail(&experiment_id)
         .map_err(|e| e.to_string())?;
-    let agent = detail
-        .config
-        .find_agent(&agent_id)
+    let agent = detail.config.find_agent(&agent_id);
+    let name = label_override
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| agent.map(|a| a.label.clone()))
         .ok_or_else(|| "未找到指定智能体".to_string())?;
-    let traits = crate::observer::extract_agent_traits_from_report(&detail.final_report, &agent.label);
+    let base_prompt = prompt_override
+        .or_else(|| agent.map(|a| a.system_prompt.clone()))
+        .unwrap_or_default();
+    let traits = crate::observer::extract_agent_traits_from_report(&detail.final_report, &name);
     let card = CharacterCard {
         id: Uuid::new_v4().to_string(),
-        name: agent.label.clone(),
-        base_prompt: agent.system_prompt.clone(),
+        name,
+        base_prompt,
         behavior_traits: traits,
+        memory_imprints: Vec::new(),
         source_experiment_title: detail.title,
+        is_builtin: false,
         created_at: Utc::now().to_rfc3339(),
     };
     state
         .db
         .save_character_card(&card)
+        .map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DistillImprintsResponse {
+    cards: Vec<CharacterCard>,
+    distilled: Vec<crate::observer::DistilledImprint>,
+}
+
+fn strip_disambiguation_suffix(label: &str) -> &str {
+    let trimmed = label.trim();
+    if let Some(idx) = trimmed.rfind(" (") {
+        if trimmed.ends_with(')') {
+            let num = &trimmed[idx + 2..trimmed.len() - 1];
+            if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+                return trimmed[..idx].trim();
+            }
+        }
+    }
+    trimmed
+}
+
+#[tauri::command]
+async fn distill_memory_imprints_to_library(
+    state: State<'_, AppState>,
+    experiment_id: String,
+) -> Result<DistillImprintsResponse, String> {
+    let detail = state
+        .db
+        .get_experiment_detail(&experiment_id)
+        .map_err(|e| e.to_string())?;
+    let distilled = crate::observer::distill_memory_imprints(&state.engine.client, &detail)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut existing_cards = state
+        .db
+        .list_character_cards()
+        .map_err(|e| e.to_string())?;
+
+    for item in &distilled {
+        let matched_agent = detail
+            .config
+            .agents
+            .iter()
+            .find(|a| !item.agent_id.is_empty() && a.id == item.agent_id)
+            .or_else(|| {
+                detail
+                    .config
+                    .agents
+                    .iter()
+                    .find(|a| !item.agent_label.is_empty() && a.label.trim() == item.agent_label)
+            });
+
+        let target_label = matched_agent
+            .map(|a| a.label.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| item.agent_label.trim().to_string());
+        if target_label.is_empty() {
+            continue;
+        }
+        let base_label = strip_disambiguation_suffix(&target_label);
+
+        if let Some(pos) = existing_cards.iter().position(|c| {
+            let cn = c.name.trim();
+            cn == target_label || cn == base_label
+        }) {
+            let mut card = existing_cards[pos].clone();
+            if !card.memory_imprints.iter().any(|m| m.trim() == item.imprint) {
+                card.memory_imprints.push(item.imprint.clone());
+                existing_cards = state
+                    .db
+                    .save_character_card(&card)
+                    .map_err(|e| e.to_string())?;
+            }
+        } else {
+            let base_prompt = matched_agent
+                .map(|a| a.system_prompt.clone())
+                .unwrap_or_default();
+            let traits = crate::observer::extract_agent_traits_from_report(
+                &detail.final_report,
+                &target_label,
+            );
+            let new_card = CharacterCard {
+                id: Uuid::new_v4().to_string(),
+                name: target_label,
+                base_prompt,
+                behavior_traits: traits,
+                memory_imprints: vec![item.imprint.clone()],
+                source_experiment_title: detail.title.clone(),
+                is_builtin: false,
+                created_at: Utc::now().to_rfc3339(),
+            };
+            existing_cards = state
+                .db
+                .save_character_card(&new_card)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(DistillImprintsResponse {
+        cards: existing_cards,
+        distilled,
+    })
+}
+
+#[tauri::command]
+fn update_character_card_imprints(
+    state: State<'_, AppState>,
+    card_id: String,
+    memory_imprints: Vec<String>,
+) -> Result<Vec<CharacterCard>, String> {
+    state
+        .db
+        .update_character_card_imprints(&card_id, memory_imprints)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn generate_worldline_comparison_report(
+    state: State<'_, AppState>,
+    exp_id_a: String,
+    exp_id_b: String,
+) -> Result<String, String> {
+    let exp_a = state
+        .db
+        .get_experiment_detail(&exp_id_a)
+        .map_err(|e| e.to_string())?;
+    let exp_b = state
+        .db
+        .get_experiment_detail(&exp_id_b)
+        .map_err(|e| e.to_string())?;
+    crate::observer::generate_worldline_comparison_markdown(&state.engine.client, &exp_a, &exp_b)
+        .await
         .map_err(|e| e.to_string())
 }
 
@@ -555,11 +880,40 @@ fn delete_character_card(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn show_main_window(window: tauri::Window) {
+    if !window.is_visible().unwrap_or(false) {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+#[tauri::command]
+fn set_window_theme(app: tauri::AppHandle, theme: String) {
+    #[cfg(target_os = "windows")]
+    if let Some(win) = app.get_webview_window("main") {
+        win_chrome::apply_windows_theme(&win, &theme);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(win) = app.get_webview_window("main") {
+        let t = match theme.as_str() {
+            "dark" => Some(tauri::Theme::Dark),
+            "light" => Some(tauri::Theme::Light),
+            _ => None,
+        };
+        let _ = win.set_theme(t);
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let _ = (app, theme);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             let app_dir = app
                 .path()
@@ -572,10 +926,35 @@ pub fn run() {
                 .expect("failed to ensure default experiment");
             let engine = TerrariumEngine::new(Arc::clone(&db), default_exp.id);
 
+            let initial_theme = db
+                .get_ui_prefs()
+                .map(|p| p.theme_preference)
+                .unwrap_or_else(|_| "system".to_string());
             app.manage(AppState { db, engine });
+
+            // On Windows, apply frameless Mica backdrop, disable WebView2 browser menu, and enable Win11 Snap Layouts
+            #[cfg(target_os = "windows")]
+            if let Some(win) = app.get_webview_window("main") {
+                win_chrome::setup_windows_chrome(&win, &initial_theme);
+            }
+            #[cfg(not(target_os = "windows"))]
+            let _ = initial_theme;
+
+            // Safety fallback: ensure main window becomes visible even if frontend fails to invoke show_main_window
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                if let Some(win) = handle.get_webview_window("main") {
+                    if !win.is_visible().unwrap_or(true) {
+                        let _ = win.show();
+                    }
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            show_main_window,
+            set_window_theme,
             get_core_engine_prompt,
             save_core_engine_prompt,
             reset_core_engine_prompt,
@@ -597,14 +976,21 @@ pub fn run() {
             enqueue_intervention,
             trigger_observer_now,
             export_experiment_markdown,
+            export_pure_script_markdown,
             get_message_raw_prompt,
             save_markdown_to_file,
+            save_binary_to_file,
+            read_text_file,
+            compute_line_diff,
+            get_ui_prefs,
+            save_ui_prefs,
             fork_experiment,
             get_experiment_snapshots,
             update_shared_board,
             set_board_approval_mode,
             resolve_board_approval,
             generate_final_report,
+            generate_worldline_comparison_report,
             export_scenario_package,
             import_scenario_package,
             generate_scenario_from_idea,
@@ -613,6 +999,8 @@ pub fn run() {
             close_private_room,
             list_character_cards,
             save_agent_to_character_library,
+            distill_memory_imprints_to_library,
+            update_character_card_imprints,
             delete_character_card,
         ])
         .run(tauri::generate_context!())

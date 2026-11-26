@@ -2,6 +2,8 @@ export type SpeakerRole = "Ai" | "GodPublic" | "GodSystem" | "GodWhisper";
 
 export type EngineState = "idle" | "running" | "paused" | "stepping";
 
+export type ThinkingLevel = "default" | "off" | "low" | "medium" | "high";
+
 export interface NodeConfig {
   id: string;
   label: string;
@@ -9,6 +11,7 @@ export interface NodeConfig {
   apiKey: string;
   modelName: string;
   temperature: number;
+  thinkingLevel?: ThinkingLevel | string;
   systemPrompt: string;
 }
 
@@ -17,14 +20,25 @@ export interface PresetAgentPrompt {
   systemPrompt: string;
 }
 
+export interface PresetConfigOverrides {
+  allowPassTurn?: boolean;
+  randomMoodDice?: boolean;
+  intuitiveFastReply?: boolean;
+  enableWhiteboard?: boolean;
+  enablePrivateNotes?: boolean;
+  smartTurnOrder?: boolean;
+}
+
 export interface PresetTemplate {
   id: string;
   name: string;
   description: string;
   globalSystemPrompt: string;
   initialTopic: string;
+  tags?: string[];
   agentPrompts: PresetAgentPrompt[];
   isBuiltin?: boolean;
+  recommendedConfig?: PresetConfigOverrides | null;
   nodeALabel: string;
   nodeAPrompt: string;
   nodeBLabel: string;
@@ -35,6 +49,7 @@ export type BoardApprovalMode = "auto" | "guardian" | "approval";
 
 export interface ExperimentConfig {
   presetId: string;
+  tags?: string[];
   globalSystemPrompt?: string;
   initialTopic: string;
   observerInterval: number;
@@ -53,8 +68,12 @@ export interface ExperimentConfig {
   enableAdaptiveReasoning?: boolean;
   adaptiveLowReasoningEffort?: "minimal" | "low" | "medium" | string;
   enablePeriodicReflection?: boolean;
+  enableAutoDirector?: boolean;
   enableNarrativeArc?: boolean;
   targetTotalTurns?: number;
+  allowPassTurn?: boolean;
+  randomMoodDice?: boolean;
+  intuitiveFastReply?: boolean;
   agents: NodeConfig[];
   nodeC: NodeConfig;
 }
@@ -71,8 +90,21 @@ export interface CharacterCard {
   name: string;
   basePrompt: string;
   behaviorTraits: string;
+  memoryImprints?: string[];
   sourceExperimentTitle: string;
+  isBuiltin?: boolean;
   createdAt: string;
+}
+
+export interface DistilledImprint {
+  agentId: string;
+  agentLabel: string;
+  imprint: string;
+}
+
+export interface DistillImprintsResponse {
+  cards: CharacterCard[];
+  distilled: DistilledImprint[];
 }
 
 export interface GeneratedAgentDraft {
@@ -123,6 +155,13 @@ export interface CrisisCard {
   content: string;
 }
 
+export interface RelationshipEdge {
+  from: string;
+  to: string;
+  trustScore: number;
+  attitudeTag: string;
+}
+
 export interface ObserverNote {
   id: string;
   experimentId: string;
@@ -136,6 +175,7 @@ export interface ObserverNote {
   stagnationIndex: number;
   perturbationInjected: boolean;
   crisisCards: CrisisCard[];
+  relationshipMatrix?: RelationshipEdge[];
   createdAt: string;
 }
 
@@ -152,6 +192,8 @@ export interface ExperimentSummary {
   totalTurns: number;
   totalTokens: number;
   nextSpeaker: string;
+  parentExperimentId?: string | null;
+  forkTurn?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -179,6 +221,8 @@ export interface ExperimentDetail {
   totalTurns: number;
   totalTokens: number;
   nextSpeaker: string;
+  parentExperimentId?: string | null;
+  forkTurn?: number | null;
   boardContent: string;
   boardPrevContent: string;
   privateNotes?: Record<string, string>;
@@ -342,3 +386,17 @@ export type StreamEvent =
       totalTurns: number;
       targetTurns: number;
     };
+
+export interface DiffLine {
+  type: "same" | "added" | "removed";
+  text: string;
+}
+
+export type ThemePreference = "system" | "light" | "dark";
+
+export interface UiPrefs {
+  leftSidebarOpen: boolean;
+  inspectorOpen: boolean;
+  inspectorWidthPct: number;
+  themePreference?: ThemePreference;
+}

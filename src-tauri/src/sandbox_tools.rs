@@ -42,11 +42,46 @@ pub fn quick_rule_check_board(new_content: &str) -> Option<String> {
     }
 
     let zh_first_person = [
-        "我是", "我在", "我有", "我想", "我发现", "我认为", "我觉得", "我方", "我的", "我们",
-        "对我", "让我", "向我", "给我", "把我", "被我", "跟我", "和我", "归我", "我怀疑",
-        "我打算", "我隐藏", "我的真实身份", "我的秘密", "我秘密", "我猜", "我以为", "我暗中",
-        "我其实", "我必须", "我要", "我会", "我能", "我知道", "我不知道", "我看", "我说",
-        "我听", "我问", "本人",
+        "我是",
+        "我在",
+        "我有",
+        "我想",
+        "我发现",
+        "我认为",
+        "我觉得",
+        "我方",
+        "我的",
+        "我们",
+        "对我",
+        "让我",
+        "向我",
+        "给我",
+        "把我",
+        "被我",
+        "跟我",
+        "和我",
+        "归我",
+        "我怀疑",
+        "我打算",
+        "我隐藏",
+        "我的真实身份",
+        "我的秘密",
+        "我秘密",
+        "我猜",
+        "我以为",
+        "我暗中",
+        "我其实",
+        "我必须",
+        "我要",
+        "我会",
+        "我能",
+        "我知道",
+        "我不知道",
+        "我看",
+        "我说",
+        "我听",
+        "我问",
+        "本人",
     ];
     for pat in zh_first_person {
         if trimmed.contains(pat) {
@@ -122,7 +157,8 @@ pub fn parse_guardian_verdict(raw: &str) -> GuardianVerdict {
     if let Ok(parsed) = serde_json::from_str::<GuardianJsonResp>(candidate) {
         if !parsed.approved {
             let reason = if parsed.reason.trim().is_empty() {
-                "守门员检测到白板包含主观第一人称或未公开的私密设定，请改为客观第三人称事实。".to_string()
+                "守门员检测到白板包含主观第一人称或未公开的私密设定，请改为客观第三人称事实。"
+                    .to_string()
             } else {
                 parsed.reason.trim().to_string()
             };
@@ -254,7 +290,7 @@ pub fn sandbox_tools_schema(enable_board_tools: bool, enable_private_notes: bool
             "type": "function",
             "function": {
                 "name": "update_board",
-                "description": "覆盖更新实验室共享 Markdown 白板，用于记录已确认的事实、角色共识、关键线索或世界观设定变更。仅在出现实质性新线索或重要转折时调用，避免每轮琐碎更新；保持白板精炼，主动合并冗余条目，总字数控制在 800 字以内。注意：此白板对所有参与者实时可见。请严格使用客观第三人称记录双方已公开的事实、环境变化或共同线索，严禁使用第一人称（如‘我’），也严禁将你自己的隐藏身份、内心算计或未公开的秘密写入白板。调用后需在最终回复中继续正常发言。",
+                "description": "更新并维护实验室共享 Markdown 白板，用于记录已确认的事实、阶段性共识、关键分歧、线索或局势转折。当讨论推进并出现新信息、新结论或需要整理局面时，主动调用此工具将最新状态写入白板并合并冗余条目（总字数控制在 800 字以内）。注意：此白板对所有参与者实时可见。请严格使用客观第三人称记录双方已公开的事实、环境变化或共同线索，严禁使用第一人称（如‘我’），也严禁将你自己的隐藏身份、内心算计或未公开的秘密写入白板。调用后需在最终回复中继续正常发言。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -306,8 +342,8 @@ pub fn parse_board_tool_call(call: &ApiToolCall) -> ParsedBoardTool {
     match name {
         "read_board" => ParsedBoardTool::ReadBoard,
         "update_board" => {
-            let parsed: UpdateBoardArgs = serde_json::from_str(&call.function.arguments)
-                .unwrap_or(UpdateBoardArgs {
+            let parsed: UpdateBoardArgs =
+                serde_json::from_str(&call.function.arguments).unwrap_or(UpdateBoardArgs {
                     new_content: call.function.arguments.clone(),
                     reason: "更新共享白板".to_string(),
                 });
@@ -354,7 +390,10 @@ mod tests {
                 arguments: "{}".to_string(),
             },
         };
-        assert_eq!(parse_board_tool_call(&read_call), ParsedBoardTool::ReadBoard);
+        assert_eq!(
+            parse_board_tool_call(&read_call),
+            ParsedBoardTool::ReadBoard
+        );
 
         let update_call = ApiToolCall {
             id: "call_2".to_string(),
@@ -378,7 +417,10 @@ mod tests {
     fn test_quick_rule_check_board_and_guardian_verdict() {
         assert!(quick_rule_check_board("   ").is_some());
         assert!(quick_rule_check_board("- 我发现冰柜后面有黑箱子").is_some());
-        assert!(quick_rule_check_board("- 阿哲在冰柜后发现了未知黑箱子（自我防卫机制未触发）").is_none());
+        assert!(
+            quick_rule_check_board("- 阿哲在冰柜后发现了未知黑箱子（自我防卫机制未触发）")
+                .is_none()
+        );
         assert_eq!(
             parse_guardian_verdict(r#"{"approved": false, "reason": "泄露了调查员身份"}"#),
             GuardianVerdict::Rejected {

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import {
-  Plus,
   Search,
   X,
   Trash2,
@@ -13,14 +12,24 @@ import {
   Settings,
   FolderInput,
   ChevronUp,
+  SquarePen,
+  Sparkles,
+  Image as ImageIcon,
+  Printer,
+  FileText,
+  Pencil,
+  Check,
+  RefreshCw,
 } from "lucide-vue-next";
 import type { CharacterCard, ExperimentSummary } from "../types";
-import { isMacOS, isDesktopOS } from "../utils/platform";
+import { isMacOS, isWindows, isDesktopOS, isMobileOS } from "../utils/platform";
 import AdaptiveModal from "./ui/AdaptiveModal.vue";
 
 const props = defineProps<{
   experiments: ExperimentSummary[];
   currentExperimentId: string | null;
+  currentTotalTurns?: number;
+  distillingImprints?: boolean;
   characterCards: CharacterCard[];
   inSheet?: boolean;
 }>();
@@ -30,16 +39,52 @@ const emit = defineEmits<{
   selectExperiment: [id: string];
   deleteExperiment: [id: string];
   exportScenario: [];
-  importScenario: [file: File];
+  importScenario: [];
   exportMd: [];
+  exportPureMd: [];
+  exportPurePng: [];
+  exportPurePdf: [];
+  distillImprints: [];
+  updateCardImprints: [payload: { cardId: string; memoryImprints: string[] }];
   deleteCharacterCard: [cardId: string];
   openSettings: [];
 }>();
 
 const searchQuery = ref("");
-const scenarioFileRef = ref<HTMLInputElement | null>(null);
 const cardModalOpen = ref(false);
 const ioMenuOpen = ref(false);
+const confirmDeleteId = ref<string | null>(null);
+let confirmTimer: number | null = null;
+
+// Inline memory imprint editing in Soul Character Library modal
+const editingImprintKey = ref<string | null>(null);
+const editingImprintDraft = ref("");
+
+function startEditImprint(cardId: string, idx: number, currentVal: string) {
+  editingImprintKey.value = `${cardId}:${idx}`;
+  editingImprintDraft.value = currentVal;
+}
+
+function saveEditImprint(card: CharacterCard, idx: number) {
+  const next = [...(card.memoryImprints ?? [])];
+  const trimmed = editingImprintDraft.value.trim();
+  if (trimmed) {
+    next[idx] = trimmed;
+  } else {
+    next.splice(idx, 1);
+  }
+  editingImprintKey.value = null;
+  emit("updateCardImprints", { cardId: card.id, memoryImprints: next });
+}
+
+function deleteImprint(card: CharacterCard, idx: number) {
+  const next = [...(card.memoryImprints ?? [])];
+  next.splice(idx, 1);
+  if (editingImprintKey.value === `${card.id}:${idx}`) {
+    editingImprintKey.value = null;
+  }
+  emit("updateCardImprints", { cardId: card.id, memoryImprints: next });
+}
 
 const filteredExperiments = computed(() => {
   const q = searchQuery.value.trim().toLowerCase();
@@ -47,22 +92,16 @@ const filteredExperiments = computed(() => {
   return props.experiments.filter((item) => item.title.toLowerCase().includes(q));
 });
 
-function isDerivedBranch(title: string): boolean {
-  return /·\s*(分支|改写重演)\s*#\d+/.test(title);
+function isDerivedBranch(item: ExperimentSummary): boolean {
+  return (
+    Boolean(item.parentExperimentId) ||
+    /·\s*(分支[A-Z0-9]*|改写重演)/.test(item.title)
+  );
 }
 
 function triggerImportScenario() {
   ioMenuOpen.value = false;
-  scenarioFileRef.value?.click();
-}
-
-function onScenarioFileChange(e: Event) {
-  const input = e.target as HTMLInputElement;
-  const file = input.files?.[0];
-  input.value = "";
-  if (file) {
-    emit("importScenario", file);
-  }
+  emit("importScenario");
 }
 
 function formatTok(n: number): string {
@@ -70,22 +109,85 @@ function formatTok(n: number): string {
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
 }
+
+function requestDelete(id: string) {
+  if (!props.inSheet && isDesktopOS) {
+    emit("deleteExperiment", id);
+    return;
+  }
+  if (confirmDeleteId.value === id) {
+    if (confirmTimer) window.clearTimeout(confirmTimer);
+    confirmDeleteId.value = null;
+    emit("deleteExperiment", id);
+    return;
+  }
+  confirmDeleteId.value = id;
+  if (confirmTimer) window.clearTimeout(confirmTimer);
+  confirmTimer = window.setTimeout(() => {
+    confirmDeleteId.value = null;
+  }, 3000);
+}
 </script>
 
 <template>
-  <div class="h-full w-full flex flex-col bg-[#F3F3F5] border-r border-black/[0.08] select-none overflow-hidden antialiased">
-    <!-- Top Traffic-Light Clearance Drag Region (macOS desktop only) + Lightweight Search Box -->
+  <div
+    class="h-full w-full flex flex-col select-none overflow-hidden antialiased"
+    :class="
+      isWindows && !inSheet
+        ? 'bg-transparent'
+        : 'bg-[#F9F9FB] border-r border-black/[0.06]'
+    "
+  >
+    <!-- Windows Frameless Integrated Top Brand Drag Area (matches 36px WindowsTitleBar height seamlessly with zero horizontal line) -->
+    <div
+      v-if="isWindows && !inSheet"
+      data-tauri-drag-region
+      class="h-9 shrink-0 flex items-center gap-2 px-3.5 cursor-default"
+    >
+      <span class="w-4 h-4 rounded-[5px] bg-[#1D1D1F] text-white text-[9px] font-bold flex items-center justify-center shrink-0">
+        T
+      </span>
+      <span class="text-[12.5px] font-semibold text-[#1D1D1F]/85 dark:text-white/85 tracking-tight">AI Terrarium</span>
+    </div>
+
+    <!-- Top New Experiment Row + Lightweight Search (ChatGPT/Codex Sidebar style) -->
     <div
       :data-tauri-drag-region="isMacOS && !inSheet ? '' : undefined"
-      class="shrink-0 px-3 pb-2.5"
-      :class="isMacOS && !inSheet ? 'pt-10' : 'pt-3'"
+      class="shrink-0 px-3 md:px-2.5 pb-2 space-y-2 md:space-y-1.5"
+      :class="
+        isMacOS && !inSheet
+          ? 'pt-10'
+          : isWindows && !inSheet
+            ? 'pt-1'
+            : inSheet
+              ? 'pt-3.5'
+              : isMobileOS
+                ? 'pt-[calc(0.55rem+var(--safe-top,env(safe-area-inset-top)))]'
+                : 'pt-2.5'
+      "
     >
+      <button
+        type="button"
+        @click="emit('openNewExperiment')"
+        class="w-full h-10 md:h-9 flex items-center gap-2.5 px-3 md:px-2.5 rounded-xl md:rounded-[10px] text-[14px] md:text-[13px] font-medium text-[#1D1D1F] hover:bg-black/[0.045] active:bg-black/[0.07] transition-colors"
+        :class="inSheet ? 'bg-white border border-black/[0.06] shadow-[0_1px_2px_rgba(0,0,0,0.02)]' : ''"
+        title="新建实验 (Ctrl+N)"
+      >
+        <SquarePen class="w-4 h-4 text-slate-600 shrink-0" />
+        <span>新建实验</span>
+      </button>
+
       <div class="relative flex items-center">
-        <Search class="w-3.5 h-3.5 text-slate-400 absolute left-2.5 pointer-events-none" />
+        <Search class="w-3.5 h-3.5 text-slate-400 absolute left-3 md:left-2.5 pointer-events-none" />
         <input
           v-model="searchQuery"
           placeholder="搜索实验存档"
-          class="w-full rounded-lg bg-black/[0.05] focus:bg-white border border-transparent focus:border-black/[0.08] pl-8 pr-7 py-1.5 text-[12px] text-[#1D1D1F] placeholder:text-slate-400 outline-none focus:ring-2 focus:ring-[#007AFF]/20 transition-colors"
+          class="w-full pl-8.5 md:pl-8 pr-7 py-2 md:py-1.5 text-[13.5px] md:text-[13px] text-[#1D1D1F] placeholder:text-slate-400 outline-none transition-all"
+          :class="
+            inSheet
+              ? 'rounded-xl bg-white border border-black/[0.06] focus:border-black/20'
+              : 'rounded-[10px] bg-transparent hover:bg-black/[0.035] focus:bg-white border border-transparent focus:border-black/[0.08]'
+          "
         />
         <button
           v-if="searchQuery"
@@ -98,25 +200,17 @@ function formatTok(n: number): string {
       </div>
     </div>
 
-    <!-- Middle History Experiments List -->
-    <div class="flex-1 min-h-0 overflow-y-auto px-2 py-1 space-y-0.5">
-      <div class="px-2 pt-1 pb-1.5 flex items-center justify-between">
-        <span class="text-[11px] font-semibold text-slate-500 tracking-wide">
-          实验存档
+    <!-- Middle History Experiments List (Single-line minimal items on desktop, rich on touch sheet) -->
+    <div class="flex-1 min-h-0 overflow-y-auto px-2.5 py-1 space-y-0.5">
+      <div class="px-2.5 pt-1.5 pb-1 flex items-center justify-between">
+        <span class="text-[11px] font-medium text-slate-400">
+          实验档案
         </span>
-        <button
-          type="button"
-          @click="emit('openNewExperiment')"
-          class="p-1 rounded-md text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.06] transition-colors"
-          title="新建实验"
-        >
-          <Plus class="w-3.5 h-3.5" />
-        </button>
       </div>
 
       <div
         v-if="filteredExperiments.length === 0"
-        class="py-8 text-center text-xs text-slate-400"
+        class="py-10 text-center text-[13px] text-slate-400"
       >
         无匹配实验存档
       </div>
@@ -125,29 +219,30 @@ function formatTok(n: number): string {
         v-for="item in filteredExperiments"
         :key="item.id"
         @click="emit('selectExperiment', item.id)"
-        class="group relative flex items-center justify-between gap-1.5 py-1.5 pr-2 rounded-lg cursor-pointer transition-colors"
+        class="group relative flex items-center justify-between gap-2 py-2 md:py-1.5 pr-1.5 rounded-xl md:rounded-[10px] cursor-pointer transition-colors"
         :class="[
-          isDerivedBranch(item.title) ? 'pl-5' : 'pl-2.5',
+          isDerivedBranch(item) ? 'pl-5' : 'pl-2.5',
           item.id === currentExperimentId
-            ? 'bg-black/[0.06] text-[#1D1D1F]'
-            : 'hover:bg-black/[0.035] text-slate-700',
+            ? 'bg-black/[0.055] text-[#1D1D1F]'
+            : 'hover:bg-black/[0.035] active:bg-black/[0.055] text-slate-700',
         ]"
+        :title="`${item.title} · ${item.totalTurns} 轮 · ${formatTok(item.totalTokens)} tok`"
       >
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-1.5 min-w-0">
             <GitBranch
-              v-if="isDerivedBranch(item.title)"
-              class="w-3 h-3 shrink-0 text-violet-500"
+              v-if="isDerivedBranch(item)"
+              class="w-3.5 h-3.5 md:w-3 md:h-3 shrink-0 text-violet-500"
               title="平行宇宙派生分支"
             />
             <span
-              class="text-[12.5px] truncate leading-snug"
-              :class="item.id === currentExperimentId ? 'font-semibold' : 'font-medium'"
+              class="text-[14px] md:text-[13px] truncate leading-snug"
+              :class="item.id === currentExperimentId ? 'font-medium text-[#1D1D1F]' : 'font-normal'"
             >
               {{ item.title }}
             </span>
           </div>
-          <div class="text-[10.5px] text-slate-400 tabular-nums mt-0.5 leading-tight">
+          <div v-if="inSheet" class="text-[11.5px] text-slate-400 tabular-nums mt-0.5 leading-tight">
             {{ item.totalTurns }} 轮 · {{ formatTok(item.totalTokens) }} tok
           </div>
         </div>
@@ -155,41 +250,58 @@ function formatTok(n: number): string {
         <button
           v-if="experiments.length > 1"
           type="button"
-          @click.stop="emit('deleteExperiment', item.id)"
-          class="opacity-100 lg:opacity-0 lg:group-hover:opacity-100 p-1 rounded-md hover:bg-rose-100 text-slate-400 hover:text-rose-600 transition-colors shrink-0"
-          title="删除存档"
+          @click.stop="requestDelete(item.id)"
+          class="shrink-0 transition-all"
+          :class="
+            confirmDeleteId === item.id
+              ? 'px-2.5 py-1 rounded-full bg-rose-600 text-white text-[11px] font-medium'
+              : 'opacity-100 lg:opacity-0 lg:group-hover:opacity-100 w-8 h-8 md:w-7 md:h-7 flex items-center justify-center rounded-xl md:rounded-lg hover:bg-rose-100 text-slate-400 hover:text-rose-600'
+          "
+          :title="confirmDeleteId === item.id ? '再次点击确认删除' : '删除存档'"
         >
-          <Trash2 class="w-3.5 h-3.5" />
+          <span v-if="confirmDeleteId === item.id">确认删除</span>
+          <Trash2 v-else class="w-4 h-4 md:w-3.5 md:h-3.5" />
         </button>
       </div>
     </div>
 
     <!-- Bottom Fixed Action Area -->
-    <div class="relative shrink-0 px-2.5 pt-2 pb-[calc(0.625rem+env(safe-area-inset-bottom))] border-t border-black/[0.06] space-y-0.5 bg-[#F3F3F5]">
-      <input
-        ref="scenarioFileRef"
-        type="file"
-        accept=".json,application/json"
-        class="hidden"
-        @change="onScenarioFileChange"
-      />
+    <div
+      class="relative shrink-0 px-2.5 pt-2 border-t border-black/[0.05] space-y-0.5"
+      :class="[
+        isWindows && !inSheet ? 'bg-transparent' : 'bg-[#F9F9FB]',
+        isMobileOS ? 'pb-[calc(0.65rem+var(--safe-bottom,env(safe-area-inset-bottom)))]' : 'pb-2.5',
+      ]"
+    >
+      <!-- Distill Memory Imprints to Soul Library -->
+      <button
+        type="button"
+        @click="emit('distillImprints')"
+        :disabled="(currentTotalTurns ?? 0) === 0 || distillingImprints"
+        class="w-full h-10 md:h-9 flex items-center gap-2.5 px-2.5 rounded-xl text-[13.5px] md:text-[12.5px] font-medium text-slate-700 hover:bg-black/[0.045] active:bg-black/[0.08] hover:text-[#1D1D1F] transition-colors disabled:opacity-40"
+        title="调用观察员 C 提炼本局角色高浓度经历，持久化追加至灵魂角色库"
+      >
+        <RefreshCw v-if="distillingImprints" class="w-4 h-4 text-indigo-600 animate-spin shrink-0" />
+        <Sparkles v-else class="w-4 h-4 text-indigo-600 shrink-0" />
+        <span class="truncate">{{ distillingImprints ? "提炼经历中..." : "提炼本局经历写入灵魂库" }}</span>
+      </button>
 
-      <!-- Compact Soul Character Library -->
+      <!-- Soul Character Library -->
       <button
         type="button"
         @click="cardModalOpen = true"
-        class="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[12px] font-medium text-slate-700 hover:bg-black/[0.05] hover:text-[#1D1D1F] transition-colors"
+        class="w-full h-10 md:h-9 flex items-center justify-between px-2.5 rounded-xl text-[13.5px] md:text-[12.5px] font-medium text-slate-700 hover:bg-black/[0.045] active:bg-black/[0.08] hover:text-[#1D1D1F] transition-colors"
       >
-        <span class="flex items-center gap-2 min-w-0">
-          <BookUser class="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+        <span class="flex items-center gap-2.5 min-w-0">
+          <BookUser class="w-4 h-4 text-indigo-600 shrink-0" />
           <span class="truncate">灵魂角色库</span>
         </span>
-        <span class="px-1.5 py-0.5 rounded-md bg-black/[0.05] text-[10px] font-semibold text-slate-500 tabular-nums">
+        <span class="px-2 py-0.5 rounded-full bg-black/[0.055] text-[11px] font-semibold text-slate-600 tabular-nums">
           {{ characterCards.length }}
         </span>
       </button>
 
-      <!-- Compact Import / Export Menu -->
+      <!-- Import / Export Menu -->
       <div class="relative">
         <div
           v-if="ioMenuOpen"
@@ -198,64 +310,93 @@ function formatTok(n: number): string {
         ></div>
         <div
           v-if="ioMenuOpen"
-          class="absolute bottom-full left-0 right-0 mb-1.5 z-30 p-1 rounded-xl bg-white border border-black/[0.08] shadow-[0_10px_30px_rgba(0,0,0,0.12)] space-y-0.5"
+          class="absolute bottom-full left-0 right-0 mb-1.5 z-30 p-1.5 rounded-2xl bg-white border border-black/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.14)] space-y-0.5"
         >
           <button
             type="button"
             @click="triggerImportScenario"
-            class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[12px] text-slate-700 hover:bg-black/[0.05] transition-colors text-left"
+            class="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] md:text-[12.5px] text-slate-700 hover:bg-black/[0.05] transition-colors text-left"
           >
-            <Upload class="w-3.5 h-3.5 text-slate-500 shrink-0" />
+            <Upload class="w-4 h-4 md:w-3.5 md:h-3.5 text-slate-500 shrink-0" />
             <span>导入剧本 (.json)</span>
           </button>
           <button
             type="button"
             @click="ioMenuOpen = false; emit('exportScenario')"
-            class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[12px] text-slate-700 hover:bg-black/[0.05] transition-colors text-left"
+            class="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] md:text-[12.5px] text-slate-700 hover:bg-black/[0.05] transition-colors text-left"
           >
-            <FileJson class="w-3.5 h-3.5 text-slate-500 shrink-0" />
+            <FileJson class="w-4 h-4 md:w-3.5 md:h-3.5 text-slate-500 shrink-0" />
             <span>导出剧本 (.json)</span>
           </button>
           <button
             type="button"
             @click="ioMenuOpen = false; emit('exportMd')"
-            class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[12px] text-slate-700 hover:bg-black/[0.05] transition-colors text-left"
+            class="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] md:text-[12.5px] text-slate-700 hover:bg-black/[0.05] transition-colors text-left"
           >
-            <Download class="w-3.5 h-3.5 text-slate-500 shrink-0" />
-            <span>导出档案 (.md)</span>
+            <Download class="w-4 h-4 md:w-3.5 md:h-3.5 text-slate-500 shrink-0" />
+            <span>导出完整档案 (.md)</span>
+          </button>
+
+          <div class="my-1 border-t border-black/[0.06]"></div>
+          <div class="px-3 py-1 text-[10.5px] font-semibold text-slate-400">
+            纯享剧本导出（隐藏思考过程）
+          </div>
+          <button
+            type="button"
+            @click="ioMenuOpen = false; emit('exportPureMd')"
+            class="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-xl text-[12.5px] text-slate-700 hover:bg-black/[0.05] transition-colors text-left"
+          >
+            <FileText class="w-3.5 h-3.5 text-slate-500 shrink-0" />
+            <span>纯享 Markdown (.md)</span>
+          </button>
+          <button
+            type="button"
+            @click="ioMenuOpen = false; emit('exportPurePng')"
+            class="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-xl text-[12.5px] text-slate-700 hover:bg-black/[0.05] transition-colors text-left"
+          >
+            <ImageIcon class="w-3.5 h-3.5 text-slate-500 shrink-0" />
+            <span>纯享长图 (.png)</span>
+          </button>
+          <button
+            type="button"
+            @click="ioMenuOpen = false; emit('exportPurePdf')"
+            class="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-xl text-[12.5px] text-slate-700 hover:bg-black/[0.05] transition-colors text-left"
+          >
+            <Printer class="w-3.5 h-3.5 text-slate-500 shrink-0" />
+            <span>纯享 PDF (.pdf)</span>
           </button>
         </div>
 
         <button
           type="button"
           @click="ioMenuOpen = !ioMenuOpen"
-          class="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[12px] font-medium transition-colors"
-          :class="ioMenuOpen ? 'bg-black/[0.06] text-[#1D1D1F]' : 'text-slate-700 hover:bg-black/[0.05] hover:text-[#1D1D1F]'"
+          class="w-full h-10 md:h-9 flex items-center justify-between px-2.5 rounded-xl text-[13.5px] md:text-[12.5px] font-medium transition-colors"
+          :class="ioMenuOpen ? 'bg-black/[0.06] text-[#1D1D1F]' : 'text-slate-700 hover:bg-black/[0.045] active:bg-black/[0.08] hover:text-[#1D1D1F]'"
         >
-          <span class="flex items-center gap-2 min-w-0">
-            <FolderInput class="w-3.5 h-3.5 text-slate-500 shrink-0" />
+          <span class="flex items-center gap-2.5 min-w-0">
+            <FolderInput class="w-4 h-4 text-slate-500 shrink-0" />
             <span class="truncate">导入 / 导出</span>
           </span>
           <ChevronUp
-            class="w-3.5 h-3.5 text-slate-400 transition-transform"
+            class="w-4 h-4 text-slate-400 transition-transform"
             :class="ioMenuOpen ? 'rotate-180' : ''"
           />
         </button>
       </div>
 
-      <!-- Native Classic Settings Entry -->
+      <!-- Settings Entry -->
       <div class="pt-1 mt-1 border-t border-black/[0.06]">
         <button
           type="button"
           @click="emit('openSettings')"
-          class="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[12px] font-medium text-slate-700 hover:bg-black/[0.06] hover:text-[#1D1D1F] transition-colors"
+          class="w-full h-10 md:h-9 flex items-center justify-between px-2.5 rounded-xl text-[13.5px] md:text-[12.5px] font-medium text-slate-700 hover:bg-black/[0.05] active:bg-black/[0.08] hover:text-[#1D1D1F] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-[#007AFF]/30"
           :title="isMacOS ? '模型、API 与观察员设置 (⌘,)' : isDesktopOS ? '模型、API 与观察员设置 (Ctrl+,)' : '模型、API 与观察员设置'"
         >
-          <span class="flex items-center gap-2">
-            <Settings class="w-3.5 h-3.5 text-slate-500 shrink-0" />
-            <span>设置</span>
+          <span class="flex items-center gap-2.5">
+            <Settings class="w-4 h-4 text-slate-500 shrink-0" />
+            <span>模型与生态设置</span>
           </span>
-          <kbd v-if="isDesktopOS" class="text-[10.5px] font-sans text-slate-400">
+          <kbd v-if="isDesktopOS" class="px-1.5 py-0.5 rounded bg-black/[0.05] text-[10.5px] font-sans text-slate-500">
             {{ isMacOS ? "⌘," : "Ctrl+," }}
           </kbd>
         </button>
@@ -273,14 +414,14 @@ function formatTok(n: number): string {
         <div class="px-5 py-3.5 border-b border-black/[0.06] flex items-center justify-between gap-2 shrink-0">
           <div class="flex items-center gap-2">
             <BookUser class="w-4 h-4 text-indigo-600" />
-            <h3 class="text-sm font-semibold text-[#1D1D1F]">
+            <h3 class="text-[15px] md:text-sm font-semibold text-[#1D1D1F]">
               跨世界灵魂角色库 ({{ characterCards.length }})
             </h3>
           </div>
           <button
             type="button"
             @click="cardModalOpen = false"
-            class="p-1.5 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-700"
+            class="p-2 md:p-1.5 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-700"
           >
             <X class="w-4 h-4" />
           </button>
@@ -290,43 +431,102 @@ function formatTok(n: number): string {
       <div class="flex-1 overflow-y-auto p-4 sm:p-5 space-y-2.5 bg-[#F6F6F8]">
         <div
           v-if="characterCards.length === 0"
-          class="py-12 text-center text-xs text-slate-400"
+          class="py-12 text-center text-[13px] md:text-xs text-slate-400"
         >
           角色库暂无存档，可在《实验结案复盘简报》中将高光角色一键存入。
         </div>
         <div
           v-for="card in characterCards"
           :key="card.id"
-          class="p-3.5 rounded-2xl bg-white border border-black/[0.07] space-y-1.5"
+          class="p-4 md:p-3.5 rounded-2xl bg-white border border-black/[0.07] space-y-1.5"
         >
           <div class="flex items-center justify-between gap-2">
-            <div class="min-w-0">
-              <span class="text-xs font-semibold text-[#1D1D1F]">{{ card.name }}</span>
+            <div class="min-w-0 flex items-center gap-1.5 flex-wrap">
+              <span class="text-[14px] md:text-xs font-semibold text-[#1D1D1F]">{{ card.name }}</span>
               <span
-                v-if="card.sourceExperimentTitle"
-                class="ml-2 text-[10.5px] text-slate-400"
+                v-if="card.isBuiltin"
+                class="px-1.5 py-0.5 rounded-md bg-indigo-50 text-[10.5px] md:text-[10px] font-medium text-indigo-600"
+              >
+                内置
+              </span>
+              <span
+                v-else-if="card.sourceExperimentTitle"
+                class="text-[11px] md:text-[10.5px] text-slate-400"
               >
                 来自「{{ card.sourceExperimentTitle }}」
               </span>
             </div>
             <button
+              v-if="!card.isBuiltin"
               type="button"
               @click="emit('deleteCharacterCard', card.id)"
-              class="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors shrink-0"
+              class="p-2 md:p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors shrink-0"
               title="从角色库删除"
             >
-              <Trash2 class="w-3.5 h-3.5" />
+              <Trash2 class="w-4 h-4 md:w-3.5 md:h-3.5" />
             </button>
           </div>
-          <p v-if="card.basePrompt" class="text-[11.5px] text-slate-600 leading-relaxed line-clamp-3">
+          <p v-if="card.basePrompt" class="text-[13px] md:text-[11.5px] text-slate-600 leading-relaxed line-clamp-3">
             {{ card.basePrompt }}
           </p>
           <p
             v-if="card.behaviorTraits"
-            class="text-[11px] text-indigo-700 bg-indigo-50/70 px-2.5 py-1 rounded-lg"
+            class="text-[12px] md:text-[11px] text-indigo-700 bg-indigo-50/70 px-2.5 py-1.5 md:py-1 rounded-lg"
           >
             {{ card.behaviorTraits }}
           </p>
+
+          <!-- Cross-Universe Memory Imprints (View / Edit / Delete single imprint) -->
+          <div
+            v-if="card.memoryImprints && card.memoryImprints.length > 0"
+            class="pt-1 space-y-1.5"
+          >
+            <div class="text-[11px] font-semibold text-slate-500 flex items-center gap-1">
+              <Sparkles class="w-3 h-3 text-indigo-500" />
+              <span>跨宇宙记忆烙印 ({{ card.memoryImprints.length }})</span>
+            </div>
+            <div
+              v-for="(imprint, impIdx) in card.memoryImprints"
+              :key="impIdx"
+              class="group/imp flex items-center gap-1.5 rounded-xl bg-[#F5F5F7] px-2.5 py-1.5 text-[11.5px] text-slate-700"
+            >
+              <template v-if="editingImprintKey === `${card.id}:${impIdx}`">
+                <input
+                  v-model="editingImprintDraft"
+                  @keydown.enter.prevent="saveEditImprint(card, impIdx)"
+                  @keydown.esc="editingImprintKey = null"
+                  class="flex-1 min-w-0 bg-white border border-indigo-300 rounded-lg px-2 py-1 text-[11.5px] text-[#1D1D1F] outline-none"
+                />
+                <button
+                  type="button"
+                  @click="saveEditImprint(card, impIdx)"
+                  class="p-1 rounded-md text-emerald-600 hover:bg-emerald-50"
+                  title="保存烙印"
+                >
+                  <Check class="w-3.5 h-3.5" />
+                </button>
+              </template>
+              <template v-else>
+                <span class="flex-1 min-w-0 leading-relaxed break-words">{{ imprint }}</span>
+                <button
+                  type="button"
+                  @click="startEditImprint(card.id, impIdx, imprint)"
+                  class="p-1 rounded-md text-slate-400 hover:text-[#007AFF] hover:bg-white opacity-70 group-hover/imp:opacity-100 transition shrink-0"
+                  title="编辑此条烙印"
+                >
+                  <Pencil class="w-3 h-3" />
+                </button>
+                <button
+                  type="button"
+                  @click="deleteImprint(card, impIdx)"
+                  class="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 opacity-70 group-hover/imp:opacity-100 transition shrink-0"
+                  title="删除此条烙印"
+                >
+                  <Trash2 class="w-3 h-3" />
+                </button>
+              </template>
+            </div>
+          </div>
         </div>
       </div>
     </AdaptiveModal>

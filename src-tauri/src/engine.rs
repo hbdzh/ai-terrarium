@@ -17,15 +17,16 @@ use crate::llm::{
     StreamCompletionResult, StreamDeltaChunk, TokenUsage,
 };
 use crate::models::{
-    ActivePrivateRoom, BoardApprovalMode, EngineState, ExperimentConfig, InterventionInput,
-    NodeConfig, ObserverNote, SpeakerRole, StreamEvent, TimelineMessage,
+    is_pass_notice, ActivePrivateRoom, BoardApprovalMode, EngineState, ExperimentConfig,
+    InterventionInput, NodeConfig, ObserverNote, SpeakerRole, StreamEvent, TimelineMessage,
+    PASS_NOTICE_SUFFIX,
 };
 use crate::observer::{parse_director_command, run_observer_analysis};
 use crate::sandbox_tools::{
     guardian_review_board, parse_board_tool_call, sandbox_tools_schema, truncate_private_note,
     ApprovalDecision, GuardianVerdict, ParsedBoardTool, MAX_PRIVATE_NOTE_CHARS,
 };
-use crate::sanitizer::strip_think_tags;
+use crate::sanitizer::{strip_leading_speaker_prefix, strip_think_tags};
 
 fn state_to_u8(s: EngineState) -> u8 {
     match s {
@@ -54,6 +55,9 @@ pub fn resolve_reasoning_effort(
     has_recent_god_system: bool,
     progress_turn: u32,
 ) -> Option<String> {
+    if config.intuitive_fast_reply {
+        return Some("minimal".to_string());
+    }
     if !config.enable_adaptive_reasoning {
         return None;
     }
@@ -84,6 +88,60 @@ pub fn resolve_reasoning_effort(
     } else {
         None
     }
+}
+
+/// 内置 15 条轻量生活状态微扰动池（随机微情绪骰子使用）
+const MOOD_DICE_POOL: [&str; 15] = [
+    "刚喝完冰美式有点亢奋，说话节奏偏快",
+    "有点犯困走神，想换个轻松话题",
+    "突然想起一件生活琐事，注意力有点飘",
+    "心情不错，想调侃对方两句",
+    "刚刷到一条离谱热搜，脑子里还留着槽点",
+    "有点饿了，聊着聊着容易联想到吃的",
+    "莫名有点小烦躁，不太想听长篇说教",
+    "刚伸完懒腰，整个人松弛下来，语气更随性",
+    "对刚才某个细节突然有点较真，想追问一句",
+    "窗外好像起风了，情绪稍微带点感性",
+    "手机一直在震但懒得看，只想顺嘴接两句",
+    "突然觉得这个话题有点好笑，忍着笑意接话",
+    "脑子稍微有点卡壳，更想用简短大白话回应",
+    "刚喝了口热茶，心态平和但有点爱抬杠",
+    "忽然涌起一点表达欲，想直接抛出个人直觉判断",
+];
+
+fn maybe_roll_mood_dice(config: &ExperimentConfig) -> Option<&'static str> {
+    if !config.random_mood_dice {
+        return None;
+    }
+    let bytes = *Uuid::new_v4().as_bytes();
+    if (bytes[0] % 100) < 30 {
+        Some(MOOD_DICE_POOL[(bytes[1] as usize) % MOOD_DICE_POOL.len()])
+    } else {
+        None
+    }
+}
+
+/// 去除 `<think>...</think>` 思考块及首尾空白后，判断是否为 `[PASS]` 跳过指令
+pub fn is_pass_reply(content: &str) -> bool {
+    let mut cleaned = content.to_string();
+    loop {
+        let lower = cleaned.to_ascii_lowercase();
+        let Some(start) = lower.find("<think>") else {
+            break;
+        };
+        if let Some(rel_end) = lower[start + 7..].find("</think>") {
+            let end = start + 7 + rel_end + 8;
+            cleaned.replace_range(start..end, "");
+        } else {
+            cleaned.truncate(start);
+            break;
+        }
+    }
+    cleaned.trim().eq_ignore_ascii_case("[PASS]")
+}
+
+fn was_previous_message_pass(messages: &[TimelineMessage]) -> bool {
+    messages.last().is_some_and(is_pass_notice)
 }
 
 /// 3 人及以上智能点名接话路由：检测上一条发言是否明确点名其他角色，且严禁同一角色连续刷屏。
@@ -358,7 +416,11 @@ impl TerrariumEngine {
         .await;
     }
 
-    pub async fn enqueue_intervention(&self, experiment_id: String, input: InterventionInput) -> usize {
+    pub async fn enqueue_intervention(
+        &self,
+        experiment_id: String,
+        input: InterventionInput,
+    ) -> usize {
         let len = {
             let mut q = self.intervention_queue.lock().await;
             q.push_back((experiment_id.clone(), input));
@@ -545,7 +607,10 @@ impl TerrariumEngine {
             agent_id: None,
             room_id: "main".to_string(),
             reasoning_content: String::new(),
-            content: format!("【空间变动】{} 与 {} 结束了私聊，各自回到大厅。", label1, label2),
+            content: format!(
+                "【空间变动】{} 与 {} 结束了私聊，各自回到大厅。",
+                label1, label2
+            ),
             model_name: String::new(),
             duration_ms: 0,
             prompt_tokens: 0,
@@ -679,11 +744,13 @@ impl TerrariumEngine {
         if detail.messages.is_empty() {
             return;
         }
+        let tail_start = detail.messages.len().saturating_sub(24);
+        let recent_msgs = detail.messages[tail_start..].to_vec();
         self.spawn_observer_task(
             exp_id,
             detail.total_turns,
             detail.config,
-            detail.messages,
+            recent_msgs,
             detail.board_content,
             detail.compacted_summary,
         )
@@ -729,7 +796,36 @@ impl TerrariumEngine {
             {
                 Ok(parsed) => {
                     let stagnation = parsed.stagnation_index.clamp(0, 100) as u8;
-                    let should_perturb = stagnation > 80;
+                    let director_event_content = if config.enable_auto_director {
+                        parsed
+                            .director_event
+                            .clone()
+                            .filter(|s| !s.trim().is_empty())
+                            .or_else(|| {
+                                if stagnation > 80 {
+                                    parsed
+                                        .crisis_cards
+                                        .iter()
+                                        .find(|c| c.kind == "GodSystem" && !c.content.trim().is_empty())
+                                        .or_else(|| {
+                                            parsed
+                                                .crisis_cards
+                                                .iter()
+                                                .find(|c| !c.content.trim().is_empty())
+                                        })
+                                        .map(|c| c.content.trim().to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                    } else {
+                        None
+                    };
+                    let should_perturb = if config.enable_auto_director {
+                        director_event_content.is_some()
+                    } else {
+                        stagnation > 80
+                    };
                     let note = ObserverNote {
                         id: Uuid::new_v4().to_string(),
                         experiment_id: exp_id.clone(),
@@ -743,6 +839,19 @@ impl TerrariumEngine {
                         stagnation_index: stagnation,
                         perturbation_injected: should_perturb,
                         crisis_cards: parsed.crisis_cards,
+                        relationship_matrix: parsed
+                            .relationship_matrix
+                            .into_iter()
+                            .map(|mut edge| {
+                                if let Some(ag) = config.find_agent(&edge.from) {
+                                    edge.from = ag.label.clone();
+                                }
+                                if let Some(ag) = config.find_agent(&edge.to) {
+                                    edge.to = ag.label.clone();
+                                }
+                                edge
+                            })
+                            .collect(),
                         created_at: Utc::now().to_rfc3339(),
                     };
 
@@ -757,10 +866,15 @@ impl TerrariumEngine {
                     }
 
                     if should_perturb {
+                        let perturbation_text = if let Some(ev_text) = director_event_content {
+                            format!("【叙事导演 · 突发环境事件】{}", ev_text.trim())
+                        } else {
+                            "【生态自动扰动 · 打破僵化】观测到当前对话已陷入高度复读或客套循环。请立即推翻刚才的隐含共识，引入一个截然相反的极端反例或具象悖论，继续交锋。".to_string()
+                        };
                         let perturbation = InterventionInput {
                             kind: SpeakerRole::GodSystem,
                             agent_id: None,
-                            content: "【生态自动扰动 · 打破僵化】观测到当前对话已陷入高度复读或客套循环。请立即推翻刚才的隐含共识，引入一个截然相反的极端反例或具象悖论，继续交锋。".to_string(),
+                            content: perturbation_text,
                         };
                         let cur_state = u8_to_state(state.load(Ordering::SeqCst));
                         if cur_state == EngineState::Running || cur_state == EngineState::Stepping {
@@ -817,10 +931,10 @@ impl TerrariumEngine {
                                 .iter()
                                 .find(|a| !rw.agent_id.is_empty() && a.id == rw.agent_id)
                                 .or_else(|| {
-                                    config
-                                        .agents
-                                        .iter()
-                                        .find(|a| !rw.agent_label.is_empty() && a.label.trim() == rw.agent_label)
+                                    config.agents.iter().find(|a| {
+                                        !rw.agent_label.is_empty()
+                                            && a.label.trim() == rw.agent_label
+                                    })
                                 });
                             let Some(agent) = matched_agent else {
                                 continue;
@@ -834,7 +948,9 @@ impl TerrariumEngine {
                                 content: rw.whisper,
                             };
                             let cur_state = u8_to_state(state.load(Ordering::SeqCst));
-                            if cur_state == EngineState::Running || cur_state == EngineState::Stepping {
+                            if cur_state == EngineState::Running
+                                || cur_state == EngineState::Stepping
+                            {
                                 let len = {
                                     let mut q = queue.lock().await;
                                     q.push_back((exp_id.clone(), whisper_input));
@@ -922,7 +1038,8 @@ impl TerrariumEngine {
             };
 
             if detail.config.agents.is_empty() {
-                self.pause(Some("请至少配置 1 个 AI 智能体".to_string())).await;
+                self.pause(Some("请至少配置 1 个 AI 智能体".to_string()))
+                    .await;
                 continue;
             }
 
@@ -1037,12 +1154,11 @@ impl TerrariumEngine {
                     }
                 }
             } else if detail.config.enable_smart_selector && detail.config.agents.len() >= 3 {
-                if let Some(last_conv) = detail
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.room_id == "main" && matches!(m.role, SpeakerRole::Ai | SpeakerRole::GodPublic))
-                {
+                if let Some(last_conv) = detail.messages.iter().rev().find(|m| {
+                    m.room_id == "main"
+                        && (matches!(m.role, SpeakerRole::Ai | SpeakerRole::GodPublic)
+                            || is_pass_notice(m))
+                }) {
                     if last_conv.role == SpeakerRole::GodPublic {
                         let last_ai_id = detail
                             .messages
@@ -1080,6 +1196,7 @@ impl TerrariumEngine {
                 .unwrap_or_else(|_| crate::models::DEFAULT_CORE_ENGINE_PROMPT.to_string());
             let mut compacted_summary = detail.compacted_summary.clone();
             let mut compacted_until_seq = detail.compacted_until_seq;
+            let rolled_mood = maybe_roll_mood_dice(&detail.config);
             let mut payload = build_flipped_messages_with_room(
                 &node_cfg.id,
                 &detail.config,
@@ -1091,6 +1208,7 @@ impl TerrariumEngine {
                 active_room.as_ref(),
                 &detail.room_members,
                 &core_engine_prompt,
+                rolled_mood,
             );
 
             // 3.5 Auto context compaction if estimated prompt tokens exceed threshold (e.g. 80%)
@@ -1139,6 +1257,7 @@ impl TerrariumEngine {
                     active_room.as_ref(),
                     &detail.room_members,
                     &core_engine_prompt,
+                    rolled_mood,
                 );
                 est_prompt_tokens = estimate_messages_tokens(&payload.messages);
                 let after_pct = ((est_prompt_tokens * 100) / ctx_limit).min(999) as u16;
@@ -1153,7 +1272,11 @@ impl TerrariumEngine {
                 .await;
 
                 if detail.config.enable_compaction_guard {
-                    let tripped = self.compaction_guard.lock().await.record_and_check(next_turn);
+                    let tripped = self
+                        .compaction_guard
+                        .lock()
+                        .await
+                        .record_and_check(next_turn);
                     if tripped {
                         let warn_msg = "记忆压缩防抖动熔断：连续 3 轮内触发 3 次记忆压缩，已自动暂停引擎防止死循环烧钱。请前往「设置 → 调度与安全阀」调大上下文预算窗口。".to_string();
                         self.emit(StreamEvent::EngineError {
@@ -1169,8 +1292,7 @@ impl TerrariumEngine {
 
             let msg_id = Uuid::new_v4().to_string();
             let context_usage_pct = ((est_prompt_tokens * 100) / ctx_limit).min(999) as u16;
-            let enable_board_tools =
-                detail.config.enable_board_tools && detail.config.preset_id != "free";
+            let enable_board_tools = detail.config.enable_board_tools;
             let enable_private_notes = detail.config.enable_private_notes;
             let tools_schema = sandbox_tools_schema(enable_board_tools, enable_private_notes);
 
@@ -1180,18 +1302,26 @@ impl TerrariumEngine {
             } else {
                 next_turn
             };
-            let reasoning_effort = resolve_reasoning_effort(
+            let adaptive_reasoning_effort = resolve_reasoning_effort(
                 &detail.config,
                 latest_tension,
                 !payload.consumed_whisper_ids.is_empty(),
                 payload.has_recent_god_system,
                 progress_turn,
             );
+            let thinking_params = crate::llm::resolve_thinking_params(
+                &detail.config,
+                node_cfg,
+                adaptive_reasoning_effort.as_deref(),
+            );
 
             let raw_prompt_json = serde_json::json!({
                 "model": node_cfg.model_name,
                 "temperature": node_cfg.temperature,
-                "reasoning_effort": &reasoning_effort,
+                "reasoning_effort": &thinking_params.reasoning_effort,
+                "enable_thinking": thinking_params.enable_thinking,
+                "thinking_budget": thinking_params.thinking_budget,
+                "thinking": &thinking_params.thinking,
                 "private_note": if enable_private_notes { Some(agent_private_note) } else { None },
                 "messages": &payload.messages,
                 "tools": if !tools_schema.is_empty() { Some(&tools_schema) } else { None },
@@ -1219,19 +1349,96 @@ impl TerrariumEngine {
                     payload.messages,
                     enable_board_tools,
                     enable_private_notes,
-                    reasoning_effort.as_deref(),
+                    &thinking_params,
                 )
                 .await;
 
             match stream_res {
                 Ok(res) => {
-                    let _ = self.db.mark_whispers_consumed(&payload.consumed_whisper_ids);
+                    let _ = self
+                        .db
+                        .mark_whispers_consumed(&payload.consumed_whisper_ids);
+
+                    if detail.config.allow_pass_turn
+                        && is_pass_reply(&res.content)
+                        && !was_previous_message_pass(&detail.messages)
+                    {
+                        let seq = self.db.next_seq(&exp_id).unwrap_or(1);
+                        let pass_msg = TimelineMessage {
+                            id: msg_id,
+                            experiment_id: exp_id.clone(),
+                            seq,
+                            turn_number: detail.total_turns,
+                            role: SpeakerRole::GodSystem,
+                            agent_id: None,
+                            room_id: active_room
+                                .as_ref()
+                                .filter(|r| r.member_ids.iter().any(|id| id == &node_cfg.id))
+                                .map(|r| r.room_id.clone())
+                                .unwrap_or_else(|| "main".to_string()),
+                            reasoning_content: String::new(),
+                            content: format!("{} {}", node_cfg.label, PASS_NOTICE_SUFFIX),
+                            model_name: String::new(),
+                            duration_ms: res.duration_ms,
+                            prompt_tokens: res.usage.prompt_tokens,
+                            completion_tokens: res.usage.completion_tokens,
+                            total_tokens: res.usage.total_tokens,
+                            whisper_consumed: false,
+                            created_at: Utc::now().to_rfc3339(),
+                        };
+                        let new_total_tokens = detail.total_tokens + res.usage.total_tokens;
+                        let _ = self.db.append_message(&pass_msg);
+                        let next_speaker_id = select_next_speaker_in_room(
+                            &detail.config,
+                            &node_cfg.id,
+                            "",
+                            active_room.as_ref(),
+                        );
+                        let _ = self.db.update_experiment_progress(
+                            &exp_id,
+                            detail.total_turns,
+                            new_total_tokens,
+                            &next_speaker_id,
+                        );
+                        self.emit(StreamEvent::StreamEnd {
+                            experiment_id: exp_id.clone(),
+                            message: pass_msg,
+                            total_turns: detail.total_turns,
+                            total_tokens: new_total_tokens,
+                        })
+                        .await;
+                        if self.current_state() == EngineState::Stepping {
+                            self.state
+                                .store(state_to_u8(EngineState::Paused), Ordering::SeqCst);
+                            let consec = self.consecutive_turns.load(Ordering::SeqCst);
+                            self.emit(StreamEvent::StateChanged {
+                                experiment_id: exp_id,
+                                state: EngineState::Paused,
+                                reason: None,
+                                consecutive_turns: consec,
+                            })
+                            .await;
+                        }
+                        continue;
+                    }
 
                     let current_room_id = active_room
                         .as_ref()
                         .filter(|r| r.member_ids.iter().any(|id| id == &node_cfg.id))
                         .map(|r| r.room_id.clone())
                         .unwrap_or_else(|| "main".to_string());
+
+                    let all_agent_labels: Vec<&str> = detail
+                        .config
+                        .agents
+                        .iter()
+                        .map(|a| a.label.as_str())
+                        .collect();
+                    let sanitized_content = strip_leading_speaker_prefix(
+                        &res.content,
+                        &node_cfg.label,
+                        &all_agent_labels,
+                    );
 
                     let seq = self.db.next_seq(&exp_id).unwrap_or(1);
                     let final_msg = TimelineMessage {
@@ -1243,7 +1450,7 @@ impl TerrariumEngine {
                         agent_id: Some(node_cfg.id.clone()),
                         room_id: current_room_id,
                         reasoning_content: res.reasoning_content,
-                        content: res.content,
+                        content: sanitized_content,
                         model_name: node_cfg.model_name.clone(),
                         duration_ms: res.duration_ms,
                         prompt_tokens: res.usage.prompt_tokens,
@@ -1285,11 +1492,9 @@ impl TerrariumEngine {
                                         &final_msg.content,
                                     )
                                 });
-                            let _ = self.db.update_active_room(
-                                &exp_id,
-                                &None,
-                                &detail.room_members,
-                            );
+                            let _ =
+                                self.db
+                                    .update_active_room(&exp_id, &None, &detail.room_members);
                             self.emit(StreamEvent::PrivateRoomUpdated {
                                 experiment_id: exp_id.clone(),
                                 active_room: None,
@@ -1386,7 +1591,12 @@ impl TerrariumEngine {
                     if detail.config.observer_interval > 0
                         && next_turn % detail.config.observer_interval == 0
                     {
-                        let mut updated_msgs = detail.messages;
+                        let keep_prev = 23usize;
+                        let tail_start = detail.messages.len().saturating_sub(keep_prev);
+                        let mut updated_msgs = Vec::with_capacity(
+                            (detail.messages.len() - tail_start) + 1,
+                        );
+                        updated_msgs.extend_from_slice(&detail.messages[tail_start..]);
                         updated_msgs.push(final_msg);
                         let latest_board = self
                             .db
@@ -1472,7 +1682,7 @@ impl TerrariumEngine {
         mut turn_messages: Vec<ApiChatMessage>,
         enable_board_tools: bool,
         enable_private_notes: bool,
-        reasoning_effort: Option<&str>,
+        thinking_params: &crate::llm::ResolvedThinkingParams,
     ) -> Result<StreamCompletionResult> {
         let all_tools_schema = sandbox_tools_schema(enable_board_tools, enable_private_notes);
 
@@ -1486,18 +1696,19 @@ impl TerrariumEngine {
 
         loop {
             let remaining_quota = 2usize.saturating_sub(total_calls_used);
-            let available_tools: Vec<serde_json::Value> = if remaining_quota > 0 && !nudged_for_nonempty {
-                all_tools_schema
-                    .iter()
-                    .filter(|t| {
-                        let name = t["function"]["name"].as_str().unwrap_or("");
-                        !used_tools.contains(name)
-                    })
-                    .cloned()
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            let available_tools: Vec<serde_json::Value> =
+                if remaining_quota > 0 && !nudged_for_nonempty {
+                    all_tools_schema
+                        .iter()
+                        .filter(|t| {
+                            let name = t["function"]["name"].as_str().unwrap_or("");
+                            !used_tools.contains(name)
+                        })
+                        .cloned()
+                        .collect()
+                } else {
+                    Vec::new()
+                };
             let allow_tools_this_call = !available_tools.is_empty();
             let active_tools = if allow_tools_this_call {
                 Some(available_tools.as_slice())
@@ -1510,48 +1721,114 @@ impl TerrariumEngine {
             let exp_id_clone = exp_id.to_string();
             let msg_id_clone = msg_id.to_string();
 
+            struct DeltaBatch {
+                reasoning: String,
+                content: String,
+                last_flush: std::time::Instant,
+            }
+            let delta_batch = Arc::new(std::sync::Mutex::new(DeltaBatch {
+                reasoning: String::new(),
+                content: String::new(),
+                last_flush: std::time::Instant::now(),
+            }));
+            let emit_event = |ch_arc: &Arc<RwLock<Option<Channel<StreamEvent>>>>, ev: StreamEvent| {
+                if let Ok(guard) = ch_arc.try_read() {
+                    if let Some(ch) = guard.as_ref() {
+                        let _ = ch.send(ev);
+                        return;
+                    }
+                }
+                let ch_clone = Arc::clone(ch_arc);
+                tauri::async_runtime::spawn(async move {
+                    let guard = ch_clone.read().await;
+                    if let Some(ch) = guard.as_ref() {
+                        let _ = ch.send(ev);
+                    }
+                });
+            };
+            let flush_batch = |batch_arc: &Arc<std::sync::Mutex<DeltaBatch>>,
+                               ch_arc: &Arc<RwLock<Option<Channel<StreamEvent>>>>,
+                               e_id: &str,
+                               m_id: &str,
+                               force: bool| {
+                let (r_out, c_out) = {
+                    let mut b = batch_arc.lock().unwrap();
+                    if !force
+                        && b.last_flush.elapsed() < Duration::from_millis(24)
+                        && (b.reasoning.len() + b.content.len()) < 256
+                    {
+                        return;
+                    }
+                    b.last_flush = std::time::Instant::now();
+                    (
+                        std::mem::take(&mut b.reasoning),
+                        std::mem::take(&mut b.content),
+                    )
+                };
+                if !r_out.is_empty() {
+                    emit_event(
+                        ch_arc,
+                        StreamEvent::StreamReasoningDelta {
+                            experiment_id: e_id.to_string(),
+                            message_id: m_id.to_string(),
+                            delta: r_out,
+                        },
+                    );
+                }
+                if !c_out.is_empty() {
+                    emit_event(
+                        ch_arc,
+                        StreamEvent::StreamDelta {
+                            experiment_id: e_id.to_string(),
+                            message_id: m_id.to_string(),
+                            delta: c_out,
+                        },
+                    );
+                }
+            };
+
+            let batch_for_cb = Arc::clone(&delta_batch);
+            let ch_for_cb = Arc::clone(&channel_ref);
+            let e_for_cb = exp_id_clone.clone();
+            let m_for_cb = msg_id_clone.clone();
+
             let res = stream_chat_completion(
                 &self.client,
                 node_cfg,
                 &turn_messages,
                 active_tools,
-                reasoning_effort,
+                thinking_params,
                 cancel_rx,
-                move |chunk| {
-                    let ch_arc = Arc::clone(&channel_ref);
-                    let e_id = exp_id_clone.clone();
-                    let m_id = msg_id_clone.clone();
-                    let ev = match chunk {
-                        StreamDeltaChunk::Content(delta) => StreamEvent::StreamDelta {
-                            experiment_id: e_id,
-                            message_id: m_id,
-                            delta: delta.to_string(),
-                        },
-                        StreamDeltaChunk::Reasoning(delta) => StreamEvent::StreamReasoningDelta {
-                            experiment_id: e_id,
-                            message_id: m_id,
-                            delta: delta.to_string(),
-                        },
-                        StreamDeltaChunk::RetryNotice(msg) => StreamEvent::EngineNotice {
-                            experiment_id: e_id,
-                            message: msg,
-                        },
-                    };
-                    if let Ok(guard) = ch_arc.try_read() {
-                        if let Some(ch) = guard.as_ref() {
-                            let _ = ch.send(ev);
-                            return;
+                move |chunk| match chunk {
+                    StreamDeltaChunk::Content(delta) => {
+                        {
+                            let mut b = batch_for_cb.lock().unwrap();
+                            b.content.push_str(delta);
                         }
+                        flush_batch(&batch_for_cb, &ch_for_cb, &e_for_cb, &m_for_cb, false);
                     }
-                    tauri::async_runtime::spawn(async move {
-                        let guard = ch_arc.read().await;
-                        if let Some(ch) = guard.as_ref() {
-                            let _ = ch.send(ev);
+                    StreamDeltaChunk::Reasoning(delta) => {
+                        {
+                            let mut b = batch_for_cb.lock().unwrap();
+                            b.reasoning.push_str(delta);
                         }
-                    });
+                        flush_batch(&batch_for_cb, &ch_for_cb, &e_for_cb, &m_for_cb, false);
+                    }
+                    StreamDeltaChunk::RetryNotice(msg) => {
+                        flush_batch(&batch_for_cb, &ch_for_cb, &e_for_cb, &m_for_cb, true);
+                        emit_event(
+                            &ch_for_cb,
+                            StreamEvent::EngineNotice {
+                                experiment_id: e_for_cb.clone(),
+                                message: msg,
+                            },
+                        );
+                    }
                 },
             )
-            .await?;
+            .await;
+            flush_batch(&delta_batch, &channel_ref, &exp_id_clone, &msg_id_clone, true);
+            let res = res?;
 
             if !res.reasoning_content.is_empty() {
                 if !total_reasoning.is_empty() {
@@ -1677,7 +1954,10 @@ impl TerrariumEngine {
                 });
                 Ok(resp.to_string())
             }
-            ParsedBoardTool::UpdateBoard { new_content, reason } => {
+            ParsedBoardTool::UpdateBoard {
+                new_content,
+                reason,
+            } => {
                 let (cfg, current_board) = self.db.get_experiment_header(exp_id)?;
                 let mode = cfg.board_approval_mode;
 
@@ -1786,9 +2066,9 @@ impl TerrariumEngine {
 
                         match decision {
                             ApprovalDecision::Approve => Some(new_content),
-                            ApprovalDecision::ModifyAndApprove { new_content: edited } => {
-                                Some(edited)
-                            }
+                            ApprovalDecision::ModifyAndApprove {
+                                new_content: edited,
+                            } => Some(edited),
                             ApprovalDecision::Reject { reason: rej } => {
                                 return Ok(serde_json::json!({
                                     "ok": false,
@@ -1883,17 +2163,29 @@ mod tests {
             Some("low".to_string())
         );
         // Tension >= 50 -> full
-        assert_eq!(resolve_reasoning_effort(&cfg, Some(50), false, false, 10), None);
+        assert_eq!(
+            resolve_reasoning_effort(&cfg, Some(50), false, false, 10),
+            None
+        );
         // Unconsumed GodWhisper overrides downgrade
-        assert_eq!(resolve_reasoning_effort(&cfg, Some(20), true, false, 10), None);
+        assert_eq!(
+            resolve_reasoning_effort(&cfg, Some(20), true, false, 10),
+            None
+        );
         // Recent GodSystem overrides downgrade
-        assert_eq!(resolve_reasoning_effort(&cfg, Some(20), false, true, 10), None);
+        assert_eq!(
+            resolve_reasoning_effort(&cfg, Some(20), false, true, 10),
+            None
+        );
         // Final 20% turns (> 80 of 100) overrides downgrade
         assert_eq!(
             resolve_reasoning_effort(&cfg, Some(20), false, false, 80),
             Some("low".to_string())
         );
-        assert_eq!(resolve_reasoning_effort(&cfg, Some(20), false, false, 81), None);
+        assert_eq!(
+            resolve_reasoning_effort(&cfg, Some(20), false, false, 81),
+            None
+        );
     }
 
     #[test]
@@ -1918,7 +2210,10 @@ mod tests {
             "AiB"
         );
         // No mention falls back to round-robin
-        assert_eq!(select_next_speaker(&cfg, "AiB", "外面的雨越下越大了。"), "AiC");
+        assert_eq!(
+            select_next_speaker(&cfg, "AiB", "外面的雨越下越大了。"),
+            "AiC"
+        );
         // Disabled falls back to round-robin
         cfg.enable_smart_selector = false;
         assert_eq!(select_next_speaker(&cfg, "AiA", "林医生你来说"), "AiB");
@@ -1951,5 +2246,41 @@ mod tests {
             ),
             "AiB"
         );
+    }
+
+    #[test]
+    fn test_social_enhancements_pass_mood_and_fast_reply() {
+        assert_eq!(MOOD_DICE_POOL.len(), 15);
+        assert!(is_pass_reply("[PASS]"));
+        assert!(is_pass_reply("  [pass] \n"));
+        assert!(is_pass_reply("<think>没啥好说的</think>\n  [PASS] "));
+        assert!(!is_pass_reply("<think>思考</think> 我觉得还行 [PASS]"));
+
+        let mut cfg = ExperimentConfig::default();
+        cfg.intuitive_fast_reply = true;
+        assert_eq!(
+            resolve_reasoning_effort(&cfg, Some(90), true, true, 99),
+            Some("minimal".to_string())
+        );
+
+        let prev_pass = TimelineMessage {
+            id: "p1".to_string(),
+            experiment_id: "e1".to_string(),
+            seq: 1,
+            turn_number: 1,
+            role: SpeakerRole::GodSystem,
+            agent_id: None,
+            room_id: "main".to_string(),
+            reasoning_content: String::new(),
+            content: "阿哲 看了一眼消息，没接话".to_string(),
+            model_name: String::new(),
+            duration_ms: 0,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            whisper_consumed: false,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        assert!(was_previous_message_pass(&[prev_pass]));
     }
 }

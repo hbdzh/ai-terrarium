@@ -1,12 +1,16 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
-import { useMediaQuery, useStorage } from "@vueuse/core";
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { useWindowSize } from "@vueuse/core";
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { save } from "@tauri-apps/plugin-dialog";
-import { Telescope, ClipboardList, PanelRightClose, X, Copy, Check, Code2 } from "lucide-vue-next";
-import { isMacOS } from "./utils/platform";
-import AdaptiveModal from "./components/ui/AdaptiveModal.vue";
-import Sheet from "./components/ui/Sheet.vue";
+import { Telescope, ClipboardList, X, Copy, Check, Code2, Scissors, ClipboardPaste, TextSelect } from "lucide-vue-next";
+import { isMacOS, isWindows, isDesktopOS, isMobileOS } from "./utils/platform";
+import { writeClipboardText, readClipboardText } from "./utils/clipboard";
+import { warmupMarkdownParser } from "./utils/markdown";
+import { triggerHaptic } from "./utils/native";
+import { resolvedTheme, setThemePreference, syncThemeVisuals, themePreference } from "./utils/theme";
+import { initialDataPromises } from "./bootstrap";
+import { renderPureScriptPngBytes } from "./utils/scriptExport";
+import WindowsTitleBar from "./components/WindowsTitleBar.vue";
 import ResizablePanelGroup from "./components/ui/ResizablePanelGroup.vue";
 import ResizablePanel from "./components/ui/ResizablePanel.vue";
 import ResizableHandle from "./components/ui/ResizableHandle.vue";
@@ -15,14 +19,20 @@ import LeftSidebar from "./components/LeftSidebar.vue";
 import ThoughtStream, { type StreamingDraft } from "./components/ThoughtStream.vue";
 import ObserverPanel from "./components/ObserverPanel.vue";
 import CreatorConsole from "./components/CreatorConsole.vue";
-import ReplayController from "./components/ReplayController.vue";
-import SharedBoardDrawer from "./components/SharedBoardDrawer.vue";
-import SettingsDrawer from "./components/SettingsDrawer.vue";
-import NewExperimentModal from "./components/NewExperimentModal.vue";
+import PureScriptPrintView from "./components/PureScriptPrintView.vue";
+
+const AdaptiveModal = defineAsyncComponent(() => import("./components/ui/AdaptiveModal.vue"));
+const Sheet = defineAsyncComponent(() => import("./components/ui/Sheet.vue"));
+const ReplayController = defineAsyncComponent(() => import("./components/ReplayController.vue"));
+const SharedBoardDrawer = defineAsyncComponent(() => import("./components/SharedBoardDrawer.vue"));
+const SettingsDrawer = defineAsyncComponent(() => import("./components/SettingsDrawer.vue"));
+const NewExperimentModal = defineAsyncComponent(() => import("./components/NewExperimentModal.vue"));
+const ForkTweakModal = defineAsyncComponent(() => import("./components/ForkTweakModal.vue"));
 import type {
   BoardApprovalMode,
   BoardApprovalRequest,
   CharacterCard,
+  DistillImprintsResponse,
   EngineState,
   ExperimentConfig,
   ExperimentDetail,
@@ -33,6 +43,7 @@ import type {
   StreamEvent,
   TimelineMessage,
   TurnSnapshot,
+  UiPrefs,
 } from "./types";
 
 const experiment = ref<ExperimentDetail | null>(null);
@@ -44,6 +55,11 @@ const statusReason = ref<string | null>(null);
 const streaming = ref<StreamingDraft | null>(null);
 const observerRunning = ref(false);
 const generatingReport = ref(false);
+const distillingImprints = ref(false);
+const comparisonReport = ref("");
+const generatingComparison = ref(false);
+const blindGuessMode = ref(false);
+const forkTweakOpen = ref(false);
 const directorBusy = ref(false);
 const finalePromptVisible = ref(false);
 const queueLen = ref(0);
@@ -72,16 +88,38 @@ const promptModalParsed = ref<RawPromptPayload | null>(null);
 const promptCopied = ref(false);
 
 const settingsOpen = ref(false);
+const settingsDrawerRef = ref<{ requestClose?: () => void } | null>(null);
 const newExpOpen = ref(false);
 
-// 三档响应式工作台布局：宽屏(>=1280px)可拖拽分栏 / 半屏(768-1279px)悬浮侧滑Sheet / 窄屏(<768px)顶部Tab切换
-const isWideDesktop = useMediaQuery("(min-width: 1280px)");
-const isDesktopSidebar = useMediaQuery("(min-width: 1024px)");
-const isTabletOrDesktop = useMediaQuery("(min-width: 768px)");
+const { width: windowWidth, height: windowHeight } = useWindowSize();
+
+// 折叠屏 / 平板横屏触发双侧边栏桌面态；所有设备竖屏及直板/阔直板手机保持移动端视图
+const isFoldableOrTabletLandscape = computed(() => {
+  if (!isMobileOS) return false;
+  const w = windowWidth.value;
+  const h = windowHeight.value;
+  if (w <= h || w < 680) return false;
+  const ratio = w / Math.max(1, h);
+  return h >= 500 || (h >= 420 && ratio <= 1.78);
+});
+const isCompactAndroidDesktop = computed(
+  () => isMobileOS && isFoldableOrTabletLandscape.value && windowWidth.value < 1060
+);
+
+// 三档响应式工作台布局：宽屏(>=1280px 或折叠/平板横屏)可拖拽分栏 / 半屏(桌面768-1279px)悬浮侧滑Sheet / 窄屏或手机竖屏
+const isWideDesktop = computed(() =>
+  isMobileOS ? isFoldableOrTabletLandscape.value : windowWidth.value >= 1280
+);
+const isDesktopSidebar = computed(() =>
+  isMobileOS ? isFoldableOrTabletLandscape.value : windowWidth.value >= 1024
+);
+const isTabletOrDesktop = computed(() =>
+  isMobileOS ? isFoldableOrTabletLandscape.value : windowWidth.value >= 768
+);
 const isTablet = computed(() => isTabletOrDesktop.value && !isWideDesktop.value);
 const isMobile = computed(() => !isTabletOrDesktop.value);
 
-const desktopLeftSidebarOpen = useStorage("terrarium_left_sidebar_open", true);
+const desktopLeftSidebarOpen = ref(true);
 const sheetLeftSidebarOpen = ref(false);
 const leftSidebarOpen = computed({
   get: () => (isDesktopSidebar.value ? desktopLeftSidebarOpen.value : sheetLeftSidebarOpen.value),
@@ -94,9 +132,72 @@ const leftSidebarOpen = computed({
   },
 });
 
-const desktopInspectorOpen = useStorage("terrarium_inspector_open", true);
-const inspectorWidthPct = useStorage("terrarium_inspector_width_pct", 34);
+const desktopLeftSidebarWidth = computed(() => (isCompactAndroidDesktop.value ? 204 : 244));
+const streamMinPct = computed(() => (isCompactAndroidDesktop.value ? 40 : 45));
+const inspectorMinPct = computed(() => {
+  const sidebarW =
+    isDesktopSidebar.value && desktopLeftSidebarOpen.value ? desktopLeftSidebarWidth.value : 0;
+  const minAvail = isCompactAndroidDesktop.value ? 480 : 900;
+  const availW = Math.max(minAvail, windowWidth.value - sidebarW);
+  const minPx = isCompactAndroidDesktop.value ? 232 : 310;
+  return Math.min(44, Math.max(24, Math.ceil((minPx / availW) * 100)));
+});
+
+const desktopInspectorOpen = ref(true);
+const inspectorPanelRef = ref<InstanceType<typeof ResizablePanel> | null>(null);
+const inspectorAnimating = ref(false);
+let inspectorAnimTimer: number | null = null;
+
+function triggerInspectorAnim() {
+  inspectorAnimating.value = true;
+  if (inspectorAnimTimer) window.clearTimeout(inspectorAnimTimer);
+  inspectorAnimTimer = window.setTimeout(() => {
+    inspectorAnimating.value = false;
+  }, 270);
+}
+
+watch(desktopInspectorOpen, (open) => {
+  const panel = inspectorPanelRef.value;
+  if (!panel) return;
+  if (open && panel.isCollapsed) {
+    triggerInspectorAnim();
+    panel.expand();
+    const targetPct = Math.max(inspectorMinPct.value, Math.min(55, inspectorWidthPct.value));
+    nextTick(() => panel.resize(targetPct));
+  } else if (!open && !panel.isCollapsed) {
+    triggerInspectorAnim();
+    panel.collapse();
+  }
+});
+
+const inspectorWidthPct = ref(34);
+const uiPrefsLayoutKey = ref(0);
 const sheetInspectorOpen = ref(false);
+let uiPrefsLoaded = false;
+let saveUiPrefsTimer: number | null = null;
+
+function scheduleSaveUiPrefs() {
+  if (!uiPrefsLoaded) return;
+  if (saveUiPrefsTimer) window.clearTimeout(saveUiPrefsTimer);
+  saveUiPrefsTimer = window.setTimeout(() => {
+    const prefs: UiPrefs = {
+      leftSidebarOpen: desktopLeftSidebarOpen.value,
+      inspectorOpen: desktopInspectorOpen.value,
+      inspectorWidthPct: inspectorWidthPct.value,
+      themePreference: themePreference.value,
+    };
+    invoke("save_ui_prefs", { prefs }).catch(() => {});
+  }, 150);
+}
+
+watch(
+  [desktopLeftSidebarOpen, desktopInspectorOpen, inspectorWidthPct, themePreference],
+  scheduleSaveUiPrefs
+);
+
+watch(resolvedTheme, () => {
+  syncThemeVisuals(false);
+});
 
 const inspectorOpen = computed({
   get: () => (isWideDesktop.value ? desktopInspectorOpen.value : sheetInspectorOpen.value),
@@ -110,12 +211,16 @@ const inspectorOpen = computed({
 });
 
 const streamDefaultSize = computed(() =>
-  Math.max(45, Math.min(78, 100 - inspectorWidthPct.value))
+  Math.max(
+    streamMinPct.value,
+    Math.min(100 - inspectorMinPct.value, 100 - inspectorWidthPct.value)
+  )
 );
 const inspectorDefaultSize = computed(() => 100 - streamDefaultSize.value);
 
 function onPanelLayout(sizes: number[]) {
-  if (sizes.length >= 2 && sizes[1] >= 18) {
+  if (inspectorAnimating.value || !desktopInspectorOpen.value) return;
+  if (sizes.length >= 2 && sizes[1] >= inspectorMinPct.value) {
     inspectorWidthPct.value = Math.round(sizes[1]);
   }
 }
@@ -194,6 +299,35 @@ const displayBoardPrevContent = computed(() => {
     .reverse()
     .find((s) => s.turnNumber < turn);
   return prevSnap ? prevSnap.boardContent : (experiment.value.config.initialBoard ?? "");
+});
+
+const displayPrivateNotes = computed<Record<string, string>>(() => {
+  if (!experiment.value) return {};
+  if (!replayActive.value) return experiment.value.privateNotes ?? {};
+  const turn = replayCurrentTurn.value;
+  const matching = [...replaySnapshots.value]
+    .reverse()
+    .find((s) => s.turnNumber <= turn);
+  return matching?.privateNotes ?? {};
+});
+
+const activePrivateNotesCount = computed(
+  () =>
+    Object.values(displayPrivateNotes.value).filter((v) => v && v.trim().length > 0)
+      .length
+);
+
+const displayCompactedSummary = computed(() => {
+  if (!experiment.value) return "";
+  if (!replayActive.value) return experiment.value.compactedSummary ?? "";
+  const turn = replayCurrentTurn.value;
+  const matching = [...replaySnapshots.value]
+    .reverse()
+    .find((s) => s.turnNumber <= turn);
+  if (matching) return matching.compactedSummary ?? "";
+  return turn >= (experiment.value.totalTurns ?? 0)
+    ? (experiment.value.compactedSummary ?? "")
+    : "";
 });
 
 function stopReplayTimer() {
@@ -318,15 +452,198 @@ function stepReplay(delta: number) {
 }
 
 function handleGlobalKeydown(e: KeyboardEvent) {
-  if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+  if (!(e.metaKey || e.ctrlKey)) return;
+  if (e.key === ",") {
     e.preventDefault();
     settingsOpen.value = true;
+  } else if (e.key.toLowerCase() === "n") {
+    e.preventDefault();
+    newExpOpen.value = true;
+  } else if (e.key.toLowerCase() === "b") {
+    e.preventDefault();
+    leftSidebarOpen.value = !leftSidebarOpen.value;
+  } else if (e.key === "\\") {
+    e.preventDefault();
+    inspectorOpen.value = !inspectorOpen.value;
+  }
+}
+
+interface TextContextMenuState {
+  open: boolean;
+  x: number;
+  y: number;
+  canCut: boolean;
+  canCopy: boolean;
+  canPaste: boolean;
+  canSelectAll: boolean;
+  selectedText: string;
+  targetEl: HTMLInputElement | HTMLTextAreaElement | null;
+  selStart: number;
+  selEnd: number;
+}
+
+const textContextMenu = ref<TextContextMenuState>({
+  open: false,
+  x: 0,
+  y: 0,
+  canCut: false,
+  canCopy: false,
+  canPaste: false,
+  canSelectAll: false,
+  selectedText: "",
+  targetEl: null,
+  selStart: 0,
+  selEnd: 0,
+});
+
+function closeTextContextMenu() {
+  if (textContextMenu.value.open) {
+    textContextMenu.value.open = false;
+  }
+}
+
+function isEditableTextControl(node: EventTarget | null): node is HTMLInputElement | HTMLTextAreaElement {
+  if (node instanceof HTMLTextAreaElement) {
+    return !node.disabled && !node.readOnly;
+  }
+  if (node instanceof HTMLInputElement) {
+    const editableTypes = new Set(["text", "search", "url", "tel", "email", "password", "number"]);
+    return editableTypes.has(node.type || "text") && !node.disabled && !node.readOnly;
+  }
+  return false;
+}
+
+function computeContextMenuPos(
+  rawX: number,
+  rawY: number,
+  itemCount: number,
+  fallbackEl?: HTMLElement | null
+) {
+  const menuW = 164;
+  const menuH = Math.max(40, itemCount * 32 + 10);
+  let anchorX = rawX;
+  let anchorY = rawY;
+  if (anchorX === 0 && anchorY === 0 && fallbackEl) {
+    const r = fallbackEl.getBoundingClientRect();
+    anchorX = r.left + 14;
+    anchorY = r.top + 14;
+  }
+  const x =
+    anchorX + menuW + 8 <= window.innerWidth
+      ? Math.max(8, anchorX)
+      : Math.max(8, anchorX - menuW);
+  const y =
+    anchorY + menuH + 8 <= window.innerHeight
+      ? Math.max(8, anchorY)
+      : Math.max(8, anchorY - menuH);
+  return { x, y };
+}
+
+function handleDesktopContextMenu(e: MouseEvent) {
+  if (!isDesktopOS) return;
+  e.preventDefault();
+
+  const editable = isEditableTextControl(e.target) ? e.target : null;
+  if (editable) {
+    const start = editable.selectionStart ?? editable.value.length;
+    const end = editable.selectionEnd ?? editable.value.length;
+    const selectedText = editable.value.slice(start, end);
+    const canCut = selectedText.length > 0;
+    const canCopy = selectedText.length > 0;
+    const canPaste = true;
+    const canSelectAll = editable.value.length > 0;
+    const itemCount = [canCut, canCopy, canPaste, canSelectAll].filter(Boolean).length;
+    const pos = computeContextMenuPos(e.clientX, e.clientY, itemCount, editable);
+    textContextMenu.value = {
+      open: true,
+      x: pos.x,
+      y: pos.y,
+      canCut,
+      canCopy,
+      canPaste,
+      canSelectAll,
+      selectedText,
+      targetEl: editable,
+      selStart: start,
+      selEnd: end,
+    };
+    return;
+  }
+
+  const domSelected = window.getSelection()?.toString() ?? "";
+  if (domSelected.trim().length > 0) {
+    const pos = computeContextMenuPos(e.clientX, e.clientY, 1);
+    textContextMenu.value = {
+      open: true,
+      x: pos.x,
+      y: pos.y,
+      canCut: false,
+      canCopy: true,
+      canPaste: false,
+      canSelectAll: false,
+      selectedText: domSelected,
+      targetEl: null,
+      selStart: 0,
+      selEnd: 0,
+    };
+    return;
+  }
+
+  closeTextContextMenu();
+}
+
+function handleContextMenuPointerDown(e: MouseEvent) {
+  if (!textContextMenu.value.open) return;
+  const target = e.target as HTMLElement | null;
+  if (target?.closest("[data-text-context-menu]")) return;
+  closeTextContextMenu();
+}
+
+async function execContextAction(action: "cut" | "copy" | "paste" | "selectAll") {
+  const state = textContextMenu.value;
+  closeTextContextMenu();
+  const el = state.targetEl;
+
+  if (action === "copy") {
+    if (state.selectedText) {
+      await writeClipboardText(state.selectedText).catch(() => {});
+    }
+    return;
+  }
+
+  if (!el) return;
+  el.focus();
+
+  if (action === "selectAll") {
+    el.setSelectionRange(0, el.value.length);
+    return;
+  }
+
+  if (action === "cut") {
+    const cutText = el.value.slice(state.selStart, state.selEnd);
+    if (cutText) {
+      await writeClipboardText(cutText).catch(() => {});
+      el.setRangeText("", state.selStart, state.selEnd, "start");
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    return;
+  }
+
+  if (action === "paste") {
+    const pasted = await readClipboardText();
+    if (pasted) {
+      el.setRangeText(pasted, state.selStart, state.selEnd, "end");
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
   }
 }
 
 onUnmounted(() => {
   window.removeEventListener("keydown", handleGlobalKeydown);
+  window.removeEventListener("contextmenu", handleDesktopContextMenu);
+  window.removeEventListener("mousedown", handleContextMenuPointerDown, true);
   stopReplayTimer();
+  resetStreamDeltaBuffer();
   const win = window as unknown as { __handleAndroidBack?: () => boolean };
   delete win.__handleAndroidBack;
 });
@@ -367,6 +684,25 @@ function onMainTouchEnd(e: TouchEvent) {
   }
 }
 
+const relatedBranches = computed<ExperimentSummary[]>(() => {
+  const cur = experiment.value;
+  if (!cur) return [];
+  const curBase = cur.title.split(/\s*·\s*(?:分支|改写重演)/)[0].trim();
+  return experiments.value.filter((item) => {
+    if (item.id === cur.id) return false;
+    if (cur.parentExperimentId && item.id === cur.parentExperimentId) return true;
+    if (item.parentExperimentId === cur.id) return true;
+    if (cur.parentExperimentId && item.parentExperimentId === cur.parentExperimentId) return true;
+    if (!cur.parentExperimentId && !item.parentExperimentId && curBase) {
+      const otherBase = item.title.split(/\s*·\s*(?:分支|改写重演)/)[0].trim();
+      if (otherBase === curBase && (item.title !== cur.title)) {
+        return /·\s*(?:分支|改写重演)/.test(item.title) || /·\s*(?:分支|改写重演)/.test(cur.title);
+      }
+    }
+    return false;
+  });
+});
+
 const missingKeys = computed(() => {
   const agents = experiment.value?.config.agents ?? [];
   return agents.some((a) => !a.apiKey.trim());
@@ -386,8 +722,105 @@ function showToast(msg: string) {
   }, 4200);
 }
 
+function bumpActiveExperimentSummary(totalTurns?: number, totalTokens?: number) {
+  const cur = experiment.value;
+  if (!cur) return;
+  const idx = experiments.value.findIndex((item) => item.id === cur.id);
+  if (idx < 0) {
+    refreshExperiments();
+    return;
+  }
+  const nowIso = new Date().toISOString();
+  const updated: ExperimentSummary = {
+    ...experiments.value[idx],
+    totalTurns: totalTurns ?? cur.totalTurns,
+    totalTokens: totalTokens ?? cur.totalTokens,
+    updatedAt: nowIso,
+  };
+  if (idx === 0) {
+    experiments.value[0] = updated;
+  } else {
+    const next = experiments.value.slice();
+    next.splice(idx, 1);
+    next.unshift(updated);
+    experiments.value = next;
+  }
+}
+
 async function refreshExperiments() {
   experiments.value = await invoke<ExperimentSummary[]>("list_experiments");
+}
+
+let pendingStreamId: string | null = null;
+let pendingContentDelta = "";
+let pendingReasoningDelta = "";
+let pendingReasoningElapsedMs: number | null = null;
+let pendingReasoningStartedAt: number | null = null;
+let streamRafId: number | null = null;
+let lastStreamFlushAt = 0;
+
+function resetStreamDeltaBuffer() {
+  if (streamRafId !== null) {
+    window.cancelAnimationFrame(streamRafId);
+    streamRafId = null;
+  }
+  pendingStreamId = null;
+  pendingContentDelta = "";
+  pendingReasoningDelta = "";
+  pendingReasoningElapsedMs = null;
+  pendingReasoningStartedAt = null;
+}
+
+function flushStreamDeltas(force = false) {
+  if (force && streamRafId !== null) {
+    window.cancelAnimationFrame(streamRafId);
+    streamRafId = null;
+  }
+  if (!streaming.value || streaming.value.messageId !== pendingStreamId) {
+    pendingContentDelta = "";
+    pendingReasoningDelta = "";
+    pendingReasoningElapsedMs = null;
+    return;
+  }
+  if (!force && isMobileOS) {
+    const elapsed = performance.now() - lastStreamFlushAt;
+    if (elapsed < 32) {
+      if (streamRafId === null) {
+        streamRafId = window.requestAnimationFrame(() => {
+          streamRafId = null;
+          flushStreamDeltas(false);
+        });
+      }
+      return;
+    }
+  }
+  if (pendingReasoningDelta) {
+    if (streaming.value.reasoningStartedAt === null) {
+      streaming.value.reasoningStartedAt = pendingReasoningStartedAt ?? performance.now();
+    }
+    streaming.value.reasoningContent += pendingReasoningDelta;
+    pendingReasoningDelta = "";
+  }
+  if (pendingReasoningElapsedMs !== null) {
+    streaming.value.reasoningElapsedMs = Math.max(
+      streaming.value.reasoningElapsedMs,
+      pendingReasoningElapsedMs
+    );
+    pendingReasoningElapsedMs = null;
+  }
+  if (pendingContentDelta) {
+    streaming.value.content += pendingContentDelta;
+    pendingContentDelta = "";
+  }
+  lastStreamFlushAt = performance.now();
+}
+
+function scheduleStreamDeltaFlush() {
+  if (streamRafId !== null) return;
+  streamRafId = window.requestAnimationFrame(() => {
+    streamRafId = null;
+    flushStreamDeltas(false);
+  });
 }
 
 function handleStreamEvent(ev: StreamEvent) {
@@ -400,6 +833,7 @@ function handleStreamEvent(ev: StreamEvent) {
       engineState.value = ev.state;
       statusReason.value = ev.reason;
       if (ev.state === "paused" || ev.state === "idle") {
+        resetStreamDeltaBuffer();
         streaming.value = null;
         pendingApproval.value = null;
       }
@@ -410,10 +844,13 @@ function handleStreamEvent(ev: StreamEvent) {
 
     case "message_added":
       experiment.value.messages.push(ev.message);
-      refreshExperiments();
+      bumpActiveExperimentSummary();
       break;
 
     case "stream_start":
+      resetStreamDeltaBuffer();
+      pendingStreamId = ev.messageId;
+      lastStreamFlushAt = performance.now();
       contextUsagePct.value = ev.contextUsagePct;
       contextActiveTokens.value = ev.activeTokens;
       streaming.value = {
@@ -432,38 +869,37 @@ function handleStreamEvent(ev: StreamEvent) {
     case "stream_reasoning_delta":
       if (streaming.value && streaming.value.messageId === ev.messageId) {
         const now = performance.now();
-        if (streaming.value.reasoningStartedAt === null) {
-          streaming.value.reasoningStartedAt = now;
+        if (pendingReasoningStartedAt === null && streaming.value.reasoningStartedAt === null) {
+          pendingReasoningStartedAt = now;
         }
-        streaming.value.reasoningContent += ev.delta;
-        streaming.value.reasoningElapsedMs = Math.max(
-          0,
-          now - streaming.value.reasoningStartedAt
-        );
+        const started = streaming.value.reasoningStartedAt ?? pendingReasoningStartedAt ?? now;
+        pendingReasoningDelta += ev.delta;
+        pendingReasoningElapsedMs = Math.max(0, now - started);
+        scheduleStreamDeltaFlush();
       }
       break;
 
     case "stream_delta":
       if (streaming.value && streaming.value.messageId === ev.messageId) {
-        if (
-          streaming.value.reasoningStartedAt !== null &&
-          streaming.value.content.length === 0
-        ) {
-          streaming.value.reasoningElapsedMs = Math.max(
-            streaming.value.reasoningElapsedMs,
-            performance.now() - streaming.value.reasoningStartedAt
+        const started = streaming.value.reasoningStartedAt ?? pendingReasoningStartedAt;
+        if (started !== null && streaming.value.content.length === 0 && pendingContentDelta.length === 0) {
+          pendingReasoningElapsedMs = Math.max(
+            pendingReasoningElapsedMs ?? streaming.value.reasoningElapsedMs,
+            performance.now() - started
           );
         }
-        streaming.value.content += ev.delta;
+        pendingContentDelta += ev.delta;
+        scheduleStreamDeltaFlush();
       }
       break;
 
     case "stream_end":
+      resetStreamDeltaBuffer();
       streaming.value = null;
       experiment.value.messages.push(ev.message);
       experiment.value.totalTurns = ev.totalTurns;
       experiment.value.totalTokens = ev.totalTokens;
-      refreshExperiments();
+      bumpActiveExperimentSummary(ev.totalTurns, ev.totalTokens);
       break;
 
     case "observer_started":
@@ -541,6 +977,7 @@ function handleStreamEvent(ev: StreamEvent) {
       break;
 
     case "engine_error":
+      resetStreamDeltaBuffer();
       streaming.value = null;
       showToast(ev.message);
       break;
@@ -566,23 +1003,47 @@ function handleStreamEvent(ev: StreamEvent) {
 }
 
 onMounted(async () => {
+  if (isWindows) {
+    document.documentElement.classList.add("win-acrylic");
+  }
+  if (isMobileOS) {
+    document.documentElement.classList.add("mobile-os");
+  }
   window.addEventListener("keydown", handleGlobalKeydown);
+  window.addEventListener("contextmenu", handleDesktopContextMenu);
+  window.addEventListener("mousedown", handleContextMenuPointerDown, true);
   const win = window as unknown as { __handleAndroidBack?: () => boolean };
   win.__handleAndroidBack = () => {
+    if (promptModalOpen.value) {
+      promptModalOpen.value = false;
+      return true;
+    }
     if (settingsOpen.value) {
-      settingsOpen.value = false;
+      if (settingsDrawerRef.value?.requestClose) {
+        settingsDrawerRef.value.requestClose();
+      } else {
+        settingsOpen.value = false;
+      }
       return true;
     }
     if (newExpOpen.value) {
       newExpOpen.value = false;
       return true;
     }
-    if (mobileTab.value !== "stream") {
-      mobileTab.value = "stream";
+    if (forkTweakOpen.value) {
+      forkTweakOpen.value = false;
       return true;
     }
-    if (inspectorOpen.value) {
-      inspectorOpen.value = false;
+    if (sheetLeftSidebarOpen.value) {
+      sheetLeftSidebarOpen.value = false;
+      return true;
+    }
+    if (sheetInspectorOpen.value) {
+      sheetInspectorOpen.value = false;
+      return true;
+    }
+    if (isMobile.value && mobileTab.value !== "stream") {
+      mobileTab.value = "stream";
       return true;
     }
     if (replayActive.value) {
@@ -591,23 +1052,62 @@ onMounted(async () => {
     }
     return false;
   };
+  const winIdle = window as unknown as {
+    requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+  };
+  if (typeof winIdle.requestIdleCallback === "function") {
+    winIdle.requestIdleCallback(() => warmupMarkdownParser(), { timeout: 600 });
+  } else {
+    window.setTimeout(() => warmupMarkdownParser(), isMobileOS ? 450 : 120);
+  }
 
   const ch = new Channel<StreamEvent>();
   ch.onmessage = handleStreamEvent;
-  await invoke("register_stream_channel", { channel: ch });
 
-  const [loadedPresets, activeExp, list, state, cards] = await Promise.all([
-    invoke<PresetTemplate[]>("get_presets"),
-    invoke<ExperimentDetail>("get_active_experiment"),
-    invoke<ExperimentSummary[]>("list_experiments"),
-    invoke<EngineState>("get_engine_state"),
-    invoke<CharacterCard[]>("list_character_cards"),
+  // Fallback in case inline HTML script didn't show the window yet
+  invoke("show_main_window").catch(() => {});
+
+  // Consume pre-initiated IPC promises (started in bootstrap.ts before Vue mounted)
+  await Promise.all([
+    invoke("register_stream_channel", { channel: ch }),
+    initialDataPromises.activeExperiment.then((activeExp) => {
+      experiment.value = activeExp;
+    }),
+    initialDataPromises.experiments.then((list) => {
+      experiments.value = list;
+    }),
+    initialDataPromises.engineState.then((state) => {
+      engineState.value = state;
+    }),
+    initialDataPromises.presets.then((loadedPresets) => {
+      presets.value = loadedPresets;
+    }),
+    initialDataPromises.characterCards.then((cards) => {
+      characterCards.value = cards;
+    }),
+    initialDataPromises.uiPrefs
+      .then((prefs) => {
+        desktopLeftSidebarOpen.value = prefs.leftSidebarOpen;
+        const clampedWidth = Math.max(inspectorMinPct.value, Math.min(55, prefs.inspectorWidthPct));
+        const needsRemount =
+          prefs.inspectorOpen !== desktopInspectorOpen.value ||
+          clampedWidth !== inspectorWidthPct.value;
+        desktopInspectorOpen.value = prefs.inspectorOpen;
+        inspectorWidthPct.value = clampedWidth;
+        if (prefs.themePreference) {
+          setThemePreference(prefs.themePreference, true);
+        } else {
+          syncThemeVisuals(true);
+        }
+        if (needsRemount) {
+          uiPrefsLayoutKey.value += 1;
+        }
+        uiPrefsLoaded = true;
+      })
+      .catch(() => {
+        uiPrefsLoaded = true;
+      }),
   ]);
-  presets.value = loadedPresets;
-  experiment.value = activeExp;
-  experiments.value = list;
-  engineState.value = state;
-  characterCards.value = cards;
 });
 
 async function startEngine() {
@@ -673,6 +1173,7 @@ async function renameExperiment(newTitle: string) {
 async function selectExperiment(id: string) {
   exitReplay();
   finalePromptVisible.value = false;
+  comparisonReport.value = "";
   streaming.value = null;
   queueLen.value = 0;
   pendingApproval.value = null;
@@ -689,6 +1190,7 @@ async function selectExperiment(id: string) {
 async function createNewExperiment(title: string, config: ExperimentConfig) {
   exitReplay();
   finalePromptVisible.value = false;
+  comparisonReport.value = "";
   streaming.value = null;
   queueLen.value = 0;
   pendingApproval.value = null;
@@ -703,21 +1205,44 @@ async function createNewExperiment(title: string, config: ExperimentConfig) {
   await refreshExperiments();
 }
 
-async function handleFork(targetTurn: number) {
+async function handleFork(payload: { turnNumber: number; messageId?: string | null }) {
   if (!experiment.value) return;
   exitReplay();
   finalePromptVisible.value = false;
+  comparisonReport.value = "";
   streaming.value = null;
   queueLen.value = 0;
   const forked = await invoke<ExperimentDetail>("fork_experiment", {
     sourceExpId: experiment.value.id,
-    targetTurn,
+    targetTurn: payload.turnNumber,
+    targetMessageId: payload.messageId ?? null,
     editMessageId: null,
     editContent: null,
   });
   experiment.value = forked;
   await refreshExperiments();
-  showToast(`已从第 ${targetTurn} 轮开启平行宇宙分支「${forked.title}」`);
+  forkTweakOpen.value = true;
+  showToast(`已开启平行宇宙分支「${forked.title}」`);
+}
+
+async function handleSaveForkTweak(payload: {
+  title: string;
+  config: ExperimentConfig;
+  autoStep: boolean;
+}) {
+  if (!experiment.value) return;
+  const updated = await invoke<ExperimentDetail>("update_experiment", {
+    experimentId: experiment.value.id,
+    title: payload.title,
+    config: payload.config,
+  });
+  experiment.value = updated;
+  forkTweakOpen.value = false;
+  await refreshExperiments();
+  showToast("分支变量已保存");
+  if (payload.autoStep) {
+    await stepEngine();
+  }
 }
 
 async function handleEditAndReplay(payload: {
@@ -728,12 +1253,14 @@ async function handleEditAndReplay(payload: {
   if (!experiment.value) return;
   exitReplay();
   finalePromptVisible.value = false;
+  comparisonReport.value = "";
   streaming.value = null;
   queueLen.value = 0;
   pendingApproval.value = null;
   const forked = await invoke<ExperimentDetail>("fork_experiment", {
     sourceExpId: experiment.value.id,
     targetTurn: payload.turnNumber,
+    targetMessageId: payload.messageId,
     editMessageId: payload.messageId,
     editContent: payload.content,
   });
@@ -854,12 +1381,18 @@ async function handleClosePrivateRoom() {
   });
 }
 
-async function handleSaveCharacterCard(agentId: string) {
+async function handleSaveCharacterCard(
+  input: string | { agentId: string; label?: string; systemPrompt?: string }
+) {
   if (!experiment.value) return;
+  const payload =
+    typeof input === "string" ? { agentId: input } : input;
   try {
     characterCards.value = await invoke<CharacterCard[]>("save_agent_to_character_library", {
       experimentId: experiment.value.id,
-      agentId,
+      agentId: payload.agentId,
+      labelOverride: payload.label ?? null,
+      promptOverride: payload.systemPrompt ?? null,
     });
     showToast("角色已提取并存入跨世界灵魂角色库");
   } catch (err: any) {
@@ -907,6 +1440,60 @@ async function handleGenerateReport() {
   }
 }
 
+async function handleDistillImprints() {
+  if (!experiment.value || distillingImprints.value) return;
+  distillingImprints.value = true;
+  try {
+    const res = await invoke<DistillImprintsResponse>(
+      "distill_memory_imprints_to_library",
+      { experimentId: experiment.value.id }
+    );
+    characterCards.value = res.cards;
+    showToast(
+      `已提炼 ${res.distilled.length} 位角色的本局经历烙印并写入灵魂库`
+    );
+  } catch (err: any) {
+    showToast(`提炼经历烙印失败: ${err?.toString?.() ?? err}`);
+  } finally {
+    distillingImprints.value = false;
+  }
+}
+
+async function handleUpdateCardImprints(payload: {
+  cardId: string;
+  memoryImprints: string[];
+}) {
+  try {
+    characterCards.value = await invoke<CharacterCard[]>(
+      "update_character_card_imprints",
+      {
+        cardId: payload.cardId,
+        memoryImprints: payload.memoryImprints,
+      }
+    );
+    showToast("灵魂角色记忆烙印已更新");
+  } catch (err: any) {
+    showToast(`更新烙印失败: ${err?.toString?.() ?? err}`);
+  }
+}
+
+async function handleGenerateComparison(otherExpId: string) {
+  if (!experiment.value || !otherExpId || generatingComparison.value) return;
+  generatingComparison.value = true;
+  try {
+    const report = await invoke<string>("generate_worldline_comparison_report", {
+      expIdA: experiment.value.id,
+      expIdB: otherExpId,
+    });
+    comparisonReport.value = report;
+    showToast("世界线分歧对照报告已生成");
+  } catch (err: any) {
+    showToast(`生成对照报告失败: ${err?.toString?.() ?? err}`);
+  } finally {
+    generatingComparison.value = false;
+  }
+}
+
 async function handleExportScenario() {
   if (!experiment.value) return;
   const pkg = await invoke<ScenarioPackage>("export_scenario_package", {
@@ -916,6 +1503,7 @@ async function handleExportScenario() {
   const jsonText = JSON.stringify(pkg, null, 2);
   const safeName = experiment.value.title.replace(/[\\/:*?"<>|]/g, "_");
   try {
+    const { save } = await import("@tauri-apps/plugin-dialog");
     const filePath = await save({
       defaultPath: `${safeName}.scenario.json`,
       filters: [{ name: "JSON", extensions: ["json"] }],
@@ -924,27 +1512,27 @@ async function handleExportScenario() {
       await invoke("save_markdown_to_file", { path: filePath, content: jsonText });
       showToast("剧本模板已导出（已自动脱敏 API Key）");
     }
-  } catch {
+  } catch (err: any) {
     try {
-      await navigator.clipboard.writeText(jsonText);
-      showToast("移动端暂不支持直接保存文件，已将剧本 JSON 复制到剪贴板");
+      await writeClipboardText(jsonText);
+      showToast("无法写入文件，已将剧本 JSON 复制到剪贴板");
     } catch {
-      const blob = new Blob([jsonText], { type: "application/json;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${safeName}.scenario.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      showToast("已触发剧本 JSON 下载");
+      showToast(`剧本导出失败: ${err?.message ?? err}`);
     }
   }
 }
 
-async function handleImportScenario(file: File) {
+async function handleImportScenario() {
   try {
-    const text = await file.text();
+    const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+    const selected = await openDialog({
+      multiple: false,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!selected || Array.isArray(selected)) return;
+    const text = await invoke<string>("read_text_file", { path: selected });
     const raw = JSON.parse(text);
+    const fallbackName = selected.split(/[\\/]/).pop()?.replace(/\.json$/i, "") || "导入剧本";
     const pkg: ScenarioPackage =
       raw && typeof raw === "object" && "config" in raw
         ? {
@@ -952,7 +1540,7 @@ async function handleImportScenario(file: File) {
             title:
               typeof raw.title === "string" && raw.title.trim()
                 ? raw.title.trim()
-                : file.name.replace(/\.json$/i, ""),
+                : fallbackName,
             config: raw.config,
             initialBoard:
               typeof raw.initialBoard === "string"
@@ -961,7 +1549,7 @@ async function handleImportScenario(file: File) {
           }
         : {
             version: "2.0",
-            title: file.name.replace(/\.json$/i, ""),
+            title: fallbackName,
             config: raw,
             initialBoard: raw?.initialBoard ?? "",
           };
@@ -988,6 +1576,7 @@ async function exportMarkdown() {
   });
   const safeName = experiment.value.title.replace(/[\\/:*?"<>|]/g, "_");
   try {
+    const { save } = await import("@tauri-apps/plugin-dialog");
     const filePath = await save({
       defaultPath: `${safeName}.md`,
       filters: [{ name: "Markdown", extensions: ["md"] }],
@@ -996,21 +1585,71 @@ async function exportMarkdown() {
       await invoke("save_markdown_to_file", { path: filePath, content: md });
       showToast("Markdown 实验档案已导出");
     }
-  } catch {
+  } catch (err: any) {
     try {
-      await navigator.clipboard.writeText(md);
-      showToast("移动端已将完整 Markdown 实验档案复制到剪贴板");
+      await writeClipboardText(md);
+      showToast("无法写入文件，已将完整 Markdown 实验档案复制到剪贴板");
     } catch {
-      const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${safeName}.md`;
-      a.click();
-      URL.revokeObjectURL(url);
-      showToast("已通过浏览器下载 Markdown 档案");
+      showToast(`Markdown 导出失败: ${err?.message ?? err}`);
     }
   }
+}
+
+async function exportPureMarkdown() {
+  if (!experiment.value) return;
+  const md = await invoke<string>("export_pure_script_markdown", {
+    experimentId: experiment.value.id,
+  });
+  const safeName = experiment.value.title.replace(/[\\/:*?"<>|]/g, "_");
+  try {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const filePath = await save({
+      defaultPath: `${safeName}_纯享剧本.md`,
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+    if (filePath) {
+      await invoke("save_markdown_to_file", { path: filePath, content: md });
+      showToast("纯享剧本 Markdown (.md) 已导出");
+    }
+  } catch (err: any) {
+    try {
+      await writeClipboardText(md);
+      showToast("无法写入文件，已将纯享剧本 Markdown 复制到剪贴板");
+    } catch {
+      showToast(`纯享剧本导出失败: ${err?.message ?? err}`);
+    }
+  }
+}
+
+async function exportPurePng() {
+  if (!experiment.value) return;
+  try {
+    showToast("正在渲染 Apple 书卷风纯享剧本长图...");
+    const bytes = await renderPureScriptPngBytes(experiment.value);
+    const safeName = experiment.value.title.replace(/[\\/:*?"<>|]/g, "_");
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const filePath = await save({
+      defaultPath: `${safeName}_纯享剧本.png`,
+      filters: [{ name: "PNG Image", extensions: ["png"] }],
+    });
+    if (filePath) {
+      await invoke("save_binary_to_file", {
+        path: filePath,
+        data: Array.from(bytes),
+      });
+      showToast("纯享剧本长图 (.png) 已导出");
+    }
+  } catch (err: any) {
+    showToast(`导出纯享长图失败: ${err?.toString?.() ?? err}`);
+  }
+}
+
+async function exportPurePdf() {
+  if (!experiment.value) return;
+  window.dispatchEvent(new Event("terrarium:prepare-print"));
+  await nextTick();
+  window.print();
+  showToast("已打开系统打印 / 导出 PDF 视图");
 }
 
 async function handleJumpToTurn(turnNumber: number) {
@@ -1047,7 +1686,7 @@ async function copyRawPrompt() {
     const pretty = promptModalParsed.value
       ? JSON.stringify(promptModalParsed.value, null, 2)
       : promptModalRaw.value;
-    await navigator.clipboard.writeText(pretty);
+    await writeClipboardText(pretty);
     promptCopied.value = true;
     setTimeout(() => {
       promptCopied.value = false;
@@ -1059,25 +1698,55 @@ async function copyRawPrompt() {
 </script>
 
 <template>
-  <div class="h-dvh w-screen flex bg-[#F6F6F8] text-[#1D1D1F] overflow-hidden">
-    <!-- Full-height Native Left Archive Sidebar (Desktop >= 1024px) -->
+  <div
+    id="app-main-shell"
+    class="h-dvh w-screen flex overflow-hidden text-[#1D1D1F]"
+    :class="[
+      isWindows ? 'bg-transparent' : isMobileOS && isDesktopSidebar && desktopLeftSidebarOpen ? 'bg-[#F9F9FB]' : 'bg-white',
+      isMobileOS ? 'pl-[var(--safe-left,0px)] pr-[var(--safe-right,0px)]' : '',
+    ]"
+  >
+    <!-- Full-height Native Left Archive Sidebar (Desktop >= 1024px or Foldable/Tablet Landscape) -->
     <aside
-      v-if="isDesktopSidebar && desktopLeftSidebarOpen"
-      class="w-[248px] shrink-0 h-full overflow-hidden"
+      v-if="isDesktopSidebar"
+      class="shrink-0 h-full overflow-hidden transition-[width,opacity] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
+      :class="
+        desktopLeftSidebarOpen
+          ? isCompactAndroidDesktop
+            ? 'w-[204px] opacity-100'
+            : 'w-[244px] opacity-100'
+          : 'w-0 opacity-0 pointer-events-none'
+      "
+      :aria-hidden="!desktopLeftSidebarOpen"
     >
-      <LeftSidebar
-        :experiments="experiments"
-        :current-experiment-id="experiment?.id ?? null"
-        :character-cards="characterCards"
-        @open-new-experiment="newExpOpen = true"
-        @select-experiment="selectExperiment"
-        @delete-experiment="deleteExperiment"
-        @export-scenario="handleExportScenario"
-        @import-scenario="handleImportScenario"
-        @export-md="exportMarkdown"
-        @delete-character-card="handleDeleteCharacterCard"
-        @open-settings="settingsOpen = true"
-      />
+      <div
+        class="h-full transition-transform duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
+        :class="[
+          isCompactAndroidDesktop ? 'w-[204px]' : 'w-[244px]',
+          desktopLeftSidebarOpen ? 'translate-x-0' : '-translate-x-3',
+        ]"
+      >
+        <LeftSidebar
+          :experiments="experiments"
+          :current-experiment-id="experiment?.id ?? null"
+          :current-total-turns="experiment?.totalTurns ?? 0"
+          :distilling-imprints="distillingImprints"
+          :character-cards="characterCards"
+          @open-new-experiment="newExpOpen = true"
+          @select-experiment="selectExperiment"
+          @delete-experiment="deleteExperiment"
+          @export-scenario="handleExportScenario"
+          @import-scenario="handleImportScenario"
+          @export-md="exportMarkdown"
+          @export-pure-md="exportPureMarkdown"
+          @export-pure-png="exportPurePng"
+          @export-pure-pdf="exportPurePdf"
+          @distill-imprints="handleDistillImprints"
+          @update-card-imprints="handleUpdateCardImprints"
+          @delete-character-card="handleDeleteCharacterCard"
+          @open-settings="settingsOpen = true"
+        />
+      </div>
     </aside>
 
     <!-- Left Archive Slide-out Sheet (< 1024px) -->
@@ -1086,12 +1755,14 @@ async function copyRawPrompt() {
       side="left"
       :open="sheetLeftSidebarOpen"
       title="实验档案库"
-      width-class="w-[272px] max-w-[85vw]"
+      width-class="w-[308px] max-w-[82vw]"
       @update:open="sheetLeftSidebarOpen = $event"
     >
       <LeftSidebar
         :experiments="experiments"
         :current-experiment-id="experiment?.id ?? null"
+        :current-total-turns="experiment?.totalTurns ?? 0"
+        :distilling-imprints="distillingImprints"
         :character-cards="characterCards"
         :in-sheet="true"
         @open-new-experiment="sheetLeftSidebarOpen = false; newExpOpen = true"
@@ -1100,14 +1771,34 @@ async function copyRawPrompt() {
         @export-scenario="handleExportScenario"
         @import-scenario="handleImportScenario"
         @export-md="exportMarkdown"
+        @export-pure-md="exportPureMarkdown"
+        @export-pure-png="exportPurePng"
+        @export-pure-pdf="exportPurePdf"
+        @distill-imprints="handleDistillImprints"
+        @update-card-imprints="handleUpdateCardImprints"
         @delete-character-card="handleDeleteCharacterCard"
         @open-settings="sheetLeftSidebarOpen = false; settingsOpen = true"
       />
     </Sheet>
 
-    <!-- Right Workspace: Full-Height 3-Column Stage on Wide Desktop, or TopBar + Main on Narrower Viewports -->
+    <!-- Right Frame: Transparent Windows Titlebar Strip + Floating White Workspace Card -->
     <div class="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
-      <template v-if="!isWideDesktop">
+      <WindowsTitleBar
+        v-if="isWindows"
+        :show-brand="!(isDesktopSidebar && desktopLeftSidebarOpen)"
+      />
+
+      <div
+        class="flex-1 min-h-0 flex flex-col overflow-hidden bg-white transition-[border-radius] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
+        :class="
+          isWindows
+            ? isDesktopSidebar && desktopLeftSidebarOpen
+              ? 'md:rounded-tl-[12px] md:border-t md:border-l md:border-black/[0.06] md:shadow-[0_1px_14px_rgba(0,0,0,0.03)]'
+              : 'md:rounded-t-[12px] md:border-t md:border-black/[0.06] md:shadow-[0_1px_14px_rgba(0,0,0,0.03)]'
+            : ''
+        "
+      >
+        <template v-if="!isWideDesktop">
         <TopControlBar
           :experiment="experiment"
           :engine-state="engineState"
@@ -1120,46 +1811,64 @@ async function copyRawPrompt() {
           :has-pending-approval="Boolean(pendingApproval)"
           :context-usage-pct="contextUsagePct"
           :context-active-tokens="contextActiveTokens"
+          :compact-mobile="isMobile"
+          :blind-guess-mode="blindGuessMode"
           @start="startEngine"
           @pause="pauseEngine"
           @step="stepEngine"
           @open-settings="settingsOpen = true"
           @rename-experiment="renameExperiment"
           @toggle-replay="toggleReplay"
+          @toggle-blind-guess="blindGuessMode = !blindGuessMode"
           @toggle-sidebar="leftSidebarOpen = !leftSidebarOpen"
           @toggle-inspector="inspectorOpen = !inspectorOpen"
         />
 
-        <!-- Mobile View Switcher (< md) -->
+        <!-- Mobile View Switcher (portrait phones & vertical foldables/tablets) unified into single header surface -->
         <div
-          class="md:hidden shrink-0 px-3 py-1.5 bg-white/90 border-b border-black/[0.05] flex items-center justify-between gap-2"
+          v-if="isMobile"
+          class="shrink-0 px-3 pb-2 pt-1.5 bg-white border-b border-black/[0.06]"
         >
-          <div class="flex p-0.5 rounded-full bg-[#F2F2F5] border border-black/[0.04]">
+          <div class="grid grid-cols-3 p-1 rounded-xl bg-[#EFEFF4] gap-1">
             <button
-              @click="mobileTab = 'stream'"
-              class="px-3 py-1 rounded-full text-[11px] font-medium transition"
-              :class="mobileTab === 'stream' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
+              type="button"
+              @click="triggerHaptic('light'); mobileTab = 'stream'"
+              class="h-8 flex items-center justify-center gap-1 rounded-lg text-[12.5px] font-medium transition-all"
+              :class="mobileTab === 'stream' ? 'bg-white text-[#1D1D1F] shadow-[0_1px_3px_rgba(0,0,0,0.08)]' : 'text-slate-600'"
             >
-              对话流 ({{ experiment?.totalTurns ?? 0 }})
+              <span>对话流</span>
+              <span class="text-[11px] opacity-65 tabular-nums">
+                ({{ replayActive ? replayCurrentTurn : (experiment?.totalTurns ?? 0) }})
+              </span>
             </button>
             <button
-              @click="mobileTab = 'board'"
-              class="px-3 py-1 rounded-full text-[11px] font-medium transition"
-              :class="mobileTab === 'board' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
+              type="button"
+              @click="triggerHaptic('light'); mobileTab = 'board'"
+              class="relative h-8 flex items-center justify-center gap-1 rounded-lg text-[12.5px] font-medium transition-all"
+              :class="mobileTab === 'board' ? 'bg-white text-[#1D1D1F] shadow-[0_1px_3px_rgba(0,0,0,0.08)]' : 'text-slate-600'"
             >
-              白板
+              <span>白板/备忘</span>
+              <span
+                v-if="activePrivateNotesCount > 0"
+                class="text-[10.5px] text-violet-600 font-semibold tabular-nums"
+              >
+                ({{ activePrivateNotesCount }})
+              </span>
+              <span
+                v-if="pendingApproval"
+                class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping"
+              ></span>
             </button>
             <button
-              @click="mobileTab = 'observer'"
-              class="px-3 py-1 rounded-full text-[11px] font-medium transition"
-              :class="mobileTab === 'observer' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
+              type="button"
+              @click="triggerHaptic('light'); mobileTab = 'observer'"
+              class="h-8 flex items-center justify-center gap-1 rounded-lg text-[12.5px] font-medium transition-all"
+              :class="mobileTab === 'observer' ? 'bg-white text-[#1D1D1F] shadow-[0_1px_3px_rgba(0,0,0,0.08)]' : 'text-slate-600'"
             >
-              观察舱 ({{ experiment?.observerNotes.length ?? 0 }})
+              <span>观察舱</span>
+              <span class="text-[11px] opacity-65 tabular-nums">({{ displayObserverNotes.length }})</span>
             </button>
           </div>
-          <span class="text-[11px] text-slate-500 tabular-nums">
-            {{ experiment?.totalTokens.toLocaleString() ?? 0 }} tok
-          </span>
         </div>
       </template>
 
@@ -1173,12 +1882,17 @@ async function copyRawPrompt() {
       <!-- 1. Wide Desktop (>= 1280px): Resizable Split Panels with Full-Height Right Sidebar -->
       <ResizablePanelGroup
         v-if="isWideDesktop"
+        :key="uiPrefsLayoutKey"
         direction="horizontal"
         class="flex-1 min-w-0 h-full"
         @layout="onPanelLayout"
       >
-        <ResizablePanel :default-size="streamDefaultSize" :min-size="45">
-          <section class="relative flex-1 h-full flex flex-col bg-white/60 min-w-0">
+        <ResizablePanel
+          :default-size="desktopInspectorOpen ? streamDefaultSize : 100"
+          :min-size="streamMinPct"
+          :class="inspectorAnimating ? 'transition-[flex-grow] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]' : ''"
+        >
+          <section class="relative flex-1 h-full flex flex-col bg-white min-w-0">
             <TopControlBar
               :experiment="experiment"
               :engine-state="engineState"
@@ -1191,23 +1905,30 @@ async function copyRawPrompt() {
               :has-pending-approval="Boolean(pendingApproval)"
               :context-usage-pct="contextUsagePct"
               :context-active-tokens="contextActiveTokens"
+              :compact-mobile="false"
+              :blind-guess-mode="blindGuessMode"
               @start="startEngine"
               @pause="pauseEngine"
               @step="stepEngine"
               @open-settings="settingsOpen = true"
               @rename-experiment="renameExperiment"
               @toggle-replay="toggleReplay"
+              @toggle-blind-guess="blindGuessMode = !blindGuessMode"
               @toggle-sidebar="leftSidebarOpen = !leftSidebarOpen"
               @toggle-inspector="inspectorOpen = !inspectorOpen"
             />
 
             <ThoughtStream
               ref="streamRef"
+              :experiment-id="experiment?.id ?? null"
               :messages="displayMessages"
               :streaming="displayStreaming"
               :config="experiment?.config ?? null"
-              :compacted-summary="experiment?.compactedSummary ?? ''"
+              :compacted-summary="displayCompactedSummary"
               :can-branch="canBranch"
+              :blind-guess-mode="blindGuessMode"
+              :room-members="experiment?.roomMembers ?? {}"
+              :active-private-room="experiment?.activePrivateRoom ?? null"
               @fork="handleFork"
               @edit-and-replay="handleEditAndReplay"
               @inspect-prompt="handleInspectPrompt"
@@ -1247,52 +1968,100 @@ async function copyRawPrompt() {
           </section>
         </ResizablePanel>
 
-        <template v-if="desktopInspectorOpen">
-          <ResizableHandle />
-          <ResizablePanel :default-size="inspectorDefaultSize" :min-size="22" :max-size="55">
-            <aside class="w-full h-full flex flex-col bg-[#F5F5F7] overflow-hidden">
+        <ResizableHandle
+          class="transition-opacity duration-200"
+          :class="desktopInspectorOpen ? 'opacity-100' : 'opacity-0 pointer-events-none !w-0 !mx-0'"
+        />
+        <ResizablePanel
+          ref="inspectorPanelRef"
+          :default-size="desktopInspectorOpen ? inspectorDefaultSize : 0"
+          :min-size="inspectorMinPct"
+          :max-size="55"
+          :collapsible="true"
+          :collapsed-size="0"
+          :class="inspectorAnimating ? 'transition-[flex-grow] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]' : ''"
+          @collapse="desktopInspectorOpen = false"
+          @expand="desktopInspectorOpen = true"
+        >
+          <aside
+            class="w-full h-full flex flex-col bg-white overflow-hidden transition-[opacity,transform] duration-220 ease-[cubic-bezier(0.22,1,0.36,1)]"
+            :class="[
+              isCompactAndroidDesktop ? 'min-w-0' : 'min-w-[280px]',
+              desktopInspectorOpen ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-4 pointer-events-none',
+            ]"
+            :aria-hidden="!desktopInspectorOpen"
+          >
               <div
                 :data-tauri-drag-region="isMacOS ? '' : undefined"
-                class="h-12 flex items-center justify-between gap-2 px-3 border-b border-black/[0.07] bg-[#F5F5F7] shrink-0 select-none"
+                class="flex items-center justify-between gap-2 px-4 border-b border-black/[0.05] bg-white shrink-0 select-none"
+                :class="
+                  isMobileOS
+                    ? 'pt-[var(--safe-top,env(safe-area-inset-top))] min-h-[calc(46px+var(--safe-top,0px))]'
+                    : 'h-[46px]'
+                "
               >
-                <div class="flex items-center p-0.5 rounded-lg bg-black/[0.06] w-full">
+                <div class="flex items-center gap-4">
                   <button
                     type="button"
                     @click="inspectorTab = 'observer'"
-                    class="flex-1 flex items-center justify-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors"
+                    class="relative h-[46px] flex items-center gap-1.5 text-[13px] transition-colors"
                     :class="
                       inspectorTab === 'observer'
-                        ? 'bg-white text-[#1D1D1F] shadow-xs'
-                        : 'text-slate-600 hover:text-[#1D1D1F]'
+                        ? 'font-semibold text-[#1D1D1F]'
+                        : 'font-medium text-slate-400 hover:text-slate-700'
                     "
                   >
                     <Telescope class="w-3.5 h-3.5" />
                     <span>观察舱</span>
                     <span
-                      v-if="(experiment?.observerNotes.length ?? 0) > 0"
-                      class="text-[10px] opacity-75 tabular-nums"
+                      v-if="displayObserverNotes.length > 0"
+                      class="text-[11px] opacity-65 tabular-nums"
                     >
-                      ({{ experiment?.observerNotes.length }})
+                      ({{ displayObserverNotes.length }})
                     </span>
+                    <span
+                      v-if="inspectorTab === 'observer'"
+                      class="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-[#1D1D1F]"
+                    ></span>
                   </button>
                   <button
                     type="button"
                     @click="inspectorTab = 'board'"
-                    class="flex-1 relative flex items-center justify-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors"
+                    class="relative h-[46px] flex items-center gap-1.5 text-[13px] transition-colors"
                     :class="
                       inspectorTab === 'board'
-                        ? 'bg-white text-[#1D1D1F] shadow-xs'
-                        : 'text-slate-600 hover:text-[#1D1D1F]'
+                        ? 'font-semibold text-[#1D1D1F]'
+                        : 'font-medium text-slate-400 hover:text-slate-700'
                     "
                   >
                     <ClipboardList class="w-3.5 h-3.5" />
                     <span>共享白板</span>
                     <span
+                      v-if="activePrivateNotesCount > 0"
+                      class="px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-700 text-[10.5px] font-semibold tabular-nums leading-none"
+                      title="包含角色私密备忘"
+                    >
+                      备忘 {{ activePrivateNotesCount }}
+                    </span>
+                    <span
                       v-if="pendingApproval"
                       class="w-2 h-2 rounded-full bg-amber-500 animate-ping"
                     ></span>
+                    <span
+                      v-if="inspectorTab === 'board'"
+                      class="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-[#1D1D1F]"
+                    ></span>
                   </button>
                 </div>
+
+                <button
+                  type="button"
+                  @click="inspectorOpen = false"
+                  class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-[#1D1D1F] hover:bg-black/[0.05] transition-colors"
+                  title="收起右栏"
+                >
+                  <X class="w-3.5 h-3.5" />
+                </button>
               </div>
 
               <div class="flex-1 min-h-0 overflow-hidden">
@@ -1306,6 +2075,10 @@ async function copyRawPrompt() {
                   :last-actor="boardLastActor"
                   :last-reason="boardLastReason"
                   :read-only="replayActive"
+                  :agents="experiment?.config.agents ?? []"
+                  :private-notes="displayPrivateNotes"
+                  :enable-private-notes="Boolean(experiment?.config.enablePrivateNotes)"
+                  :blind-guess-mode="blindGuessMode"
                   @close="inspectorOpen = false"
                   @save-board="handleSaveBoard"
                   @toggle-approval-mode="handleToggleApprovalMode"
@@ -1322,30 +2095,40 @@ async function copyRawPrompt() {
                   :final-report="experiment?.finalReport ?? ''"
                   :generating-report="generatingReport"
                   :agents="experiment?.config.agents ?? []"
+                  :blind-guess-mode="blindGuessMode"
+                  :related-branches="relatedBranches"
+                  :distilling-imprints="distillingImprints"
+                  :comparison-report="comparisonReport"
+                  :generating-comparison="generatingComparison"
                   @jump-to-turn="handleJumpToTurn"
                   @trigger-now="triggerObserverNow"
                   @generate-report="handleGenerateReport"
                   @save-character-card="handleSaveCharacterCard"
+                  @distill-imprints="handleDistillImprints"
+                  @generate-comparison="handleGenerateComparison"
                 />
               </div>
             </aside>
           </ResizablePanel>
-        </template>
       </ResizablePanelGroup>
 
       <!-- 2. Half-screen / Tablet (768px~1279px) & Mobile (< 768px) -->
       <template v-else>
         <section
-          class="relative flex-1 h-full flex-col bg-white/60 min-w-0"
+          class="relative flex-1 h-full flex-col bg-white min-w-0"
           :class="isMobile && mobileTab !== 'stream' ? 'hidden' : 'flex'"
         >
           <ThoughtStream
             ref="streamRef"
+            :experiment-id="experiment?.id ?? null"
             :messages="displayMessages"
             :streaming="displayStreaming"
             :config="experiment?.config ?? null"
-            :compacted-summary="experiment?.compactedSummary ?? ''"
+            :compacted-summary="displayCompactedSummary"
             :can-branch="canBranch"
+            :blind-guess-mode="blindGuessMode"
+            :room-members="experiment?.roomMembers ?? {}"
+            :active-private-room="experiment?.activePrivateRoom ?? null"
             @fork="handleFork"
             @edit-and-replay="handleEditAndReplay"
             @inspect-prompt="handleInspectPrompt"
@@ -1389,42 +2172,48 @@ async function copyRawPrompt() {
           v-if="isTablet"
           :open="sheetInspectorOpen"
           title="观察舱与共享白板"
-          width-class="w-[400px] max-w-[88vw]"
+          width-class="w-[380px] min-[900px]:w-[420px] max-w-[86vw]"
           @update:open="sheetInspectorOpen = $event"
         >
-          <div class="flex items-center justify-between gap-2 px-3 py-2 border-b border-black/[0.06] bg-white/90 shrink-0">
-            <div class="flex items-center p-0.5 rounded-full bg-[#F2F2F5] border border-black/[0.04]">
+          <div class="h-12 flex items-center justify-between gap-2 px-4 border-b border-black/[0.06] bg-white shrink-0">
+            <div class="flex items-center p-0.5 rounded-xl bg-[#EFEFF4]">
               <button
                 type="button"
-                @click="inspectorTab = 'observer'"
-                class="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium transition"
+                @click="triggerHaptic('light'); inspectorTab = 'observer'"
+                class="flex items-center gap-1.5 px-3 py-1 rounded-lg text-[12.5px] font-medium transition"
                 :class="
                   inspectorTab === 'observer'
-                    ? 'bg-[#1D1D1F] text-white shadow-xs'
+                    ? 'bg-white text-[#1D1D1F] shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
                     : 'text-slate-600 hover:text-[#1D1D1F]'
                 "
               >
                 <Telescope class="w-3.5 h-3.5" />
                 <span>观察舱</span>
                 <span
-                  v-if="(experiment?.observerNotes.length ?? 0) > 0"
-                  class="text-[10px] opacity-75 tabular-nums"
+                  v-if="displayObserverNotes.length > 0"
+                  class="text-[11px] opacity-65 tabular-nums"
                 >
-                  ({{ experiment?.observerNotes.length }})
+                  ({{ displayObserverNotes.length }})
                 </span>
               </button>
               <button
                 type="button"
-                @click="inspectorTab = 'board'"
-                class="relative flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium transition"
+                @click="triggerHaptic('light'); inspectorTab = 'board'"
+                class="relative flex items-center gap-1.5 px-3 py-1 rounded-lg text-[12.5px] font-medium transition"
                 :class="
                   inspectorTab === 'board'
-                    ? 'bg-[#1D1D1F] text-white shadow-xs'
+                    ? 'bg-white text-[#1D1D1F] shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
                     : 'text-slate-600 hover:text-[#1D1D1F]'
                 "
               >
                 <ClipboardList class="w-3.5 h-3.5" />
                 <span>共享白板</span>
+                <span
+                  v-if="activePrivateNotesCount > 0"
+                  class="px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-700 text-[10px] font-semibold tabular-nums leading-none"
+                >
+                  备忘 {{ activePrivateNotesCount }}
+                </span>
                 <span
                   v-if="pendingApproval"
                   class="w-2 h-2 rounded-full bg-amber-500 animate-ping"
@@ -1435,10 +2224,10 @@ async function copyRawPrompt() {
             <button
               type="button"
               @click="sheetInspectorOpen = false"
-              class="p-1.5 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition"
-              title="收起右侧面板"
+              class="w-8 h-8 flex items-center justify-center rounded-full bg-[#F2F2F7] text-slate-600 active:bg-[#E5E5EA] transition"
+              title="关闭面板"
             >
-              <PanelRightClose class="w-4 h-4" />
+              <X class="w-4 h-4" />
             </button>
           </div>
 
@@ -1453,6 +2242,10 @@ async function copyRawPrompt() {
               :last-actor="boardLastActor"
               :last-reason="boardLastReason"
               :read-only="replayActive"
+              :agents="experiment?.config.agents ?? []"
+              :private-notes="displayPrivateNotes"
+              :enable-private-notes="Boolean(experiment?.config.enablePrivateNotes)"
+              :blind-guess-mode="blindGuessMode"
               @close="sheetInspectorOpen = false"
               @save-board="handleSaveBoard"
               @toggle-approval-mode="handleToggleApprovalMode"
@@ -1469,10 +2262,17 @@ async function copyRawPrompt() {
               :final-report="experiment?.finalReport ?? ''"
               :generating-report="generatingReport"
               :agents="experiment?.config.agents ?? []"
+              :blind-guess-mode="blindGuessMode"
+              :related-branches="relatedBranches"
+              :distilling-imprints="distillingImprints"
+              :comparison-report="comparisonReport"
+              :generating-comparison="generatingComparison"
               @jump-to-turn="handleJumpToTurn"
               @trigger-now="triggerObserverNow"
               @generate-report="handleGenerateReport"
               @save-character-card="handleSaveCharacterCard"
+              @distill-imprints="handleDistillImprints"
+              @generate-comparison="handleGenerateComparison"
             />
           </div>
         </Sheet>
@@ -1480,7 +2280,7 @@ async function copyRawPrompt() {
         <!-- Mobile Full-Width Inspector Panel (< 768px) -->
         <aside
           v-else-if="mobileTab !== 'stream'"
-          class="flex-1 h-full flex flex-col bg-[#FAFAFC] overflow-hidden"
+          class="flex-1 h-full flex flex-col bg-white overflow-hidden"
         >
           <div class="flex-1 min-h-0 overflow-hidden">
             <SharedBoardDrawer
@@ -1493,6 +2293,10 @@ async function copyRawPrompt() {
               :last-actor="boardLastActor"
               :last-reason="boardLastReason"
               :read-only="replayActive"
+              :agents="experiment?.config.agents ?? []"
+              :private-notes="displayPrivateNotes"
+              :enable-private-notes="Boolean(experiment?.config.enablePrivateNotes)"
+              :blind-guess-mode="blindGuessMode"
               @close="mobileTab = 'stream'"
               @save-board="handleSaveBoard"
               @toggle-approval-mode="handleToggleApprovalMode"
@@ -1509,16 +2313,83 @@ async function copyRawPrompt() {
               :final-report="experiment?.finalReport ?? ''"
               :generating-report="generatingReport"
               :agents="experiment?.config.agents ?? []"
+              :blind-guess-mode="blindGuessMode"
+              :related-branches="relatedBranches"
+              :distilling-imprints="distillingImprints"
+              :comparison-report="comparisonReport"
+              :generating-comparison="generatingComparison"
               @jump-to-turn="handleJumpToTurn"
               @trigger-now="triggerObserverNow"
               @generate-report="handleGenerateReport"
               @save-character-card="handleSaveCharacterCard"
+              @distill-imprints="handleDistillImprints"
+              @generate-comparison="handleGenerateComparison"
             />
           </div>
         </aside>
       </template>
     </main>
     </div>
+    </div>
+
+    <!-- Custom Lightweight Text Context Menu (Replaces WebView2 browser menu) -->
+    <Teleport to="body">
+      <div
+        v-if="textContextMenu.open"
+        data-text-context-menu
+        :style="{ left: `${textContextMenu.x}px`, top: `${textContextMenu.y}px` }"
+        class="pointer-events-auto fixed z-[200] w-[164px] py-1 rounded-xl bg-white/95 backdrop-blur-xl border border-black/[0.08] shadow-[0_10px_30px_rgba(0,0,0,0.16)] text-[12.5px] text-[#1D1D1F] select-none"
+      >
+        <button
+          v-if="textContextMenu.canCut"
+          type="button"
+          @mousedown.prevent="execContextAction('cut')"
+          class="w-full px-3 py-1.5 flex items-center justify-between hover:bg-black/[0.05] transition text-left"
+        >
+          <span class="flex items-center gap-2">
+            <Scissors class="w-3.5 h-3.5 text-slate-500" />
+            剪切
+          </span>
+          <span class="text-[10.5px] text-slate-400">Ctrl+X</span>
+        </button>
+        <button
+          v-if="textContextMenu.canCopy"
+          type="button"
+          @mousedown.prevent="execContextAction('copy')"
+          class="w-full px-3 py-1.5 flex items-center justify-between hover:bg-black/[0.05] transition text-left"
+        >
+          <span class="flex items-center gap-2">
+            <Copy class="w-3.5 h-3.5 text-slate-500" />
+            复制
+          </span>
+          <span class="text-[10.5px] text-slate-400">Ctrl+C</span>
+        </button>
+        <button
+          v-if="textContextMenu.canPaste"
+          type="button"
+          @mousedown.prevent="execContextAction('paste')"
+          class="w-full px-3 py-1.5 flex items-center justify-between hover:bg-black/[0.05] transition text-left"
+        >
+          <span class="flex items-center gap-2">
+            <ClipboardPaste class="w-3.5 h-3.5 text-slate-500" />
+            粘贴
+          </span>
+          <span class="text-[10.5px] text-slate-400">Ctrl+V</span>
+        </button>
+        <button
+          v-if="textContextMenu.canSelectAll"
+          type="button"
+          @mousedown.prevent="execContextAction('selectAll')"
+          class="w-full px-3 py-1.5 flex items-center justify-between hover:bg-black/[0.05] transition text-left"
+        >
+          <span class="flex items-center gap-2">
+            <TextSelect class="w-3.5 h-3.5 text-slate-500" />
+            全选
+          </span>
+          <span class="text-[10.5px] text-slate-400">Ctrl+A</span>
+        </button>
+      </div>
+    </Teleport>
 
     <!-- Floating Apple-style Toast -->
     <Transition
@@ -1569,6 +2440,7 @@ async function copyRawPrompt() {
     </Transition>
 
     <SettingsDrawer
+      ref="settingsDrawerRef"
       :open="settingsOpen"
       :config="experiment?.config ?? null"
       :presets="presets"
@@ -1579,6 +2451,7 @@ async function copyRawPrompt() {
       @reset-preset="handleResetPreset"
       @delete-preset="handleDeletePreset"
       @delete-character-card="handleDeleteCharacterCard"
+      @save-character-card="handleSaveCharacterCard"
       @notify="showToast"
     />
 
@@ -1593,11 +2466,21 @@ async function copyRawPrompt() {
       @delete-preset="handleDeletePreset"
     />
 
+    <ForkTweakModal
+      :open="forkTweakOpen"
+      :title="experiment?.title ?? ''"
+      :config="experiment?.config ?? null"
+      :character-cards="characterCards"
+      @close="forkTweakOpen = false"
+      @save-and-continue="handleSaveForkTweak"
+    />
+
     <!-- Raw Prompt Inspector Adaptive Modal -->
     <AdaptiveModal
       :open="promptModalOpen"
       title="本轮完整提示词"
       max-width-class="max-w-3xl"
+      mobile-presentation="fullscreen"
       @close="promptModalOpen = false"
     >
       <template #header>
@@ -1695,4 +2578,6 @@ async function copyRawPrompt() {
       </div>
     </AdaptiveModal>
   </div>
+
+  <PureScriptPrintView :experiment="experiment" />
 </template>
