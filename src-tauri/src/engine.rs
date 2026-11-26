@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use reqwest::Client;
 use tauri::ipc::Channel;
-use tokio::sync::{oneshot, watch, Mutex, Notify, RwLock};
+use tokio::sync::{broadcast, oneshot, watch, Mutex, Notify, RwLock};
 use uuid::Uuid;
 
 use crate::compactor::{estimate_messages_tokens, maybe_compact_history, CompactionGuard};
@@ -26,7 +26,7 @@ use crate::sandbox_tools::{
     guardian_review_board, parse_board_tool_call, sandbox_tools_schema, truncate_private_note,
     ApprovalDecision, GuardianVerdict, ParsedBoardTool, MAX_PRIVATE_NOTE_CHARS,
 };
-use crate::sanitizer::{strip_leading_speaker_prefix, strip_think_tags};
+use crate::sanitizer::{extract_micro_cue, strip_leading_speaker_prefix, strip_think_tags};
 
 fn state_to_u8(s: EngineState) -> u8 {
     match s {
@@ -242,6 +242,8 @@ pub struct TerrariumEngine {
     pub pending_approval: Arc<Mutex<Option<(String, oneshot::Sender<ApprovalDecision>)>>>,
     pub compaction_guard: Arc<Mutex<CompactionGuard>>,
     pub channel: Arc<RwLock<Option<Channel<StreamEvent>>>>,
+    pub event_tx: broadcast::Sender<StreamEvent>,
+    pub blind_guess_mode: Arc<AtomicBool>,
     pub notify: Arc<Notify>,
     pub cancel_tx: watch::Sender<u64>,
     pub loop_started: AtomicBool,
@@ -254,6 +256,7 @@ impl TerrariumEngine {
             .build()
             .expect("failed to build reqwest client");
         let (cancel_tx, _) = watch::channel(0u64);
+        let (event_tx, _) = broadcast::channel(256);
 
         let engine = Arc::new(Self {
             db,
@@ -266,6 +269,8 @@ impl TerrariumEngine {
             pending_approval: Arc::new(Mutex::new(None)),
             compaction_guard: Arc::new(Mutex::new(CompactionGuard::default())),
             channel: Arc::new(RwLock::new(None)),
+            event_tx,
+            blind_guess_mode: Arc::new(AtomicBool::new(false)),
             notify: Arc::new(Notify::new()),
             cancel_tx,
             loop_started: AtomicBool::new(false),
@@ -297,7 +302,27 @@ impl TerrariumEngine {
         *guard = Some(ch);
     }
 
+    pub fn subscribe_events(&self) -> broadcast::Receiver<StreamEvent> {
+        self.event_tx.subscribe()
+    }
+
+    pub fn set_blind_guess_mode(&self, enabled: bool) {
+        self.blind_guess_mode.store(enabled, Ordering::SeqCst);
+    }
+
+    pub fn is_blind_guess_mode(&self) -> bool {
+        self.blind_guess_mode.load(Ordering::SeqCst)
+    }
+
     async fn emit(&self, event: StreamEvent) {
+        if !matches!(
+            event,
+            StreamEvent::StreamDelta { .. }
+                | StreamEvent::StreamReasoningDelta { .. }
+                | StreamEvent::StreamStart { .. }
+        ) {
+            let _ = self.event_tx.send(event.clone());
+        }
         let guard = self.channel.read().await;
         if let Some(ch) = guard.as_ref() {
             let _ = ch.send(event);
@@ -477,6 +502,7 @@ impl TerrariumEngine {
                 room_id: "main".to_string(),
                 reasoning_content: String::new(),
                 content,
+                micro_cue: None,
                 model_name: String::new(),
                 duration_ms: 0,
                 prompt_tokens: 0,
@@ -555,6 +581,7 @@ impl TerrariumEngine {
                 "【空间变动】{} 与 {} 低声走入里屋私聊（大厅其余角色无法听见里屋对话）。",
                 label1, label2
             ),
+            micro_cue: None,
             model_name: String::new(),
             duration_ms: 0,
             prompt_tokens: 0,
@@ -611,6 +638,7 @@ impl TerrariumEngine {
                 "【空间变动】{} 与 {} 结束了私聊，各自回到大厅。",
                 label1, label2
             ),
+            micro_cue: None,
             model_name: String::new(),
             duration_ms: 0,
             prompt_tokens: 0,
@@ -865,6 +893,50 @@ impl TerrariumEngine {
                         }
                     }
 
+                    if !parsed.achieved_agent_ids.is_empty() {
+                        if let Ok(mut latest_detail) = db.get_experiment_detail(&exp_id) {
+                            let mut newly_achieved: Vec<(String, String, String)> = Vec::new();
+                            for ag in &mut latest_detail.config.agents {
+                                if ag.secret_goal.trim().is_empty() || ag.goal_achieved {
+                                    continue;
+                                }
+                                let matched = parsed.achieved_agent_ids.iter().any(|aid| {
+                                    let t = aid.trim();
+                                    t == ag.id || t == ag.label
+                                });
+                                if matched {
+                                    ag.goal_achieved = true;
+                                    newly_achieved.push((
+                                        ag.id.clone(),
+                                        ag.label.clone(),
+                                        ag.secret_goal.clone(),
+                                    ));
+                                }
+                            }
+                            if !newly_achieved.is_empty()
+                                && db
+                                    .update_experiment(&exp_id, &latest_detail.title, &latest_detail.config)
+                                    .is_ok()
+                            {
+                                let guard = channel.read().await;
+                                if let Some(ch) = guard.as_ref() {
+                                    let _ = ch.send(StreamEvent::ConfigHotUpdated {
+                                        experiment_id: exp_id.clone(),
+                                        config: latest_detail.config.clone(),
+                                    });
+                                    for (agent_id, agent_label, secret_goal) in newly_achieved {
+                                        let _ = ch.send(StreamEvent::SecretGoalAchieved {
+                                            experiment_id: exp_id.clone(),
+                                            agent_id,
+                                            agent_label,
+                                            secret_goal,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     if should_perturb {
                         let perturbation_text = if let Some(ev_text) = director_event_content {
                             format!("【叙事导演 · 突发环境事件】{}", ev_text.trim())
@@ -902,6 +974,7 @@ impl TerrariumEngine {
                                 room_id: "main".to_string(),
                                 reasoning_content: String::new(),
                                 content: perturbation.content,
+                                micro_cue: None,
                                 model_name: String::new(),
                                 duration_ms: 0,
                                 prompt_tokens: 0,
@@ -975,6 +1048,7 @@ impl TerrariumEngine {
                                     room_id: "main".to_string(),
                                     reasoning_content: String::new(),
                                     content: whisper_input.content,
+                                    micro_cue: None,
                                     model_name: String::new(),
                                     duration_ms: 0,
                                     prompt_tokens: 0,
@@ -1023,8 +1097,8 @@ impl TerrariumEngine {
             // 1. Drain Creator intervention queue before starting the turn
             self.drain_interventions(&exp_id).await;
 
-            // Reload experiment detail
-            let mut detail = match self.db.get_experiment_detail(&exp_id) {
+            // Reload experiment detail (windowed for O(window) scalability on long runs)
+            let mut detail = match self.db.get_experiment_detail_windowed(&exp_id) {
                 Ok(d) => d,
                 Err(e) => {
                     self.emit(StreamEvent::EngineError {
@@ -1109,6 +1183,7 @@ impl TerrariumEngine {
                             "【导演节拍器 · 终幕倒计时】当前已进入全剧最后 20% 收束阶段（第 {}/{} 轮），请所有角色逐步收束既有伏笔、直面核心矛盾并推动冲突走向终局。",
                             next_turn, detail.config.target_total_turns
                         ),
+                        micro_cue: None,
                         model_name: String::new(),
                         duration_ms: 0,
                         prompt_tokens: 0,
@@ -1177,16 +1252,71 @@ impl TerrariumEngine {
                     desired_speaker_id = forced_id;
                 }
             }
+
+            // 3.1 检查定时线索（TimedClues）是否到达触发轮次
+            let upcoming_turn = detail.total_turns + 1;
+            let mut due_clue_indices: Vec<usize> = Vec::new();
+            for (idx, clue) in detail.config.timed_clues.iter().enumerate() {
+                if !clue.triggered
+                    && upcoming_turn >= clue.trigger_turn
+                    && !clue.content.trim().is_empty()
+                {
+                    due_clue_indices.push(idx);
+                }
+            }
+            if !due_clue_indices.is_empty() {
+                for idx in due_clue_indices {
+                    detail.config.timed_clues[idx].triggered = true;
+                    let clue_text = detail.config.timed_clues[idx].content.trim().to_string();
+                    let clue_seq = self.db.next_seq(&exp_id).unwrap_or(1);
+                    let clue_msg = TimelineMessage {
+                        id: Uuid::new_v4().to_string(),
+                        experiment_id: exp_id.clone(),
+                        seq: clue_seq,
+                        turn_number: upcoming_turn,
+                        role: SpeakerRole::GodSystem,
+                        agent_id: None,
+                        room_id: "main".to_string(),
+                        reasoning_content: String::new(),
+                        content: format!("【定时线索 · 现场新发现】{}", clue_text),
+                        micro_cue: None,
+                        model_name: String::new(),
+                        duration_ms: 0,
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        total_tokens: 0,
+                        whisper_consumed: false,
+                        created_at: Utc::now().to_rfc3339(),
+                    };
+                    if self.db.append_message(&clue_msg).is_ok() {
+                        detail.messages.push(clue_msg.clone());
+                        self.emit(StreamEvent::MessageAdded {
+                            experiment_id: exp_id.clone(),
+                            message: clue_msg,
+                        })
+                        .await;
+                    }
+                }
+                let _ = self
+                    .db
+                    .update_experiment(&exp_id, &detail.title, &detail.config);
+                self.emit(StreamEvent::ConfigHotUpdated {
+                    experiment_id: exp_id.clone(),
+                    config: detail.config.clone(),
+                })
+                .await;
+            }
+
             let speaker_idx = detail
                 .config
                 .agents
                 .iter()
                 .position(|a| a.id == desired_speaker_id)
                 .unwrap_or(0);
-            let node_cfg = &detail.config.agents[speaker_idx];
+            let speaker_id = detail.config.agents[speaker_idx].id.clone();
             let agent_private_note = detail
                 .private_notes
-                .get(&node_cfg.id)
+                .get(&speaker_id)
                 .map(|s| s.as_str())
                 .unwrap_or("");
 
@@ -1198,7 +1328,7 @@ impl TerrariumEngine {
             let mut compacted_until_seq = detail.compacted_until_seq;
             let rolled_mood = maybe_roll_mood_dice(&detail.config);
             let mut payload = build_flipped_messages_with_room(
-                &node_cfg.id,
+                &speaker_id,
                 &detail.config,
                 &detail.messages,
                 &compacted_summary,
@@ -1246,8 +1376,24 @@ impl TerrariumEngine {
                     &compacted_summary,
                     compacted_until_seq,
                 );
+                if !comp.private_state_snapshots.is_empty() {
+                    let mut snapshot_changed = false;
+                    for ag in &mut detail.config.agents {
+                        if let Some(snap) = comp.private_state_snapshots.get(&ag.id) {
+                            if ag.private_state_snapshot != *snap {
+                                ag.private_state_snapshot = snap.clone();
+                                snapshot_changed = true;
+                            }
+                        }
+                    }
+                    if snapshot_changed {
+                        let _ = self
+                            .db
+                            .update_experiment(&exp_id, &detail.title, &detail.config);
+                    }
+                }
                 payload = build_flipped_messages_with_room(
-                    &node_cfg.id,
+                    &speaker_id,
                     &detail.config,
                     &detail.messages,
                     &compacted_summary,
@@ -1289,6 +1435,8 @@ impl TerrariumEngine {
                     }
                 }
             }
+
+            let node_cfg = &detail.config.agents[speaker_idx];
 
             let msg_id = Uuid::new_v4().to_string();
             let context_usage_pct = ((est_prompt_tokens * 100) / ctx_limit).min(999) as u16;
@@ -1378,6 +1526,7 @@ impl TerrariumEngine {
                                 .unwrap_or_else(|| "main".to_string()),
                             reasoning_content: String::new(),
                             content: format!("{} {}", node_cfg.label, PASS_NOTICE_SUFFIX),
+                            micro_cue: None,
                             model_name: String::new(),
                             duration_ms: res.duration_ms,
                             prompt_tokens: res.usage.prompt_tokens,
@@ -1434,11 +1583,12 @@ impl TerrariumEngine {
                         .iter()
                         .map(|a| a.label.as_str())
                         .collect();
-                    let sanitized_content = strip_leading_speaker_prefix(
+                    let prefix_stripped = strip_leading_speaker_prefix(
                         &res.content,
                         &node_cfg.label,
                         &all_agent_labels,
                     );
+                    let (sanitized_content, micro_cue) = extract_micro_cue(&prefix_stripped);
 
                     let seq = self.db.next_seq(&exp_id).unwrap_or(1);
                     let final_msg = TimelineMessage {
@@ -1451,6 +1601,7 @@ impl TerrariumEngine {
                         room_id: current_room_id,
                         reasoning_content: res.reasoning_content,
                         content: sanitized_content,
+                        micro_cue,
                         model_name: node_cfg.model_name.clone(),
                         duration_ms: res.duration_ms,
                         prompt_tokens: res.usage.prompt_tokens,
@@ -1525,6 +1676,7 @@ impl TerrariumEngine {
                                     "【空间变动】{} 与 {} 结束了私聊，各自回到大厅。",
                                     l1, l2
                                 ),
+                                micro_cue: None,
                                 model_name: String::new(),
                                 duration_ms: 0,
                                 prompt_tokens: 0,
@@ -2273,6 +2425,7 @@ mod tests {
             room_id: "main".to_string(),
             reasoning_content: String::new(),
             content: "阿哲 看了一眼消息，没接话".to_string(),
+            micro_cue: None,
             model_name: String::new(),
             duration_ms: 0,
             prompt_tokens: 0,

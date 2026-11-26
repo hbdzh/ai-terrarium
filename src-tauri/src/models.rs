@@ -14,6 +14,10 @@ fn default_theme_preference() -> String {
     "system".to_string()
 }
 
+fn default_local_api_port() -> u16 {
+    17890
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiPrefs {
@@ -22,6 +26,12 @@ pub struct UiPrefs {
     pub inspector_width_pct: u32,
     #[serde(default = "default_theme_preference")]
     pub theme_preference: String,
+    #[serde(default)]
+    pub enable_local_api: bool,
+    #[serde(default = "default_local_api_port")]
+    pub local_api_port: u16,
+    #[serde(default)]
+    pub local_api_token: String,
 }
 
 impl Default for UiPrefs {
@@ -31,6 +41,9 @@ impl Default for UiPrefs {
             inspector_open: true,
             inspector_width_pct: 34,
             theme_preference: default_theme_preference(),
+            enable_local_api: false,
+            local_api_port: default_local_api_port(),
+            local_api_token: String::new(),
         }
     }
 }
@@ -71,6 +84,23 @@ pub struct NodeConfig {
     #[serde(default = "default_thinking_level")]
     pub thinking_level: String,
     pub system_prompt: String,
+    #[serde(default)]
+    pub secret_goal: String,
+    #[serde(default)]
+    pub goal_achieved: bool,
+    #[serde(default)]
+    pub private_state_snapshot: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TimedClue {
+    #[serde(default, alias = "trigger_turn")]
+    pub trigger_turn: u32,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub triggered: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -686,6 +716,8 @@ pub struct ExperimentConfig {
     #[serde(default)]
     pub intuitive_fast_reply: bool,
     #[serde(default)]
+    pub timed_clues: Vec<TimedClue>,
+    #[serde(default)]
     pub agents: Vec<NodeConfig>,
     // Legacy compatibility fields for reading older saved configs
     #[serde(default, skip_serializing)]
@@ -800,6 +832,7 @@ impl Default for ExperimentConfig {
             allow_pass_turn: false,
             random_mood_dice: false,
             intuitive_fast_reply: false,
+            timed_clues: Vec::new(),
             agents: vec![
                 NodeConfig {
                     id: "AiA".to_string(),
@@ -811,6 +844,9 @@ impl Default for ExperimentConfig {
                     temperature: 0.9,
                     thinking_level: default_thinking_level(),
                     system_prompt: preset.node_a_prompt,
+                    secret_goal: String::new(),
+                    goal_achieved: false,
+                    private_state_snapshot: String::new(),
                 },
                 NodeConfig {
                     id: "AiB".to_string(),
@@ -822,6 +858,9 @@ impl Default for ExperimentConfig {
                     temperature: 0.9,
                     thinking_level: default_thinking_level(),
                     system_prompt: preset.node_b_prompt,
+                    secret_goal: String::new(),
+                    goal_achieved: false,
+                    private_state_snapshot: String::new(),
                 },
             ],
             node_a: None,
@@ -836,6 +875,9 @@ impl Default for ExperimentConfig {
                 temperature: 0.3,
                 thinking_level: default_thinking_level(),
                 system_prompt: "你负责从第三人称视角分析多角色对话的局势走向与关系变化。".to_string(),
+                secret_goal: String::new(),
+                goal_achieved: false,
+                private_state_snapshot: String::new(),
             },
         }
     }
@@ -909,6 +951,8 @@ pub struct TimelineMessage {
     #[serde(default)]
     pub reasoning_content: String,
     pub content: String,
+    #[serde(default)]
+    pub micro_cue: Option<String>,
     pub model_name: String,
     pub duration_ms: u64,
     pub prompt_tokens: u64,
@@ -1356,6 +1400,12 @@ pub enum StreamEvent {
         experiment_id: String,
         total_turns: u32,
         target_turns: u32,
+    },
+    SecretGoalAchieved {
+        experiment_id: String,
+        agent_id: String,
+        agent_label: String,
+        secret_goal: String,
     },
 }
 

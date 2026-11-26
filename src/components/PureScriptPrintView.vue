@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from "vue";
 import type { ExperimentDetail } from "../types";
-import { buildPureScriptDocument } from "../utils/scriptExport";
+import {
+  buildPureScriptDocument,
+  buildReplayHandoutSecrets,
+  stripMicroCueTagsClient,
+  type ReplayHandoutSecrets,
+} from "../utils/scriptExport";
 
 type PureScriptDocument = ReturnType<typeof buildPureScriptDocument>;
 
@@ -10,9 +15,20 @@ const props = defineProps<{
 }>();
 
 const doc = ref<PureScriptDocument | null>(null);
+const secrets = ref<ReplayHandoutSecrets | null>(null);
+const printMode = ref<"pure" | "replay">("pure");
 
-function refresh() {
-  doc.value = props.experiment ? buildPureScriptDocument(props.experiment) : null;
+function refresh(ev?: Event) {
+  const custom = ev as CustomEvent<{ mode?: "pure" | "replay" }> | undefined;
+  printMode.value = custom?.detail?.mode === "replay" ? "replay" : "pure";
+  if (!props.experiment) {
+    doc.value = null;
+    secrets.value = null;
+    return;
+  }
+  doc.value = buildPureScriptDocument(props.experiment);
+  secrets.value =
+    printMode.value === "replay" ? buildReplayHandoutSecrets(props.experiment) : null;
 }
 
 onMounted(() => {
@@ -132,14 +148,68 @@ defineExpose({ refresh });
               </span>
             </div>
             <p class="text-[14px] leading-[1.7] text-[#1D1D1F] whitespace-pre-wrap pl-3.5">
-              {{ item.content }}
+              {{ printMode === "replay" ? stripMicroCueTagsClient(item.content) : item.content }}
             </p>
           </article>
         </template>
       </main>
 
+      <section
+        v-if="printMode === 'replay' && secrets"
+        class="mt-10 pt-8 border-t-2 border-dashed border-slate-300 break-before-page space-y-6"
+      >
+        <div>
+          <h2 class="text-lg font-bold text-[#1D1D1F] mb-3">幕后真相与复盘档案</h2>
+          <div class="space-y-3">
+            <div
+              v-for="ag in secrets.agents"
+              :key="ag.label"
+              class="p-3.5 rounded-xl bg-slate-50 border border-slate-200 break-inside-avoid space-y-1.5"
+            >
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[13px] font-bold text-[#1D1D1F]">{{ ag.label }}</span>
+                <span
+                  v-if="ag.secretGoal"
+                  class="px-2 py-0.5 rounded-full text-[10.5px] font-medium"
+                  :class="ag.goalAchieved ? 'bg-amber-100 text-amber-800' : 'bg-slate-200 text-slate-600'"
+                >
+                  {{ ag.goalAchieved ? "🏆 暗线已达成" : "暗线未达成" }}
+                </span>
+              </div>
+              <p class="text-[12px] leading-relaxed text-slate-700 whitespace-pre-wrap">{{ ag.systemPrompt }}</p>
+              <p v-if="ag.secretGoal" class="text-[11.5px] text-amber-800">
+                暗线目标：{{ ag.secretGoal }}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="secrets.privateRooms.length > 0" class="space-y-3">
+          <h3 class="text-sm font-bold text-[#1D1D1F]">私密里屋密谈摘要</h3>
+          <div
+            v-for="room in secrets.privateRooms"
+            :key="room.roomTitle"
+            class="p-3.5 rounded-xl bg-violet-50/50 border border-violet-200 break-inside-avoid space-y-1.5"
+          >
+            <div class="text-[12px] font-semibold text-violet-800">{{ room.roomTitle }}</div>
+            <div
+              v-for="(m, i) in room.messages"
+              :key="i"
+              class="text-[12px] leading-relaxed text-slate-700"
+            >
+              <span class="font-semibold">[第{{ m.turnNumber }}轮 {{ m.speaker }}]：</span>{{ m.content }}
+            </div>
+          </div>
+        </div>
+
+        <div class="p-4 rounded-xl bg-slate-50 border border-slate-200 break-inside-avoid">
+          <h3 class="text-sm font-bold text-[#1D1D1F] mb-1.5">最终局势分析结论</h3>
+          <pre class="whitespace-pre-wrap text-[12px] leading-relaxed text-slate-700 font-sans">{{ secrets.finalConclusion }}</pre>
+        </div>
+      </section>
+
       <footer class="mt-8 pt-3 border-t border-slate-200 text-[11px] text-slate-400">
-        AI Terrarium · 剧本导出
+        AI Terrarium · {{ printMode === "replay" ? "剧本杀复盘手卡" : "剧本导出" }}
       </footer>
     </template>
   </div>

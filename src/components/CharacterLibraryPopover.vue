@@ -162,7 +162,7 @@ function choose(card: CharacterCard) {
                 </span>
                 <span
                   v-if="card.memoryImprints && card.memoryImprints.length > 0"
-                  class="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-[1px] rounded bg-indigo-50 text-[10px] font-medium text-indigo-600"
+                  class="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-[1px] rounded bg-[var(--ds-accent-soft)] text-[10px] font-medium text-[var(--ds-accent)]"
                   :title="card.memoryImprints.join('\n')"
                 >
                   <Sparkles class="w-2.5 h-2.5" />
@@ -181,7 +181,7 @@ function choose(card: CharacterCard) {
               v-if="allowDelete && !card.isBuiltin"
               type="button"
               @click.stop="emit('delete', card.id)"
-              class="mr-1.5 p-1 rounded-md text-slate-400 opacity-0 group-hover:opacity-100 hover:text-rose-600 hover:bg-rose-50 transition shrink-0 outline-none"
+              class="mr-1.5 p-1 rounded-md text-slate-400 opacity-0 group-hover:opacity-100 hover:text-[var(--ds-danger)] hover:bg-[var(--ds-danger-soft)] transition shrink-0 outline-none"
               title="从角色库移除"
             >
               <Trash2 class="w-3.5 h-3.5" />

@@ -208,6 +208,32 @@ pub fn strip_leading_speaker_prefix(
     }
 }
 
+/// 从模型回复末尾剥离微表情破绽标签（如 `[CUE:眼神闪躲]`），返回 `(纯净正文, Option<微表情文本>)`。
+pub fn extract_micro_cue(raw: &str) -> (String, Option<String>) {
+    let mut result = String::with_capacity(raw.len());
+    let mut cue: Option<String> = None;
+    let mut rest = raw;
+
+    while let Some(start) = rest.find("[CUE:") {
+        result.push_str(&rest[..start]);
+        let after_prefix = &rest[start + 5..];
+        if let Some(end) = after_prefix.find(']') {
+            let inner = after_prefix[..end].trim();
+            if !inner.is_empty() && cue.is_none() {
+                cue = Some(inner.chars().take(16).collect());
+            }
+            rest = &after_prefix[end + 1..];
+        } else {
+            result.push_str(&rest[start..]);
+            rest = "";
+            break;
+        }
+    }
+    result.push_str(rest);
+    let cleaned = result.trim().to_string();
+    (cleaned, cue)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,5 +304,16 @@ mod tests {
             strip_leading_speaker_prefix("智能体 4 说得对，我也赞成", "智能体 3", &labels),
             "智能体 4 说得对，我也赞成"
         );
+    }
+
+    #[test]
+    fn test_extract_micro_cue() {
+        let (clean, cue) = extract_micro_cue("我昨晚一直待在房间里，哪儿也没去。[CUE:眼神闪躲]");
+        assert_eq!(clean, "我昨晚一直待在房间里，哪儿也没去。");
+        assert_eq!(cue.as_deref(), Some("眼神闪躲"));
+
+        let (clean2, cue2) = extract_micro_cue("确实没见过那把钥匙。");
+        assert_eq!(clean2, "确实没见过那把钥匙。");
+        assert_eq!(cue2, None);
     }
 }

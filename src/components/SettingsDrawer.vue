@@ -6,7 +6,6 @@ import {
   Upload,
   KeyRound,
   Telescope,
-  Clock,
   MessageCircle,
   Cpu,
   Sun,
@@ -14,7 +13,7 @@ import {
 } from "lucide-vue-next";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
-import type { ApiProfile, ExperimentConfig, NodeConfig, ThemePreference } from "../types";
+import type { ApiProfile, ExperimentConfig, NodeConfig, ThemePreference, UiPrefs } from "../types";
 import { triggerHaptic } from "../utils/native";
 import {
   applyApiProfileToNode,
@@ -24,8 +23,11 @@ import {
   syncConfigWithApiProfiles,
 } from "../utils/config";
 import { themePreference, setThemePreference } from "../utils/theme";
+import { titlebarLayoutMode, setTitlebarLayoutMode, type TitlebarLayoutMode } from "../utils/layout";
+import { isWindows } from "../utils/platform";
 import { MECHANIC_DESCRIPTIONS } from "../constants/mechanicDescriptions";
 import AdaptiveModal from "./ui/AdaptiveModal.vue";
+import CustomSelect from "./ui/CustomSelect.vue";
 import ModelSelector from "./ui/ModelSelector.vue";
 import RangeSlider from "./ui/RangeSlider.vue";
 import ToggleSwitch from "./ui/ToggleSwitch.vue";
@@ -58,7 +60,7 @@ const draft = ref<ExperimentConfig | null>(null);
 const initialSnapshot = ref("");
 const profilesDraft = ref<ApiProfile[]>([]);
 const initialProfilesSnapshot = ref("");
-const activeTab = ref<"api" | "observer" | "schedule" | "behavior" | "resources" | "appearance">("api");
+const activeTab = ref<"appearance" | "api" | "resources" | "observer" | "behavior">("appearance");
 const selectedProfileIdx = ref(0);
 const corePromptDraft = ref("");
 const corePromptInitial = ref("");
@@ -66,12 +68,11 @@ const corePromptSaving = ref(false);
 const confirmDiscardOpen = ref(false);
 
 const navTabs = [
-  { id: "api", label: "模型与 API", icon: KeyRound },
-  { id: "observer", label: "观察与分析", icon: Telescope },
-  { id: "schedule", label: "推演与调度", icon: Clock },
-  { id: "behavior", label: "对话与行为", icon: MessageCircle },
-  { id: "resources", label: "性能与资源", icon: Cpu },
-  { id: "appearance", label: "外观", icon: Sun },
+  { id: "appearance", label: "通用", icon: Sun },
+  { id: "api", label: "模型API", icon: KeyRound },
+  { id: "resources", label: "模型性能", icon: Cpu },
+  { id: "observer", label: "观察分析", icon: Telescope },
+  { id: "behavior", label: "角色行为", icon: MessageCircle },
 ] as const;
 
 function providerBadgeMeta(id: string): { letter: string; bg: string; fg: string } {
@@ -106,6 +107,50 @@ async function loadCoreEnginePrompt() {
     corePromptInitial.value = val;
   } catch {
     // ignore load failure
+  }
+}
+
+const enableLocalApiDraft = ref(false);
+const localApiPortDraft = ref(17890);
+const localApiTokenDraft = ref("");
+const localApiInitialSnapshot = ref("");
+const loadedUiPrefsBase = ref<UiPrefs | null>(null);
+
+async function loadLocalApiPrefs() {
+  try {
+    const prefs = await invoke<UiPrefs>("get_ui_prefs");
+    loadedUiPrefsBase.value = prefs;
+    enableLocalApiDraft.value = Boolean(prefs.enableLocalApi);
+    localApiPortDraft.value = prefs.localApiPort || 17890;
+    localApiTokenDraft.value = prefs.localApiToken ?? "";
+    localApiInitialSnapshot.value = JSON.stringify({
+      enableLocalApi: enableLocalApiDraft.value,
+      localApiPort: localApiPortDraft.value,
+      localApiToken: localApiTokenDraft.value,
+    });
+  } catch {
+    // ignore
+  }
+}
+
+function generateRandomLocalApiToken() {
+  const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let out = "tr_";
+  const arr = new Uint8Array(24);
+  crypto.getRandomValues(arr);
+  for (const b of arr) {
+    out += chars[b % chars.length];
+  }
+  localApiTokenDraft.value = out;
+}
+
+async function copyLocalApiToken() {
+  if (!localApiTokenDraft.value) return;
+  try {
+    await navigator.clipboard.writeText(localApiTokenDraft.value);
+    emit("notify", "访问密钥已复制到剪贴板");
+  } catch {
+    emit("notify", "复制失败，请手动复制");
   }
 }
 
@@ -204,6 +249,7 @@ watch(
       selectedProfileIdx.value = firstReadyIdx >= 0 ? firstReadyIdx : 0;
       confirmDiscardOpen.value = false;
       loadCoreEnginePrompt();
+      loadLocalApiPrefs();
     }
   },
   { immediate: true }
@@ -215,7 +261,14 @@ const isDirty = computed(() => {
   const profilesChanged =
     JSON.stringify(profilesDraft.value) !== initialProfilesSnapshot.value;
   const coreChanged = corePromptDraft.value !== corePromptInitial.value;
-  return draftChanged || profilesChanged || coreChanged;
+  const localApiChanged =
+    Boolean(localApiInitialSnapshot.value) &&
+    JSON.stringify({
+      enableLocalApi: enableLocalApiDraft.value,
+      localApiPort: localApiPortDraft.value,
+      localApiToken: localApiTokenDraft.value,
+    }) !== localApiInitialSnapshot.value;
+  return draftChanged || profilesChanged || coreChanged || localApiChanged;
 });
 
 const currentProfile = computed<ApiProfile | null>(() => {
@@ -446,6 +499,30 @@ async function handleSave() {
   if (corePromptDraft.value !== corePromptInitial.value) {
     await saveCoreEnginePrompt();
   }
+  const currentLocalSnap = JSON.stringify({
+    enableLocalApi: enableLocalApiDraft.value,
+    localApiPort: localApiPortDraft.value,
+    localApiToken: localApiTokenDraft.value,
+  });
+  if (currentLocalSnap !== localApiInitialSnapshot.value) {
+    try {
+      const latestPrefs = await invoke<UiPrefs>("get_ui_prefs").catch(
+        () => loadedUiPrefsBase.value
+      );
+      const nextPrefs: UiPrefs = {
+        leftSidebarOpen: latestPrefs?.leftSidebarOpen ?? true,
+        inspectorOpen: latestPrefs?.inspectorOpen ?? true,
+        inspectorWidthPct: latestPrefs?.inspectorWidthPct ?? 34,
+        themePreference: latestPrefs?.themePreference ?? "system",
+        enableLocalApi: enableLocalApiDraft.value,
+        localApiPort: Math.min(65535, Math.max(1024, Math.round(localApiPortDraft.value || 17890))),
+        localApiToken: localApiTokenDraft.value.trim(),
+      };
+      await invoke("save_ui_prefs", { prefs: nextPrefs });
+    } catch (err: any) {
+      emit("notify", `本地外部接口配置保存失败: ${err?.toString?.() ?? err}`);
+    }
+  }
   confirmDiscardOpen.value = false;
   triggerHaptic("confirm");
   emit("saveApiProfiles", normalizedProfiles);
@@ -559,7 +636,7 @@ defineExpose({
             >
               <span
                 v-if="activeTab === tab.id"
-                class="absolute left-1 top-2 bottom-2 w-[2.5px] rounded-full bg-[#7965CC]"
+                class="absolute left-1 top-2 bottom-2 w-[2.5px] rounded-full bg-[#007AFF]"
               ></span>
               <component
                 :is="tab.icon"
@@ -595,7 +672,7 @@ defineExpose({
       <!-- Right Pure White Content Column on Desktop, Inset Grouped Canvas on Mobile -->
       <div class="flex-1 min-w-0 flex flex-col bg-[#F2F2F7] md:bg-white overflow-hidden">
         <!-- Desktop Clean Content Header -->
-        <div class="hidden md:flex items-center justify-between px-6 h-13 border-b border-[#ECECF0] shrink-0">
+        <div class="hidden md:flex items-center justify-between px-6 h-13 shrink-0">
           <h2 class="text-[13.5px] font-semibold text-[#25262A]">
             {{ navTabs.find((t) => t.id === activeTab)?.label ?? "设置" }}
           </h2>
@@ -612,11 +689,6 @@ defineExpose({
           <div class="max-w-[600px] mx-auto space-y-5">
           <!-- Tab 1: 模型与 API (2-Column Provider List + Detail) -->
           <template v-if="activeTab === 'api'">
-            <div>
-              <h3 class="text-[20px] font-semibold text-[#25262A] tracking-tight">模型与 API</h3>
-              <p class="text-[12.5px] text-[#858A95] mt-1">管理模型服务商、默认模型与访问凭据。</p>
-            </div>
-
             <div class="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-5 items-start">
               <!-- Provider List -->
               <div class="space-y-1 md:border-r md:border-[#ECECF0] md:pr-4">
@@ -632,7 +704,7 @@ defineExpose({
                     class="shrink-0 md:w-full flex items-center gap-2.5 px-2.5 py-2 rounded-[9px] text-left transition-colors outline-none"
                     :class="
                       selectedProfileIdx === idx
-                        ? 'bg-[#F0EDF9] text-[#25262A] font-medium'
+                        ? 'bg-[#EBF4FF] text-[#25262A] font-medium'
                         : 'hover:bg-[#F5F5F7] text-[#666B76]'
                     "
                   >
@@ -694,7 +766,7 @@ defineExpose({
                     v-model="currentProfile.baseUrl"
                     @blur="maybePrefetchModels(currentProfile)"
                     :placeholder="DEFAULT_BASE_URL"
-                    class="w-full h-10 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] font-mono outline-none focus:border-[#7965CC] transition"
+                    class="w-full h-10 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] font-mono outline-none focus:border-[#007AFF] transition"
                   />
                 </div>
 
@@ -705,7 +777,7 @@ defineExpose({
                     @blur="maybePrefetchModels(currentProfile)"
                     type="password"
                     placeholder="sk-..."
-                    class="w-full h-10 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] font-mono outline-none focus:border-[#7965CC] transition"
+                    class="w-full h-10 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] font-mono outline-none focus:border-[#007AFF] transition"
                   />
                 </div>
               </div>
@@ -714,11 +786,6 @@ defineExpose({
 
           <!-- Tab 2: 观察与分析 -->
           <template v-else-if="activeTab === 'observer'">
-            <div>
-              <h3 class="text-[20px] font-semibold text-[#25262A] tracking-tight">观察与分析</h3>
-              <p class="text-[12.5px] text-[#858A95] mt-1">设置观察员，以及推演过程中的自动分析方式。</p>
-            </div>
-
             <div class="space-y-4">
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                 <div>
@@ -726,20 +793,16 @@ defineExpose({
                   <input
                     v-model="draft.nodeC.label"
                     placeholder="局势分析"
-                    class="w-full h-10 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] outline-none focus:border-[#7965CC] transition"
+                    class="w-full h-10 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] outline-none focus:border-[#007AFF] transition"
                   />
                 </div>
                 <div>
                   <label class="block text-[12px] font-medium text-[#666B76] mb-1.5">使用的 API 配置</label>
-                  <select
-                    :value="draft.nodeC.apiProfileId || selectableProfiles[0]?.id"
-                    @change="selectObserverProfile(($event.target as HTMLSelectElement).value)"
-                    class="w-full h-10 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3 text-[13px] text-[#25262A] outline-none focus:border-[#7965CC] transition"
-                  >
-                    <option v-for="prof in selectableProfiles" :key="prof.id" :value="prof.id">
-                      {{ prof.name }} ({{ prof.modelName }})
-                    </option>
-                  </select>
+                  <CustomSelect
+                    :model-value="draft.nodeC.apiProfileId || selectableProfiles[0]?.id || ''"
+                    :options="selectableProfiles.map((p) => ({ value: p.id, label: `${p.name} (${p.modelName})` }))"
+                    @update:model-value="selectObserverProfile($event)"
+                  />
                 </div>
               </div>
 
@@ -766,7 +829,7 @@ defineExpose({
                   v-model="draft.nodeC.systemPrompt"
                   rows="4"
                   placeholder="输入局势分析提示词..."
-                  class="w-full resize-none rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 py-2.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] leading-relaxed outline-none focus:border-[#7965CC] transition"
+                  class="w-full resize-none rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 py-2.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] leading-relaxed outline-none focus:border-[#007AFF] transition"
                 ></textarea>
               </div>
 
@@ -797,100 +860,9 @@ defineExpose({
             </div>
           </template>
 
-          <!-- Tab 3: 推演与调度 -->
-          <template v-else-if="activeTab === 'schedule'">
-            <div>
-              <h3 class="text-[20px] font-semibold text-[#25262A] tracking-tight">推演与调度</h3>
-              <p class="text-[12.5px] text-[#858A95] mt-1">控制推演运行节奏、轮次限制及全局规则。</p>
-            </div>
-
-            <div class="space-y-4">
-              <div>
-                <div class="flex items-center justify-between text-[13px]">
-                  <span class="font-medium text-[#25262A]">轮次停顿间隔</span>
-                  <span class="font-medium tabular-nums text-[#25262A] text-[12.5px]">{{ Number(draft.pauseSeconds).toFixed(1) }} s</span>
-                </div>
-                <p class="text-[11.5px] text-[#858A95] mt-0.5 mb-1">每轮发言结束后的等待间隔。</p>
-                <RangeSlider
-                  :model-value="draft.pauseSeconds"
-                  :min="0.5"
-                  :max="10"
-                  :step="0.5"
-                  @update:model-value="draft.pauseSeconds = $event"
-                />
-              </div>
-
-              <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                <div class="min-w-0">
-                  <div class="text-[13px] font-medium text-[#25262A]">连续运行上限</div>
-                  <div class="text-[11.5px] text-[#858A95] mt-0.5">单次开始推进该轮数后自动暂停。</div>
-                </div>
-                <input
-                  v-model.number="draft.maxConsecutiveTurns"
-                  type="number"
-                  min="1"
-                  max="1000"
-                  class="w-full sm:w-28 h-9 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3 text-[13px] font-mono text-[#25262A] outline-none focus:border-[#7965CC] transition shrink-0"
-                />
-              </div>
-
-              <div class="pt-4 border-t border-[#ECECF0] space-y-4">
-                <div class="text-[12px] font-medium text-[#858A95]">剧情与规则</div>
-
-                <div class="space-y-2">
-                  <div class="flex items-center justify-between gap-3">
-                    <div class="min-w-0">
-                      <div class="text-[13px] font-medium text-[#25262A]">三幕式剧情节奏</div>
-                      <div class="text-[11.5px] text-[#858A95] mt-0.5">按目标总轮数控制剧情推进与收尾。</div>
-                    </div>
-                    <ToggleSwitch v-model="draft.enableNarrativeArc" />
-                  </div>
-                  <div
-                    v-if="draft.enableNarrativeArc"
-                    class="flex items-center justify-between gap-2 pl-3 py-1 border-l-2 border-[#E5E5EA]"
-                  >
-                    <span class="text-[12px] text-[#666B76]">目标总轮数</span>
-                    <input
-                      v-model.number="draft.targetTotalTurns"
-                      type="number"
-                      min="5"
-                      max="500"
-                      class="w-24 h-8 rounded-[8px] border border-[#E5E5EA] bg-[#F5F5F7] px-2.5 text-[12.5px] font-mono text-[#25262A] outline-none focus:border-[#7965CC]"
-                    />
-                  </div>
-                </div>
-
-                <div class="space-y-2">
-                  <div class="flex items-center justify-between gap-2">
-                    <span class="text-[12.5px] font-medium text-[#25262A]">全局基础规则 · 自由漫谈跳过</span>
-                    <button
-                      type="button"
-                      @click="resetCoreEnginePrompt"
-                      :disabled="corePromptSaving"
-                      class="text-[11.5px] text-[#666B76] hover:text-[#25262A] transition disabled:opacity-50"
-                    >
-                      恢复默认
-                    </button>
-                  </div>
-                  <textarea
-                    v-model="corePromptDraft"
-                    rows="4"
-                    placeholder="编辑全局规则..."
-                    class="w-full resize-none rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 py-2.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] leading-relaxed outline-none focus:border-[#7965CC] transition"
-                  ></textarea>
-                </div>
-              </div>
-            </div>
-          </template>
-
-          <!-- Tab 4: 对话与行为 -->
+          <!-- Tab 4: 角色行为 -->
           <template v-else-if="activeTab === 'behavior'">
-            <div>
-              <h3 class="text-[20px] font-semibold text-[#25262A] tracking-tight">对话与行为</h3>
-              <p class="text-[12.5px] text-[#858A95] mt-1">管理智能体的发言方式、独立记忆与互动行为。</p>
-            </div>
-
-            <div class="pt-3 border-t border-[#ECECF0] space-y-4">
+            <div class="space-y-4">
               <div class="text-[12px] font-medium text-[#858A95]">角色行为</div>
 
               <div
@@ -954,7 +926,7 @@ defineExpose({
                       class="px-3 py-1 rounded-full text-[11.5px] font-medium transition"
                       :class="
                         draft.boardApprovalMode === 'guardian'
-                          ? 'bg-[#7965CC] text-white'
+                          ? 'bg-[#007AFF] text-white'
                           : 'text-[#666B76]'
                       "
                     >
@@ -979,6 +951,29 @@ defineExpose({
 
             <div class="pt-4 border-t border-[#ECECF0] space-y-4">
               <div class="text-[12px] font-medium text-[#858A95]">对话质感</div>
+
+              <div class="space-y-2">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="min-w-0">
+                    <div class="text-[13px] font-medium text-[#25262A]">三幕式剧情节奏</div>
+                    <div class="text-[11.5px] text-[#858A95] mt-0.5">按目标总轮数控制剧情推进与收尾。</div>
+                  </div>
+                  <ToggleSwitch v-model="draft.enableNarrativeArc" />
+                </div>
+                <div
+                  v-if="draft.enableNarrativeArc"
+                  class="flex items-center justify-between gap-2 pl-3 py-1 border-l-2 border-[#E5E5EA]"
+                >
+                  <span class="text-[12px] text-[#666B76]">目标总轮数</span>
+                  <input
+                    v-model.number="draft.targetTotalTurns"
+                    type="number"
+                    min="5"
+                    max="500"
+                    class="w-24 h-8 rounded-[8px] border border-[#E5E5EA] bg-[#F5F5F7] px-2.5 text-[12.5px] font-mono text-[#25262A] outline-none focus:border-[#007AFF]"
+                  />
+                </div>
+              </div>
 
               <div class="flex items-center justify-between gap-3">
                 <div class="min-w-0">
@@ -1014,11 +1009,6 @@ defineExpose({
 
           <!-- Tab 5: 性能与资源 -->
           <template v-else-if="activeTab === 'resources'">
-            <div>
-              <h3 class="text-[20px] font-semibold text-[#25262A] tracking-tight">性能与资源</h3>
-              <p class="text-[12.5px] text-[#858A95] mt-1">控制推理深度、缓存策略与 Token 使用上限。</p>
-            </div>
-
             <div class="space-y-4">
               <div class="flex items-center justify-between gap-3">
                 <div class="min-w-0">
@@ -1086,7 +1076,7 @@ defineExpose({
                       type="number"
                       min="0"
                       step="5000"
-                      class="w-32 h-9 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3 text-[13px] font-mono text-[#25262A] outline-none focus:border-[#7965CC] transition"
+                      class="w-32 h-9 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3 text-[13px] font-mono text-[#25262A] outline-none focus:border-[#007AFF] transition"
                     />
                   </div>
                   <div class="flex justify-end">
@@ -1117,7 +1107,7 @@ defineExpose({
                       type="number"
                       min="2048"
                       step="4096"
-                      class="w-full h-9 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3 text-[13px] font-mono text-[#25262A] outline-none focus:border-[#7965CC] transition"
+                      class="w-full h-9 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3 text-[13px] font-mono text-[#25262A] outline-none focus:border-[#007AFF] transition"
                     />
                   </div>
                   <div>
@@ -1135,16 +1125,44 @@ defineExpose({
                   </div>
                 </div>
               </div>
+
+              <div class="pt-4 border-t border-[#ECECF0] space-y-4">
+                <div class="text-[12px] font-medium text-[#858A95]">运行调度</div>
+
+                <div>
+                  <div class="flex items-center justify-between text-[13px]">
+                    <span class="font-medium text-[#25262A]">轮次停顿间隔</span>
+                    <span class="font-medium tabular-nums text-[#25262A] text-[12.5px]">{{ Number(draft.pauseSeconds).toFixed(1) }} s</span>
+                  </div>
+                  <p class="text-[11.5px] text-[#858A95] mt-0.5 mb-1">每轮发言结束后的等待间隔。</p>
+                  <RangeSlider
+                    :model-value="draft.pauseSeconds"
+                    :min="0.5"
+                    :max="10"
+                    :step="0.5"
+                    @update:model-value="draft.pauseSeconds = $event"
+                  />
+                </div>
+
+                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                  <div class="min-w-0">
+                    <div class="text-[13px] font-medium text-[#25262A]">连续运行上限</div>
+                    <div class="text-[11.5px] text-[#858A95] mt-0.5">单次开始推进该轮数后自动暂停。</div>
+                  </div>
+                  <input
+                    v-model.number="draft.maxConsecutiveTurns"
+                    type="number"
+                    min="1"
+                    max="1000"
+                    class="w-full sm:w-28 h-9 rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3 text-[13px] font-mono text-[#25262A] outline-none focus:border-[#007AFF] transition shrink-0"
+                  />
+                </div>
+              </div>
             </div>
           </template>
 
-          <!-- Tab 6: 外观 -->
+          <!-- Tab 6: 通用 -->
           <template v-else-if="activeTab === 'appearance'">
-            <div>
-              <h3 class="text-[20px] font-semibold text-[#25262A] tracking-tight">外观</h3>
-              <p class="text-[12.5px] text-[#858A95] mt-1">根据系统环境或个人偏好调整界面主题。</p>
-            </div>
-
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <button
                 v-for="opt in [
@@ -1158,7 +1176,7 @@ defineExpose({
                 class="text-left rounded-[12px] border p-2.5 transition-all outline-none"
                 :class="
                   themePreference === opt.id
-                    ? 'border-[#7965CC] bg-[#F0EDF9]/50 ring-1 ring-[#7965CC]/30'
+                    ? 'border-[#007AFF] bg-[#EBF4FF]/50 ring-1 ring-[#007AFF]/30'
                     : 'border-[#E5E5EA] bg-white hover:bg-[#F5F5F7]'
                 "
               >
@@ -1181,7 +1199,7 @@ defineExpose({
                 </div>
                 <div class="flex items-center justify-between px-0.5">
                   <span class="text-[12.5px] font-medium text-[#25262A]">{{ opt.label }}</span>
-                  <Check v-if="themePreference === opt.id" class="w-3.5 h-3.5 text-[#7965CC]" />
+                  <Check v-if="themePreference === opt.id" class="w-3.5 h-3.5 text-[#007AFF]" />
                 </div>
               </button>
             </div>
@@ -1189,12 +1207,120 @@ defineExpose({
             <p class="text-[12px] text-[#858A95]">
               主题实时预览，统一应用于主窗口、观察面板和设置弹窗。
             </p>
+
+            <div v-if="isWindows" class="pt-4 border-t border-[#ECECF0] space-y-2.5">
+              <div class="flex items-center justify-between gap-2">
+                <div>
+                  <div class="text-[13px] font-medium text-[#25262A]">顶部栏布局</div>
+                  <div class="text-[11.5px] text-[#858A95] mt-0.5">切换独立操作栏（标准）或标题栏一体式（精简）。</div>
+                </div>
+                <div class="inline-flex p-0.5 rounded-[9px] bg-[#F2F2F5] shrink-0">
+                  <button
+                    v-for="modeOpt in [
+                      { id: 'standard', label: '标准模式' },
+                      { id: 'compact', label: '精简模式' },
+                    ]"
+                    :key="modeOpt.id"
+                    type="button"
+                    @click="triggerHaptic('light'); setTitlebarLayoutMode(modeOpt.id as TitlebarLayoutMode)"
+                    class="px-3 py-1 rounded-[7px] text-[12px] font-medium transition-all"
+                    :class="
+                      titlebarLayoutMode === modeOpt.id
+                        ? 'bg-white text-[#25262A] shadow-2xs'
+                        : 'text-[#666B76] hover:text-[#25262A]'
+                    "
+                  >
+                    {{ modeOpt.label }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="pt-4 border-t border-[#ECECF0] space-y-2">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[12.5px] font-medium text-[#25262A]">全局基础规则 · 自由漫谈跳过</span>
+                <button
+                  type="button"
+                  @click="resetCoreEnginePrompt"
+                  :disabled="corePromptSaving"
+                  class="text-[11.5px] text-[#666B76] hover:text-[#25262A] transition disabled:opacity-50"
+                >
+                  恢复默认
+                </button>
+              </div>
+              <textarea
+                v-model="corePromptDraft"
+                rows="4"
+                placeholder="编辑全局规则..."
+                class="w-full resize-none rounded-[9px] border border-[#E5E5EA] bg-[#F5F5F7] focus:bg-white px-3.5 py-2.5 text-[13px] text-[#25262A] placeholder:text-[#969BA5] leading-relaxed outline-none focus:border-[#007AFF] transition"
+              ></textarea>
+            </div>
+
+            <!-- 外部联动接口（本地 HTTP / WS） -->
+            <div class="pt-4 border-t border-[#ECECF0] space-y-3">
+              <div class="flex items-center justify-between gap-3">
+                <div>
+                  <div class="text-[13px] font-medium text-[#25262A]">外部联动接口（本地 HTTP / WS）</div>
+                  <div class="text-[11.5px] text-[#858A95] mt-0.5">
+                    开启后仅在 127.0.0.1 监听，供外部脚本、弹幕互动或 MCP 接入
+                  </div>
+                </div>
+                <ToggleSwitch v-model="enableLocalApiDraft" />
+              </div>
+
+              <div
+                v-if="enableLocalApiDraft"
+                class="p-3.5 rounded-[10px] bg-[#F7F7F9] border border-[#E6E6EB] space-y-3"
+              >
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label class="block text-[11.5px] text-[#666B76] mb-1">监听端口</label>
+                    <input
+                      v-model.number="localApiPortDraft"
+                      type="number"
+                      min="1024"
+                      max="65535"
+                      class="w-full h-8 rounded-[8px] border border-[#E2E2E6] bg-white px-2.5 text-[12.5px] font-mono outline-none focus:border-[#007AFF]"
+                    />
+                  </div>
+                  <div class="sm:col-span-2">
+                    <label class="block text-[11.5px] text-[#666B76] mb-1">访问密钥（可选）</label>
+                    <div class="flex items-center gap-1.5">
+                      <input
+                        v-model="localApiTokenDraft"
+                        type="text"
+                        placeholder="留空则本机免密访问"
+                        class="flex-1 h-8 rounded-[8px] border border-[#E2E2E6] bg-white px-2.5 text-[12px] font-mono outline-none focus:border-[#007AFF]"
+                      />
+                      <button
+                        type="button"
+                        @click="generateRandomLocalApiToken"
+                        class="h-8 px-2.5 rounded-[8px] border border-[#E2E2E6] bg-white hover:bg-[#EFEFF2] text-[11.5px] text-[#25262A] shrink-0 transition"
+                      >
+                        随机生成
+                      </button>
+                      <button
+                        type="button"
+                        :disabled="!localApiTokenDraft"
+                        @click="copyLocalApiToken"
+                        class="h-8 px-2.5 rounded-[8px] border border-[#E2E2E6] bg-white hover:bg-[#EFEFF2] disabled:opacity-40 text-[11.5px] text-[#25262A] shrink-0 transition"
+                      >
+                        复制
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div class="text-[11.5px] font-mono text-[#666B76]">
+                  接口地址：http://127.0.0.1:{{ localApiPortDraft || 17890 }}
+                </div>
+              </div>
+            </div>
           </template>
           </div>
         </div>
 
         <!-- Clean Minimal Footer -->
-        <div class="shrink-0 px-4 md:px-6 py-3 border-t border-[#ECECF0] bg-white">
+        <div class="shrink-0 px-4 md:px-6 py-3 bg-white">
           <div class="max-w-[600px] mx-auto flex items-center justify-between gap-3">
             <span class="hidden sm:inline text-[11.5px] text-[#858A95]">
               全局 API 与本地推演设置
@@ -1219,13 +1345,14 @@ defineExpose({
         </div>
       </div>
 
-      <!-- Unsaved Changes Confirmation Dialog Overlay -->
-      <div
-        v-if="confirmDiscardOpen"
-        class="absolute inset-0 z-50 bg-black/25 backdrop-blur-[2px] flex items-center justify-center p-4"
-        @click.self="confirmDiscardOpen = false"
+      <!-- Unsaved Changes Confirmation Dialog -->
+      <AdaptiveModal
+        :open="confirmDiscardOpen"
+        title="尚未保存配置修改"
+        max-width-class="max-w-[360px]"
+        @close="confirmDiscardOpen = false"
       >
-        <div class="w-full max-w-[360px] rounded-2xl bg-white border border-black/[0.08] shadow-[0_20px_50px_rgba(0,0,0,0.22)] p-5 space-y-4">
+        <div class="p-5 space-y-4">
           <div class="space-y-1.5">
             <h3 class="text-[15px] font-semibold text-[#1D1D1F]">尚未保存配置修改</h3>
             <p class="text-[13px] text-slate-500 leading-relaxed">
@@ -1243,7 +1370,7 @@ defineExpose({
             <button
               type="button"
               @click="discardAndClose"
-              class="h-8 px-3 rounded-lg text-[12.5px] font-medium text-rose-600 hover:bg-rose-50 transition outline-none"
+              class="h-8 px-3 rounded-lg text-[12.5px] font-medium text-[var(--ds-danger)] hover:bg-[var(--ds-danger-soft)] transition outline-none"
             >
               放弃修改
             </button>
@@ -1256,7 +1383,7 @@ defineExpose({
             </button>
           </div>
         </div>
-      </div>
+      </AdaptiveModal>
     </div>
   </AdaptiveModal>
 </template>

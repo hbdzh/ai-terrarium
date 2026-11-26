@@ -42,7 +42,7 @@ function onInput(e: Event) {
     >
       <div
         class="h-full rounded-full transition-[width] duration-75"
-        :class="dark ? 'bg-[#9583E0]' : 'bg-[#7965CC] dark:bg-[#9583E0]'"
+        :class="dark ? 'bg-[#0A84FF]' : 'bg-[#007AFF] dark:bg-[#0A84FF]'"
         :style="{ width: `${pct}%` }"
       ></div>
     </div>

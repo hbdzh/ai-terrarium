@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -82,6 +84,47 @@ pub struct CompactionResult {
     pub new_until_seq: i64,
     pub tokens_before: u64,
     pub tokens_after: u64,
+    pub private_state_snapshots: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CompactionJsonPayload {
+    #[serde(default)]
+    summary: String,
+    #[serde(default, alias = "private_snapshots")]
+    private_snapshots: HashMap<String, String>,
+}
+
+pub fn parse_compaction_output(raw: &str, config: &ExperimentConfig) -> (String, HashMap<String, String>) {
+    let cleaned = strip_think_tags(raw);
+    let trimmed = cleaned.trim();
+    let no_fence = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(|s| s.trim_end_matches("```").trim())
+        .unwrap_or(trimmed);
+
+    if let (Some(start), Some(end)) = (no_fence.find('{'), no_fence.rfind('}')) {
+        if start <= end {
+            if let Ok(parsed) = serde_json::from_str::<CompactionJsonPayload>(&no_fence[start..=end]) {
+                if !parsed.summary.trim().is_empty() {
+                    let mut snapshots = HashMap::new();
+                    for (k, v) in parsed.private_snapshots {
+                        let val: String = v.trim().chars().take(60).collect();
+                        if val.is_empty() {
+                            continue;
+                        }
+                        if let Some(ag) = config.agents.iter().find(|a| a.id == k || a.label == k) {
+                            snapshots.insert(ag.id.clone(), val);
+                        }
+                    }
+                    return (parsed.summary.trim().to_string(), snapshots);
+                }
+            }
+        }
+    }
+    (cleaned, HashMap::new())
 }
 
 #[derive(Serialize)]
@@ -212,12 +255,24 @@ pub async fn maybe_compact_history(
         return Ok(None);
     }
 
-    let system_prompt = "你是一个高保真记忆压缩引擎。请将早期多智能体对话（以及已有历史纪要）无损浓缩为一份结构化中文纪要。\n\
-        必须严格保留：\n\
-        1. 已确认的客观事实、核心设定与白板共识\n\
-        2. 各参与者的关键立场、核心分歧与立场转变\n\
-        3. 尚未解决的悬念、伏笔与核心问题\n\
-        要求：客观精炼（控制在 350~600 字以内），禁止客套，只输出纪要正文，不要添加多余标题前缀。";
+    let agent_roster = config
+        .agents
+        .iter()
+        .map(|a| format!("- id: \"{}\", 角色名: \"{}\"", a.id, a.label))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let system_prompt = format!(
+        "你是一个双轨制高保真记忆压缩引擎。请将早期多智能体对话（以及已有历史纪要）无损浓缩为严格合法的 JSON 对象（禁止输出多余说明）：\n\
+        {{\n  \
+          \"summary\": \"350~600字以内的客观公共历史纪要正文（保留：1.已确认客观事实与白板共识；2.各参与者关键立场与分歧；3.未解决悬念与伏笔；严禁写入任何角色未公开的私人秘密）\",\n  \
+          \"privateSnapshots\": {{\n    \
+            \"<agent_id>\": \"为该角色提炼一条 60 字以内的私人状态快照，严格按格式：当前最戒备/怀疑对象 + 核心执念进展 + 情绪基调\"\n  \
+          }}\n\
+        }}\n\
+        当前参演角色列表：\n{}",
+        agent_roster
+    );
 
     let mut user_content = String::new();
     if !existing_summary.trim().is_empty() {
@@ -263,7 +318,7 @@ pub async fn maybe_compact_history(
         .next()
         .and_then(|c| c.message.content)
         .unwrap_or_default();
-    let new_summary = strip_think_tags(&raw_summary);
+    let (new_summary, private_state_snapshots) = parse_compaction_output(&raw_summary, config);
     if new_summary.is_empty() {
         return Ok(None);
     }
@@ -282,6 +337,7 @@ pub async fn maybe_compact_history(
         new_until_seq,
         tokens_before: current_prompt_tokens,
         tokens_after,
+        private_state_snapshots,
     }))
 }
 
@@ -300,6 +356,7 @@ mod tests {
             room_id: "main".to_string(),
             reasoning_content: String::new(),
             content: format!("content-{seq}"),
+            micro_cue: None,
             model_name: "test".to_string(),
             duration_ms: 100,
             prompt_tokens: 10,

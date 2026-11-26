@@ -44,6 +44,7 @@ const props = defineProps<{
   config: ExperimentConfig | null;
   characterCards?: CharacterCard[];
   apiProfiles: ApiProfile[];
+  blindGuessMode?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -58,6 +59,7 @@ const emit = defineEmits<{
 const draft = ref<ExperimentConfig | null>(null);
 const initialSnapshot = ref("");
 const inheritCardMemory = ref(true);
+const timedCluesOpen = ref(false);
 const saveAsPresetOpen = ref(false);
 const newPresetName = ref("");
 const confirmDiscardOpen = ref(false);
@@ -71,6 +73,7 @@ const editingDraft = ref<{
   temperature: number;
   thinkingLevel: string;
   systemPrompt: string;
+  secretGoal: string;
   avatarSeed: number;
 }>({
   label: "",
@@ -78,6 +81,7 @@ const editingDraft = ref<{
   temperature: 0.9,
   thinkingLevel: "default",
   systemPrompt: "",
+  secretGoal: "",
   avatarSeed: 1,
 });
 
@@ -89,7 +93,11 @@ watch(
       cloned.agents.forEach((a) => {
         a.apiProfileId = resolveNodeApiProfileId(a, props.apiProfiles);
       });
+      if (!cloned.timedClues) {
+        cloned.timedClues = [];
+      }
       draft.value = cloned;
+      timedCluesOpen.value = false;
       initialSnapshot.value = JSON.stringify(cloned);
       saveAsPresetOpen.value = false;
       newPresetName.value = "";
@@ -121,6 +129,7 @@ function openRoleEditor(idx: number) {
     temperature: ag.temperature ?? 0.9,
     thinkingLevel: String(ag.thinkingLevel || "default"),
     systemPrompt: ag.systemPrompt,
+    secretGoal: ag.secretGoal ?? "",
     avatarSeed: getRoleAvatarSeed(ag),
   };
 }
@@ -146,6 +155,7 @@ function saveRoleEditor() {
       temperature: editingDraft.value.temperature,
       thinkingLevel: editingDraft.value.thinkingLevel,
       systemPrompt: editingDraft.value.systemPrompt,
+      secretGoal: editingDraft.value.secretGoal.trim(),
     };
     avatarSeeds.value[newId] = editingDraft.value.avatarSeed;
     draft.value.agents.push(newNode);
@@ -162,6 +172,7 @@ function saveRoleEditor() {
   ag.temperature = editingDraft.value.temperature;
   ag.thinkingLevel = editingDraft.value.thinkingLevel;
   ag.systemPrompt = editingDraft.value.systemPrompt;
+  ag.secretGoal = editingDraft.value.secretGoal.trim();
   avatarSeeds.value[ag.id] = editingDraft.value.avatarSeed;
   if (editingDraft.value.apiProfileId) {
     selectAgentProfile(ag, editingDraft.value.apiProfileId);
@@ -180,6 +191,7 @@ function addAgentAndEdit() {
     temperature: 0.9,
     thinkingLevel: "default",
     systemPrompt: "",
+    secretGoal: "",
     avatarSeed: randomAvatarSeed(),
   };
 }
@@ -470,7 +482,7 @@ defineExpose({
                 <h3 class="text-[14px] font-semibold text-[#202222]">场景与文风规则</h3>
                 <span class="text-[11px] text-[#AAAAAA]">对所有角色生效</span>
               </div>
-              <div class="flex items-start gap-2.5 px-3 py-2.5 rounded-[9px] bg-[#FAFAFA] border border-[#EFEFF0] focus-within:border-[#D1CDDD] focus-within:bg-white transition">
+              <div class="flex items-start gap-2.5 px-3 py-2.5 rounded-[9px] bg-[#FAFAFA] border border-[#EFEFF0] focus-within:border-[#007AFF]/50 focus-within:bg-white transition">
                 <BookOpen class="w-4 h-4 text-[#A0A2A8] mt-0.5 shrink-0" />
                 <textarea
                   v-model="draft.globalSystemPrompt"
@@ -509,14 +521,23 @@ defineExpose({
                   :class="
                     duplicateLabels.has(effectiveAgentLabel(ag, idx))
                       ? 'border-rose-400 ring-2 ring-rose-100'
-                      : 'border-[#E6E6E9] hover:border-[#D1CDDD] hover:shadow-[0_2px_9px_rgba(41,35,55,0.04)]'
+                      : 'border-[#E6E6E9] hover:border-[#007AFF]/45 hover:shadow-[0_2px_9px_rgba(0,122,255,0.06)]'
                   "
                 >
                   <div class="flex items-center gap-2.5">
                     <RoleSvgAvatar :seed="getRoleAvatarSeed(ag)" :size="38" />
                     <div class="min-w-0 flex-1">
-                      <div class="text-[13px] font-semibold text-[#202222] truncate">
-                        {{ effectiveAgentLabel(ag, idx) }}
+                      <div class="flex items-center gap-1.5 min-w-0">
+                        <span class="text-[13px] font-semibold text-[#202222] truncate">
+                          {{ effectiveAgentLabel(ag, idx) }}
+                        </span>
+                        <span
+                          v-if="!blindGuessMode && ag.goalAchieved"
+                          class="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-medium shrink-0"
+                          title="该角色已达成暗线胜负目标"
+                        >
+                          🏆 已达成
+                        </span>
                       </div>
                       <div class="text-[11px] text-[#7C7F89] mt-0.5 truncate">
                         {{ apiProfiles.find((p) => p.id === ag.apiProfileId)?.name ?? "默认" }} · {{ ag.modelName }}
@@ -526,7 +547,7 @@ defineExpose({
                       v-if="draft.agents.length > 2"
                       type="button"
                       @click.stop="removeAgent(idx)"
-                      class="w-7 h-7 grid place-items-center rounded-[7px] text-[#909197] opacity-0 group-hover:opacity-100 hover:bg-rose-50 hover:text-rose-600 self-start shrink-0 transition"
+                      class="w-7 h-7 grid place-items-center rounded-[7px] text-[#909197] opacity-0 group-hover:opacity-100 hover:bg-[var(--ds-danger-soft)] hover:text-[var(--ds-danger)] self-start shrink-0 transition"
                       title="移除角色"
                     >
                       <Trash2 class="w-3.5 h-3.5" />
@@ -544,6 +565,76 @@ defineExpose({
               >
                 角色名称不能重复，请修改重名角色
               </p>
+            </section>
+
+            <!-- Timed Clues (hidden in blindGuessMode) -->
+            <section v-if="!blindGuessMode" class="pt-3 border-t border-[#F0F0F2]">
+              <button
+                type="button"
+                @click="timedCluesOpen = !timedCluesOpen"
+                class="w-full flex items-center justify-between text-left"
+              >
+                <span class="text-[13px] font-semibold text-[#202222]">
+                  定时线索（分幕物证）
+                  <span
+                    v-if="(draft.timedClues?.length ?? 0) > 0"
+                    class="ml-1 text-[11px] font-normal text-slate-400"
+                  >
+                    ({{ draft.timedClues?.length }} 条)
+                  </span>
+                </span>
+                <span class="text-[11.5px] text-slate-400">{{ timedCluesOpen ? "收起" : "展开" }}</span>
+              </button>
+
+              <div v-if="timedCluesOpen" class="mt-2.5 space-y-2">
+                <div
+                  v-for="(clue, cIdx) in (draft.timedClues ?? [])"
+                  :key="cIdx"
+                  class="flex items-center gap-2"
+                >
+                  <span
+                    class="px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0"
+                    :class="clue.triggered ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'"
+                  >
+                    {{ clue.triggered ? "已释放" : "待触发" }}
+                  </span>
+                  <span class="text-[11px] text-slate-500 shrink-0">第</span>
+                  <input
+                    v-model.number="clue.triggerTurn"
+                    :disabled="Boolean(clue.triggered)"
+                    type="number"
+                    min="2"
+                    max="200"
+                    class="w-14 h-7 rounded-md border border-[#E2E2E6] bg-white disabled:bg-slate-50 px-1.5 text-[12px] text-center outline-none"
+                  />
+                  <span class="text-[11px] text-slate-500 shrink-0">轮</span>
+                  <input
+                    v-model="clue.content"
+                    :disabled="Boolean(clue.triggered)"
+                    type="text"
+                    placeholder="输入届时释放的客观物证或突发线索…"
+                    class="flex-1 h-7 rounded-md border border-[#E2E2E6] bg-white disabled:bg-slate-50 px-2 text-[12px] outline-none"
+                  />
+                  <button
+                    v-if="!clue.triggered"
+                    type="button"
+                    @click="draft.timedClues?.splice(cIdx, 1)"
+                    class="text-[11px] text-slate-400 hover:text-rose-600 px-1.5"
+                  >
+                    删除
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  @click="
+                    if (!draft.timedClues) draft.timedClues = [];
+                    draft.timedClues.push({ triggerTurn: 6 + draft.timedClues.length * 4, content: '', triggered: false });
+                  "
+                  class="text-[11.5px] font-medium text-[#007AFF] hover:underline"
+                >
+                  + 添加定时线索
+                </button>
+              </div>
             </section>
           </template>
 
@@ -631,7 +722,7 @@ defineExpose({
                     systemPrompt: editingDraft.systemPrompt,
                   });
                 "
-                class="h-8 px-2.5 flex items-center gap-1 rounded-lg text-[12px] font-medium bg-[#F5F5F7] hover:bg-indigo-50 text-slate-600 hover:text-indigo-700 border border-black/[0.08] transition"
+                class="h-8 px-2.5 flex items-center gap-1 rounded-lg text-[12px] font-medium bg-[#F5F5F7] hover:bg-[var(--ds-accent-soft)] text-slate-600 hover:text-[var(--ds-accent)] border border-black/[0.08] transition"
                 title="保存到角色库"
               >
                 <BookmarkPlus class="w-3.5 h-3.5" />
@@ -698,6 +789,16 @@ defineExpose({
             ></textarea>
           </div>
 
+          <div v-if="!blindGuessMode">
+            <label class="block text-[12px] text-[#757780] mb-1.5">本局暗线目标（可选）</label>
+            <input
+              v-model="editingDraft.secretGoal"
+              type="text"
+              placeholder="例如：在不暴露真实身份的前提下让众人怀疑其他人…"
+              class="w-full rounded-[8px] border border-[#E2E2E6] bg-[#FAFAFA] focus:bg-white px-2.5 py-2 text-[12.5px] outline-none"
+            />
+          </div>
+
           <div class="flex items-center justify-end gap-2 pt-1">
             <button
               type="button"
@@ -717,13 +818,14 @@ defineExpose({
         </div>
       </div>
 
-      <!-- Unsaved Changes Confirmation Dialog Overlay -->
-      <div
-        v-if="confirmDiscardOpen"
-        class="absolute inset-0 z-50 bg-black/25 backdrop-blur-[2px] flex items-center justify-center p-4"
-        @click.self="confirmDiscardOpen = false"
+      <!-- Unsaved Changes Confirmation Dialog -->
+      <AdaptiveModal
+        :open="confirmDiscardOpen"
+        title="尚未保存修改"
+        max-width-class="max-w-[360px]"
+        @close="confirmDiscardOpen = false"
       >
-        <div class="w-full max-w-[360px] rounded-2xl bg-white border border-black/[0.08] shadow-[0_20px_50px_rgba(0,0,0,0.22)] p-5 space-y-4">
+        <div class="p-5 space-y-4">
           <div class="space-y-1.5">
             <h3 class="text-[15px] font-semibold text-[#1D1D1F]">尚未保存修改</h3>
             <p class="text-[13px] text-slate-500 leading-relaxed">
@@ -741,7 +843,7 @@ defineExpose({
             <button
               type="button"
               @click="discardAndClose"
-              class="h-8 px-3 rounded-lg text-[12.5px] font-medium text-rose-600 hover:bg-rose-50 transition outline-none"
+              class="h-8 px-3 rounded-lg text-[12.5px] font-medium text-[var(--ds-danger)] hover:bg-[var(--ds-danger-soft)] transition outline-none"
             >
               放弃修改
             </button>
@@ -754,13 +856,13 @@ defineExpose({
             </button>
           </div>
         </div>
-      </div>
+      </AdaptiveModal>
     </div>
 
     <template #footer>
       <div
         v-if="draft"
-        class="shrink-0 px-4 md:px-6 py-3 border-t border-black/[0.06] bg-white"
+        class="shrink-0 px-4 md:px-6 py-3 bg-white"
       >
         <div class="max-w-[580px] mx-auto grid grid-cols-[1fr_2fr] min-[520px]:flex min-[520px]:items-center min-[520px]:justify-end gap-2.5">
           <button

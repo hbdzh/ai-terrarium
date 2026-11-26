@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use uuid::Uuid;
 
 use crate::models::{
@@ -60,9 +60,17 @@ fn is_legacy_unmodified_builtin(p: &PresetTemplate) -> bool {
 
 pub struct Database {
     conn: Mutex<Connection>,
+    read_conn: Option<Mutex<Connection>>,
 }
 
 impl Database {
+    fn read_conn_guard(&self) -> std::sync::MutexGuard<'_, Connection> {
+        match &self.read_conn {
+            Some(rc) => rc.lock().unwrap(),
+            None => self.conn.lock().unwrap(),
+        }
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("failed to create db parent dir")?;
@@ -76,8 +84,23 @@ impl Database {
              PRAGMA busy_timeout = 5000;
              PRAGMA foreign_keys = ON;",
         )?;
+        let read_conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .ok()
+        .map(|rc| {
+            let _ = rc.execute_batch(
+                "PRAGMA query_only = ON;
+                 PRAGMA temp_store = MEMORY;
+                 PRAGMA cache_size = -8000;
+                 PRAGMA busy_timeout = 5000;",
+            );
+            Mutex::new(rc)
+        });
         let db = Self {
             conn: Mutex::new(conn),
+            read_conn,
         };
         db.init_schema()?;
         Ok(db)
@@ -89,6 +112,7 @@ impl Database {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         let db = Self {
             conn: Mutex::new(conn),
+            read_conn: None,
         };
         db.init_schema()?;
         Ok(db)
@@ -349,6 +373,9 @@ impl Database {
                 [],
             )?;
         }
+        if !cols.iter().any(|c| c == "micro_cue") {
+            conn.execute("ALTER TABLE messages ADD COLUMN micro_cue TEXT", [])?;
+        }
 
         // Migrate older databases lacking experiments.compacted_summary / compacted_until_seq
         let mut exp_stmt = conn.prepare("PRAGMA table_info(experiments)")?;
@@ -481,7 +508,7 @@ impl Database {
     }
 
     pub fn get_core_engine_prompt(&self) -> Result<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn_guard();
         let val: Option<String> = conn
             .query_row(
                 "SELECT value FROM app_settings WHERE key = ?1",
@@ -512,7 +539,7 @@ impl Database {
     }
 
     pub fn get_ui_prefs(&self) -> Result<UiPrefs> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn_guard();
         let val: Option<String> = conn
             .query_row(
                 "SELECT value FROM app_settings WHERE key = ?1",
@@ -544,7 +571,7 @@ impl Database {
     }
 
     pub fn get_api_profiles(&self) -> Result<Vec<ApiProfile>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn_guard();
         let val: Option<String> = conn
             .query_row(
                 "SELECT value FROM app_settings WHERE key = ?1",
@@ -716,7 +743,7 @@ impl Database {
     }
 
     pub fn list_experiments(&self) -> Result<Vec<ExperimentSummary>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn_guard();
         let mut stmt = conn.prepare(
             "SELECT id, title, total_turns, total_tokens, next_speaker, parent_experiment_id, fork_turn, created_at, updated_at
              FROM experiments
@@ -743,7 +770,7 @@ impl Database {
     }
 
     pub fn get_experiment_detail(&self, id: &str) -> Result<ExperimentDetail> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn_guard();
         let row = conn
             .query_row(
                 "SELECT id, title, config_json, total_turns, total_tokens, next_speaker,
@@ -793,7 +820,7 @@ impl Database {
 
         let mut msg_stmt = conn.prepare(
             "SELECT id, experiment_id, seq, turn_number, role, agent_id, reasoning_content, content, model_name, duration_ms,
-                    prompt_tokens, completion_tokens, total_tokens, whisper_consumed, created_at, room_id
+                    prompt_tokens, completion_tokens, total_tokens, whisper_consumed, created_at, room_id, micro_cue
              FROM messages
              WHERE experiment_id = ?1
              ORDER BY seq ASC",
@@ -818,6 +845,7 @@ impl Database {
                 room_id,
                 reasoning_content: r.get(6)?,
                 content: r.get(7)?,
+                micro_cue: r.get(16)?,
                 model_name: r.get(8)?,
                 duration_ms: r.get(9)?,
                 prompt_tokens: r.get(10)?,
@@ -895,8 +923,274 @@ impl Database {
         })
     }
 
+    /// 轻量查询实验元信息与配置（不加载历史消息和观察手记），供本地 API 高频状态轮询使用。
+    pub fn get_experiment_status_light(
+        &self,
+        id: &str,
+    ) -> Result<(String, String, ExperimentConfig, u32, String)> {
+        let conn = self.read_conn_guard();
+        let row = conn
+            .query_row(
+                "SELECT id, title, config_json, total_turns, board_content
+                 FROM experiments WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, u32>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .context("experiment not found")?;
+        let mut config: ExperimentConfig = serde_json::from_str(&row.2).unwrap_or_default();
+        config.normalize();
+        Ok((row.0, row.1, config, row.3, row.4))
+    }
+
+    /// 轻量按需倒序拉取最近 N 条消息（支持在 SQL 层直接过滤私密房与定向低语）。
+    pub fn get_recent_messages(
+        &self,
+        id: &str,
+        limit: usize,
+        hide_secrets: bool,
+    ) -> Result<Vec<TimelineMessage>> {
+        let conn = self.read_conn_guard();
+        let sql = if hide_secrets {
+            "SELECT id, experiment_id, seq, turn_number, role, agent_id, reasoning_content, content, model_name, duration_ms,
+                    prompt_tokens, completion_tokens, total_tokens, whisper_consumed, created_at, room_id, micro_cue
+             FROM messages
+             WHERE experiment_id = ?1 AND room_id = 'main' AND role != 'GodWhisper'
+             ORDER BY seq DESC
+             LIMIT ?2"
+        } else {
+            "SELECT id, experiment_id, seq, turn_number, role, agent_id, reasoning_content, content, model_name, duration_ms,
+                    prompt_tokens, completion_tokens, total_tokens, whisper_consumed, created_at, room_id, micro_cue
+             FROM messages
+             WHERE experiment_id = ?1
+             ORDER BY seq DESC
+             LIMIT ?2"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![id, limit as i64], |r| {
+            let role_str: String = r.get(4)?;
+            let agent_id_col: String = r.get(5)?;
+            let (role, agent_id) = SpeakerRole::from_db(&role_str, &agent_id_col);
+            let room_col: String = r.get(15)?;
+            let room_id = if room_col.trim().is_empty() {
+                "main".to_string()
+            } else {
+                room_col
+            };
+            Ok(TimelineMessage {
+                id: r.get(0)?,
+                experiment_id: r.get(1)?,
+                seq: r.get(2)?,
+                turn_number: r.get(3)?,
+                role,
+                agent_id,
+                room_id,
+                reasoning_content: if hide_secrets { String::new() } else { r.get(6)? },
+                content: r.get(7)?,
+                micro_cue: r.get(16)?,
+                model_name: r.get(8)?,
+                duration_ms: r.get(9)?,
+                prompt_tokens: r.get(10)?,
+                completion_tokens: r.get(11)?,
+                total_tokens: r.get(12)?,
+                whisper_consumed: r.get::<_, i64>(13)? != 0,
+                created_at: r.get(14)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for m in rows {
+            out.push(m?);
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    /// 窗口化加载实验详情：仅加载未折叠消息（`seq > compacted_until_seq`）、最近 48 条历史私密房消息，
+    /// 以及最新 1 条观察手记，避免长局数百轮后每轮重复反序列化全量历史。
+    pub fn get_experiment_detail_windowed(&self, id: &str) -> Result<ExperimentDetail> {
+        let conn = self.read_conn_guard();
+        let row = conn
+            .query_row(
+                "SELECT id, title, config_json, total_turns, total_tokens, next_speaker,
+                        board_content, board_prev_content, compacted_summary, compacted_until_seq,
+                        final_report, created_at, updated_at, private_notes_json,
+                        active_room_json, room_members_json, parent_experiment_id, fork_turn
+                 FROM experiments WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, u32>(3)?,
+                        row.get::<_, u64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, String>(11)?,
+                        row.get::<_, String>(12)?,
+                        row.get::<_, String>(13)?,
+                        row.get::<_, String>(14)?,
+                        row.get::<_, String>(15)?,
+                        row.get::<_, Option<String>>(16)?,
+                        row.get::<_, Option<i64>>(17)?,
+                    ))
+                },
+            )
+            .optional()?
+            .context("experiment not found")?;
+
+        let private_notes: HashMap<String, String> =
+            serde_json::from_str(&row.13).unwrap_or_default();
+        let active_private_room: Option<ActivePrivateRoom> = if row.14.trim().is_empty() {
+            None
+        } else {
+            serde_json::from_str(&row.14).ok()
+        };
+        let room_members: HashMap<String, Vec<String>> =
+            serde_json::from_str(&row.15).unwrap_or_default();
+
+        let mut config: ExperimentConfig = serde_json::from_str(&row.2).unwrap_or_default();
+        config.normalize();
+        let compacted_until_seq = row.9;
+
+        let map_msg_row = |r: &rusqlite::Row| -> rusqlite::Result<TimelineMessage> {
+            let role_str: String = r.get(4)?;
+            let agent_id_col: String = r.get(5)?;
+            let (role, agent_id) = SpeakerRole::from_db(&role_str, &agent_id_col);
+            let room_col: String = r.get(15)?;
+            let room_id = if room_col.trim().is_empty() {
+                "main".to_string()
+            } else {
+                room_col
+            };
+            Ok(TimelineMessage {
+                id: r.get(0)?,
+                experiment_id: r.get(1)?,
+                seq: r.get(2)?,
+                turn_number: r.get(3)?,
+                role,
+                agent_id,
+                room_id,
+                reasoning_content: r.get(6)?,
+                content: r.get(7)?,
+                micro_cue: r.get(16)?,
+                model_name: r.get(8)?,
+                duration_ms: r.get(9)?,
+                prompt_tokens: r.get(10)?,
+                completion_tokens: r.get(11)?,
+                total_tokens: r.get(12)?,
+                whisper_consumed: r.get::<_, i64>(13)? != 0,
+                created_at: r.get(14)?,
+            })
+        };
+
+        let mut messages = Vec::new();
+        if compacted_until_seq > 0 {
+            let mut priv_stmt = conn.prepare(
+                "SELECT id, experiment_id, seq, turn_number, role, agent_id, reasoning_content, content, model_name, duration_ms,
+                        prompt_tokens, completion_tokens, total_tokens, whisper_consumed, created_at, room_id, micro_cue
+                 FROM messages
+                 WHERE experiment_id = ?1 AND room_id != 'main' AND seq <= ?2
+                 ORDER BY seq DESC
+                 LIMIT 48",
+            )?;
+            let priv_rows = priv_stmt.query_map(params![id, compacted_until_seq], map_msg_row)?;
+            for m in priv_rows {
+                messages.push(m?);
+            }
+            messages.reverse();
+        }
+
+        let mut win_stmt = conn.prepare(
+            "SELECT id, experiment_id, seq, turn_number, role, agent_id, reasoning_content, content, model_name, duration_ms,
+                    prompt_tokens, completion_tokens, total_tokens, whisper_consumed, created_at, room_id, micro_cue
+             FROM messages
+             WHERE experiment_id = ?1 AND seq > ?2
+             ORDER BY seq ASC",
+        )?;
+        let win_rows = win_stmt.query_map(params![id, compacted_until_seq], map_msg_row)?;
+        for m in win_rows {
+            messages.push(m?);
+        }
+
+        let mut obs_stmt = conn.prepare(
+            "SELECT id, experiment_id, trigger_turn, tags_json, depth_stage, note,
+                    tension_score, abstraction_score, stagnation_index, perturbation_injected,
+                    crisis_cards_json, created_at, narrative_act, relationship_matrix_json
+             FROM observer_notes
+             WHERE experiment_id = ?1
+             ORDER BY trigger_turn DESC, created_at DESC
+             LIMIT 1",
+        )?;
+        let obs_rows = obs_stmt.query_map(params![id], |r| {
+            let tags_str: String = r.get(3)?;
+            let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
+            let cards_str: String = r.get(10)?;
+            let crisis_cards: Vec<CrisisCard> =
+                serde_json::from_str(&cards_str).unwrap_or_default();
+            let matrix_str: String = r.get(13)?;
+            let relationship_matrix: Vec<RelationshipEdge> =
+                serde_json::from_str(&matrix_str).unwrap_or_default();
+            Ok(ObserverNote {
+                id: r.get(0)?,
+                experiment_id: r.get(1)?,
+                trigger_turn: r.get(2)?,
+                tags,
+                depth_stage: r.get(4)?,
+                narrative_act: r.get(12)?,
+                note: r.get(5)?,
+                tension_score: r.get::<_, i64>(6)?.clamp(0, 100) as u8,
+                abstraction_score: r.get::<_, i64>(7)?.clamp(0, 100) as u8,
+                stagnation_index: r.get::<_, i64>(8)?.clamp(0, 100) as u8,
+                perturbation_injected: r.get::<_, i64>(9)? != 0,
+                crisis_cards,
+                relationship_matrix,
+                created_at: r.get(11)?,
+            })
+        })?;
+        let mut observer_notes = Vec::new();
+        for n in obs_rows {
+            observer_notes.push(n?);
+        }
+
+        Ok(ExperimentDetail {
+            id: row.0,
+            title: row.1,
+            config,
+            total_turns: row.3,
+            total_tokens: row.4,
+            next_speaker: row.5,
+            parent_experiment_id: row.16,
+            fork_turn: row.17.map(|v| v.max(0) as u32),
+            board_content: row.6,
+            board_prev_content: row.7,
+            private_notes,
+            active_private_room,
+            room_members,
+            compacted_summary: row.8,
+            compacted_until_seq,
+            final_report: row.10,
+            messages,
+            observer_notes,
+            created_at: row.11,
+            updated_at: row.12,
+        })
+    }
+
     pub fn get_total_turns(&self, experiment_id: &str) -> Result<u32> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn_guard();
         let turns: u32 = conn
             .query_row(
                 "SELECT total_turns FROM experiments WHERE id = ?1",
@@ -909,7 +1203,7 @@ impl Database {
     }
 
     pub fn get_board_content(&self, experiment_id: &str) -> Result<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn_guard();
         let board: String = conn
             .query_row(
                 "SELECT board_content FROM experiments WHERE id = ?1",
@@ -1049,9 +1343,9 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO messages (
-                id, experiment_id, seq, turn_number, role, agent_id, room_id, reasoning_content, content, model_name, duration_ms,
+                id, experiment_id, seq, turn_number, role, agent_id, room_id, reasoning_content, content, micro_cue, model_name, duration_ms,
                 prompt_tokens, completion_tokens, total_tokens, whisper_consumed, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 msg.id,
                 msg.experiment_id,
@@ -1062,6 +1356,7 @@ impl Database {
                 room_id,
                 msg.reasoning_content,
                 msg.content,
+                msg.micro_cue,
                 msg.model_name,
                 msg.duration_ms,
                 msg.prompt_tokens,
@@ -1088,7 +1383,7 @@ impl Database {
     }
 
     pub fn get_message_raw_prompt(&self, message_id: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn_guard();
         let res: Option<Option<String>> = conn
             .query_row(
                 "SELECT raw_prompt_json FROM messages WHERE id = ?1",
@@ -1873,6 +2168,7 @@ mod tests {
             room_id: "main".to_string(),
             reasoning_content: "先构思一个流动的意象。".to_string(),
             content: "时间是一条不回头的河。".to_string(),
+            micro_cue: None,
             model_name: "deepseek-chat".to_string(),
             duration_ms: 1200,
             prompt_tokens: 100,

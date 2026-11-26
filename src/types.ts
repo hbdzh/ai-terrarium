@@ -22,6 +22,15 @@ export interface NodeConfig {
   temperature: number;
   thinkingLevel?: ThinkingLevel | string;
   systemPrompt: string;
+  secretGoal?: string;
+  goalAchieved?: boolean;
+  privateStateSnapshot?: string;
+}
+
+export interface TimedClue {
+  triggerTurn: number;
+  content: string;
+  triggered?: boolean;
 }
 
 export interface PresetAgentPrompt {
@@ -83,6 +92,7 @@ export interface ExperimentConfig {
   allowPassTurn?: boolean;
   randomMoodDice?: boolean;
   intuitiveFastReply?: boolean;
+  timedClues?: TimedClue[];
   agents: NodeConfig[];
   nodeC: NodeConfig;
 }
@@ -119,13 +129,16 @@ export interface DistillImprintsResponse {
 export interface GeneratedAgentDraft {
   label: string;
   systemPrompt: string;
+  secretGoal?: string;
 }
 
 export interface GeneratedScenario {
   title: string;
+  publicPremise?: string;
   globalSystemPrompt: string;
   initialTopic: string;
   initialBoard: string;
+  timedClues?: TimedClue[];
   agents: GeneratedAgentDraft[];
 }
 
@@ -149,6 +162,7 @@ export interface TimelineMessage {
   roomId?: string;
   reasoningContent: string;
   content: string;
+  microCue?: string | null;
   modelName: string;
   durationMs: number;
   promptTokens: number;
@@ -205,22 +219,6 @@ export interface ExperimentSummary {
   forkTurn?: number | null;
   createdAt: string;
   updatedAt: string;
-}
-
-export interface TurnSnapshot {
-  id: string;
-  experimentId: string;
-  turnNumber: number;
-  messageIds: string[];
-  boardContent: string;
-  privateNotes?: Record<string, string>;
-  activePrivateRoom?: ActivePrivateRoom | null;
-  roomMembers?: Record<string, string[]>;
-  compactedSummary: string;
-  compactedUntilSeq: number;
-  totalTokens: number;
-  nextSpeaker: string;
-  createdAt: string;
 }
 
 export interface ExperimentDetail {
@@ -394,6 +392,13 @@ export type StreamEvent =
       experimentId: string;
       totalTurns: number;
       targetTurns: number;
+    }
+  | {
+      type: "secret_goal_achieved";
+      experimentId: string;
+      agentId: string;
+      agentLabel: string;
+      secretGoal: string;
     };
 
 export interface DiffLine {
@@ -408,4 +413,7 @@ export interface UiPrefs {
   inspectorOpen: boolean;
   inspectorWidthPct: number;
   themePreference?: ThemePreference;
+  enableLocalApi?: boolean;
+  localApiPort?: number;
+  localApiToken?: string;
 }

@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::compactor::select_compactor_node;
 use crate::llm::{resolve_chat_completions_url, ApiChatMessage};
 use crate::models::{
-    CrisisCard, ExperimentConfig, ExperimentDetail, RelationshipEdge, SpeakerRole, TimelineMessage,
+    CrisisCard, ExperimentConfig, ExperimentDetail, RelationshipEdge, SpeakerRole, TimedClue,
+    TimelineMessage,
 };
 use crate::sanitizer::strip_think_tags;
 
@@ -55,6 +56,8 @@ pub struct ObserverJsonResult {
     pub relationship_matrix: Vec<RelationshipEdge>,
     #[serde(default)]
     pub director_event: Option<String>,
+    #[serde(default, alias = "achievedAgentIds")]
+    pub achieved_agent_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +66,8 @@ pub struct GeneratedAgentDraft {
     pub label: String,
     #[serde(default)]
     pub system_prompt: String,
+    #[serde(default)]
+    pub secret_goal: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,11 +75,15 @@ pub struct GeneratedAgentDraft {
 pub struct GeneratedScenario {
     pub title: String,
     #[serde(default)]
+    pub public_premise: String,
+    #[serde(default)]
     pub global_system_prompt: String,
     #[serde(default)]
     pub initial_topic: String,
     #[serde(default)]
     pub initial_board: String,
+    #[serde(default)]
+    pub timed_clues: Vec<TimedClue>,
     pub agents: Vec<GeneratedAgentDraft>,
 }
 
@@ -363,6 +372,21 @@ pub async fn run_observer_analysis(
         ""
     };
 
+    let unachieved_goals: Vec<String> = config
+        .agents
+        .iter()
+        .filter(|a| !a.secret_goal.trim().is_empty() && !a.goal_achieved)
+        .map(|a| format!("- id: \"{}\", 角色名: \"{}\", 暗线目标: \"{}\"", a.id, a.label, a.secret_goal.trim()))
+        .collect();
+    let secret_goals_instruction = if !unachieved_goals.is_empty() {
+        format!(
+            "\n\n【角色暗线胜负手评估】以下角色拥有尚未达成的隐藏胜负目标。请严格根据最新对话判断是否有角色已通过对话实质性达成了其暗线条件；若已达成，请在 JSON 中额外输出 \"achieved_agent_ids\": [\"<agent_id>\"]（未达成则输出空数组 []）：\n{}",
+            unachieved_goals.join("\n")
+        )
+    } else {
+        String::new()
+    };
+
     let system_prompt = format!(
         "{}\n\n当前参演角色：{}\n你必须只输出严格合法的 JSON 对象，禁止输出任何 Markdown 围栏或多余解释文字，字段必须包含：\n\
         {{\n  \
@@ -381,13 +405,14 @@ pub async fn run_observer_analysis(
             {{ \"title\": \"短标题3\", \"kind\": \"GodSystem\", \"content\": \"...\" }}\n  \
           ]\n\
         }}\n\
-        评分说明：tension_score 为火药味/冲突指数(0~100)，abstraction_score 为哲学/概念抽象度(0~100)，stagnation_index 为复读/客套僵化指数(0~100，>80表示陷入死循环)。relationship_matrix 请基于对话暗流评估参演角色两两之间的实时信任度（trust_score 范围 -100 到 100，负分代表猜忌/敌意，正分代表信任/同盟）与简短心理定性 attitude_tag（12字以内）。crisis_cards 请紧扣当前剧情现场生成 3 张截然不同风格的破局/转折事件卡。{}{}{}{}",
+        评分说明：tension_score 为火药味/冲突指数(0~100)，abstraction_score 为哲学/概念抽象度(0~100)，stagnation_index 为复读/客套僵化指数(0~100，>80表示陷入死循环)。relationship_matrix 请基于对话暗流评估参演角色两两之间的实时信任度（trust_score 范围 -100 到 100，负分代表猜忌/敌意，正分代表信任/同盟）与简短心理定性 attitude_tag（12字以内）。crisis_cards 请紧扣当前剧情现场生成 3 张截然不同风格的破局/转折事件卡。{}{}{}{}{}",
         node_c.system_prompt.trim(),
         cast_names,
         tag_calibration,
         arc_instruction,
         director_instruction,
-        reflection_instruction
+        reflection_instruction,
+        secret_goals_instruction
     );
 
     let mut user_prompt = String::new();
@@ -526,6 +551,25 @@ pub async fn generate_final_report_markdown(
         context_block.push_str(&notes_summary);
         context_block.push('\n');
     }
+    let goal_lines: Vec<String> = detail
+        .config
+        .agents
+        .iter()
+        .filter(|a| !a.secret_goal.trim().is_empty())
+        .map(|a| {
+            format!(
+                "- {}：{}（{}）",
+                a.label,
+                a.secret_goal.trim(),
+                if a.goal_achieved { "已达成" } else { "未达成" }
+            )
+        })
+        .collect();
+    if !goal_lines.is_empty() {
+        context_block.push_str("【角色暗线胜负手达成情况】\n");
+        context_block.push_str(&goal_lines.join("\n"));
+        context_block.push_str("\n\n");
+    }
     context_block.push_str("【对话实录】\n");
     context_block.push_str(&transcript);
 
@@ -663,9 +707,34 @@ pub fn parse_generated_scenario_json(raw: &str) -> Result<GeneratedScenario> {
     if parsed.title.is_empty() {
         parsed.title = "未命名剧本".to_string();
     }
+    parsed.public_premise = parsed.public_premise.trim().to_string();
     parsed.global_system_prompt = parsed.global_system_prompt.trim().to_string();
+    if parsed.global_system_prompt.is_empty() && !parsed.public_premise.is_empty() {
+        parsed.global_system_prompt = parsed.public_premise.clone();
+    } else if !parsed.public_premise.is_empty()
+        && !parsed.global_system_prompt.contains(&parsed.public_premise)
+    {
+        parsed.global_system_prompt = format!(
+            "{}\n\n{}",
+            parsed.public_premise, parsed.global_system_prompt
+        );
+    }
     parsed.initial_topic = parsed.initial_topic.trim().to_string();
     parsed.initial_board = parsed.initial_board.trim().to_string();
+    parsed.timed_clues = parsed
+        .timed_clues
+        .into_iter()
+        .filter_map(|mut c| {
+            let content = c.content.trim().to_string();
+            if content.is_empty() {
+                return None;
+            }
+            c.trigger_turn = c.trigger_turn.max(2);
+            c.content = content;
+            c.triggered = false;
+            Some(c)
+        })
+        .collect();
 
     parsed.agents = parsed
         .agents
@@ -680,6 +749,7 @@ pub fn parse_generated_scenario_json(raw: &str) -> Result<GeneratedScenario> {
                 a.label.trim().to_string()
             };
             a.system_prompt = a.system_prompt.trim().to_string();
+            a.secret_goal = a.secret_goal.trim().to_string();
             a
         })
         .collect();
@@ -702,22 +772,27 @@ pub async fn generate_scenario_from_idea(
         ));
     };
 
-    let system_prompt = "你是注重真实生活质感与强口语交锋的多智能体沙盒编剧。请根据用户的一句话脑洞，生成一个信息不对称、张力饱满、全员说人话的对话剧本。\n\
+    let system_prompt = "你是注重真实生活质感与强口语交锋的多智能体沙盒编剧。请根据用户的一句话脑洞，生成一个公私信息严格隔离、张力饱满、全员说人话的对话剧本。\n\
         你必须只输出严格合法的 JSON 对象（禁止任何 Markdown 围栏或多余说明），字段如下：\n\
         {\n  \
           \"title\": \"简短吸睛的场景标题（4~12字）\",\n  \
-          \"globalSystemPrompt\": \"明确写出具体场景细节与硬性文风限制：全员大白话口语短句、每次严格 60~90 字、严禁打比方、严禁文青腔或掉书袋、严禁结尾升华主题；底层防出戏规则已由系统自动注入，无需重复编写\",\n  \
+          \"publicPremise\": \"全员可见的纯粹客观公共场景、时间地点与初始事件（严禁包含凶手身份、作案手法或任何角色的隐藏动机/底牌）\",\n  \
+          \"globalSystemPrompt\": \"场景文风与表达限制：全员大白话口语短句、每次严格 60~90 字、严禁打比方、严禁文青腔或掉书袋、严禁结尾升华主题；底层防出戏规则已由系统自动注入，无需重复编写\",\n  \
           \"initialTopic\": \"第1轮开场引子（必须是一个具体的动作描写、生活突发事件或第一句大白话台词开场，禁止抽象概括）\",\n  \
-          \"initialBoard\": \"初始共享白板 Markdown（列出全员已知的公开现场事实与基础线索，严禁泄露各自秘密）\",\n  \
+          \"initialBoard\": \"初始共享白板 Markdown（仅列出全员已知的公开现场事实与基础线索，严禁泄露各自秘密）\",\n  \
+          \"timedClues\": [\n    \
+            { \"triggerTurn\": 6, \"content\": \"（仅悬疑/推理/阵营博弈题材填写，日常闲聊请输出空数组[]）第6轮释放的中期关键客观物证或突发发现\" },\n    \
+            { \"triggerTurn\": 12, \"content\": \"第12轮释放的反转线索\" }\n  \
+          ],\n  \
           \"agents\": [\n    \
-            { \"label\": \"真实人名或具体称呼1（如：店员阿哲）\", \"systemPrompt\": \"具体职业/身份 + 接地气的口语说话习惯 + 只有自己知道的不对等秘密与暗中目标，并重申60~90字大白话短句、不打比方不升华\" },\n    \
-            { \"label\": \"真实人名或具体称呼2（如：司机老陈）\", \"systemPrompt\": \"具体职业/身份 + 接地气的口语说话习惯 + 只有自己知道的不对等秘密与暗中目标，并重申60~90字大白话短句、不打比方不升华\" }\n  \
+            { \"label\": \"真实人名或具体称呼1（如：店员阿哲）\", \"systemPrompt\": \"具体职业/身份 + 接地气的口语说话习惯 + 只有自己知道的私人底牌与隐藏动机（60~90字大白话短句）\", \"secretGoal\": \"可选暗线胜利条件（如：在不暴露某秘密的前提下将怀疑引向他人；日常闲聊可留空）\" },\n    \
+            { \"label\": \"真实人名或具体称呼2（如：司机老陈）\", \"systemPrompt\": \"具体职业/身份 + 接地气的口语说话习惯 + 只有自己知道的私人底牌与隐藏动机（60~90字大白话短句）\", \"secretGoal\": \"可选暗线胜利条件\" }\n  \
           ]\n\
         }\n\
         铁律要求：\n\
-        1. agents 必须包含 2~4 个角色，全部使用具体真实人名与具体职业/身份，严禁使用“乐观派/悲观派/直觉派/解构派”等抽象概念标签命名；\n\
-        2. globalSystemPrompt 必须明确限制每次发言字数（60~90字），禁止打比方、文青腔、掉书袋和结尾升华；\n\
-        3. initialTopic 必须是具体动作或生活突发事件开场；角色间秘密相互咬合、冲突具体可演。";
+        1. publicPremise 必须保持纯粹客观，绝不能剧透凶手、真相或任何人的私人动机；\n\
+        2. agents 必须包含 2~4 个角色，全部使用具体真实人名与具体职业/身份，严禁使用“乐观派/悲观派”等抽象概念标签命名；\n\
+        3. 若脑洞属于悬疑推理或阵营博弈题材，必须在 timedClues 中设计 2~3 条中期分幕释放的关键物证（triggerTurn 建议分布在 5~18 轮之间）；非博弈题材请将 timedClues 设为空数组 []。";
 
     let user_prompt = format!("一句话脑洞：{}", idea.trim());
     let raw = call_json_completion(client, node, system_prompt, &user_prompt, 0.8).await?;

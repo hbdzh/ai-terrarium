@@ -10,10 +10,10 @@ import {
   X,
   Pencil,
   Dices,
-  Sparkles,
   Wand2,
   DoorClosed,
-  ArrowUpRight,
+  ChevronRight,
+  RefreshCw,
   ChevronDown,
   ArrowUp,
 } from "lucide-vue-next";
@@ -258,7 +258,7 @@ function roomMemberNames(memberIds: string[]): string {
 </script>
 
 <template>
-  <div class="shrink-0 px-3 sm:px-5 md:px-8 pb-[calc(0.65rem+var(--safe-bottom,env(safe-area-inset-bottom)))] md:pb-5 pt-1.5 z-10 space-y-2 bg-gradient-to-t from-white via-white/95 to-transparent">
+  <div class="shrink-0 px-3 sm:px-5 md:px-8 pb-[calc(0.65rem+var(--safe-bottom,env(safe-area-inset-bottom)))] md:pb-5 pt-0 z-10">
     <!-- Board Modification Approval Banner -->
     <Transition
       enter-active-class="transition duration-200 ease-out"
@@ -270,7 +270,7 @@ function roomMemberNames(memberIds: string[]): string {
     >
       <div
         v-if="pendingApproval"
-        class="pointer-events-auto max-w-[740px] mx-auto rounded-3xl bg-amber-50/95 backdrop-blur-2xl border border-amber-300/80 shadow-[0_12px_36px_rgba(245,158,11,0.16)] p-3.5 space-y-2.5"
+        class="mb-2 pointer-events-auto max-w-[740px] mx-auto rounded-3xl bg-amber-50/95 backdrop-blur-2xl border border-amber-300/80 shadow-[0_12px_36px_rgba(245,158,11,0.16)] p-3.5 space-y-2.5"
       >
         <div class="flex flex-wrap items-center justify-between gap-2">
           <div class="flex flex-wrap items-center gap-2 text-[13px] md:text-xs">
@@ -308,7 +308,7 @@ function roomMemberNames(memberIds: string[]): string {
                   rejectReason: '主持人驳回了本次白板修改',
                 })
               "
-              class="h-8 md:h-auto flex items-center gap-1 px-3 py-1 rounded-full text-[12px] md:text-[11px] font-medium bg-rose-600 hover:bg-rose-700 text-white transition-colors"
+              class="h-8 md:h-auto flex items-center gap-1 px-3 py-1 rounded-full text-[12px] md:text-[11px] font-medium bg-[var(--ds-danger)] hover:bg-[var(--ds-danger-hover)] text-white transition-colors"
             >
               <X class="w-3.5 h-3.5 md:w-3 md:h-3" />
               驳回
@@ -360,7 +360,7 @@ function roomMemberNames(memberIds: string[]): string {
     <div
       class="relative pointer-events-auto max-w-[740px] mx-auto rounded-[24px] bg-white border border-black/[0.065] shadow-[0_2px_18px_rgba(0,0,0,0.045)] p-2.5 md:px-4 md:pt-3 md:pb-2.5 space-y-2 md:space-y-1.5"
     >
-      <!-- Event Cards Adaptive Modal (matching Screenshot 8) -->
+      <!-- Event Cards Adaptive Modal -->
       <AdaptiveModal
         :open="cardsOpen"
         title="转折事件卡"
@@ -368,72 +368,84 @@ function roomMemberNames(memberIds: string[]): string {
         @close="cardsOpen = false"
       >
         <template #header>
-          <div class="px-6 py-4 border-b border-[#ECECF0] flex items-center justify-between gap-2 shrink-0 bg-white">
+          <div class="px-5 py-3.5 border-b border-black/[0.06] flex items-center justify-between gap-2 shrink-0 bg-white">
             <div class="min-w-0">
-              <h3 class="text-[16px] font-semibold text-[#25262A] truncate">转折事件卡</h3>
-              <p class="text-[12px] text-[#858A95] mt-0.5">选择一个事件，改变当前推演的走向</p>
+              <h3 class="text-[15px] font-semibold text-[#1D1D1F] tracking-tight truncate">转折事件卡</h3>
+              <p class="text-[11.5px] text-[#858A95] mt-0.5">选择一个事件注入当前推演</p>
             </div>
             <button
               type="button"
               @click="cardsOpen = false"
-              class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#EFEFF2] text-[#858A95] hover:text-[#25262A] transition"
+              class="w-8 h-8 flex items-center justify-center rounded-lg text-[#858A95] hover:text-[#25262A] hover:bg-[#EFEFF2] transition-colors outline-none"
+              title="关闭"
             >
               <X class="w-4 h-4" />
             </button>
           </div>
         </template>
 
-        <div class="p-5 overflow-y-auto flex-1 bg-white">
+        <div class="p-4 sm:p-5 overflow-y-auto flex-1 bg-[#F5F5F7]">
           <div
             v-if="!crisisCards || crisisCards.length === 0"
             class="py-12 text-center text-[13px] text-[#858A95]"
           >
             暂无事件卡，请点击「换一批」或等待局势分析生成。
           </div>
-          <div v-else class="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+          <div v-else class="grid grid-cols-1 md:grid-cols-3 gap-3">
             <button
               v-for="(card, idx) in crisisCards"
               :key="idx"
               type="button"
               @click="injectCrisisCard(card)"
-              class="group text-left p-4 rounded-[12px] bg-white hover:bg-[#F5F5F7]/60 active:scale-[0.99] border border-[#E5E5EA] hover:border-[#7965CC]/50 transition-all flex flex-col justify-between gap-4"
+              class="group text-left p-4 rounded-[14px] bg-white border border-black/[0.06] shadow-[0_1px_2px_rgba(0,0,0,0.03),0_2px_8px_rgba(0,0,0,0.02)] hover:border-black/[0.14] hover:shadow-[0_4px_14px_rgba(0,0,0,0.06)] active:scale-[0.985] transition-all flex flex-col justify-between gap-4"
             >
-              <div class="space-y-3">
+              <div class="space-y-2.5">
                 <div class="flex items-center justify-between gap-2">
-                  <span class="w-8 h-8 rounded-[8px] bg-[#F0EDF9] text-[#7965CC] grid place-items-center shrink-0">
-                    <Sparkles class="w-4 h-4" />
-                  </span>
-                  <span class="px-2 py-0.5 rounded-[6px] bg-[#F2F2F5] text-[11px] font-medium text-[#666B76] shrink-0">
-                    {{ card.kind === "GodPublic" ? "外部插话" : "场景事件" }}
+                  <span
+                    class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium"
+                    :class="
+                      card.kind === 'GodPublic'
+                        ? 'bg-[#007AFF]/[0.08] text-[#0062CC]'
+                        : 'bg-[var(--ds-accent-soft)] text-[var(--ds-accent)]'
+                    "
+                  >
+                    <MessageCircle v-if="card.kind === 'GodPublic'" class="w-3 h-3" />
+                    <Globe2 v-else class="w-3 h-3" />
+                    <span>{{ card.kind === "GodPublic" ? "外部插话" : "场景事件" }}</span>
                   </span>
                 </div>
-                <div class="text-[15px] font-semibold text-[#25262A] leading-snug">
+                <div class="text-[14.5px] font-semibold text-[#1D1D1F] tracking-[-0.01em] leading-snug">
                   {{ card.title }}
                 </div>
-                <p class="text-[12.5px] text-[#666B76] leading-relaxed break-words">
+                <p class="text-[12.5px] text-[#555963] leading-[1.6] break-words">
                   {{ card.content }}
                 </p>
               </div>
-              <div class="pt-3 border-t border-[#ECECF0] flex items-center justify-between text-[12px] font-medium text-[#7965CC]">
-                <span>注入对话</span>
-                <ArrowUpRight class="w-3.5 h-3.5 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
+              <div class="pt-1 flex items-center justify-between">
+                <span class="text-[11.5px] font-medium text-[#858A95] group-hover:text-[#1D1D1F] transition-colors">
+                  注入对话
+                </span>
+                <span class="w-6 h-6 rounded-full bg-[#F5F5F7] group-hover:bg-[#1D1D1F] text-[#666B76] group-hover:text-white grid place-items-center transition-colors">
+                  <ChevronRight class="w-3.5 h-3.5" />
+                </span>
               </div>
             </button>
           </div>
         </div>
 
         <template #footer>
-          <div class="px-6 py-3 border-t border-[#ECECF0] bg-white flex items-center justify-between gap-3 shrink-0">
+          <div class="px-5 py-3 bg-[#F5F5F7]/70 flex items-center justify-between gap-3 shrink-0">
             <span class="text-[11.5px] text-[#858A95]">
-              {{ crisisCards && crisisCards.length > 0 ? `当前共 ${crisisCards.length} 张转折事件卡` : "等待生成事件卡" }}
+              {{ crisisCards && crisisCards.length > 0 ? `共 ${crisisCards.length} 张转折事件卡` : "等待生成事件卡" }}
             </span>
             <button
               type="button"
               @click="emit('triggerObserver')"
               :disabled="observerRunning"
-              class="h-8 px-3.5 rounded-[8px] border border-[#E5E5EA] bg-white hover:bg-[#F5F5F7] text-[12px] font-medium text-[#25262A] transition disabled:opacity-45"
+              class="h-8 px-3.5 rounded-full border border-black/[0.08] bg-white hover:bg-[#FAFAFC] shadow-[0_1px_2px_rgba(0,0,0,0.04)] text-[12px] font-medium text-[#1D1D1F] inline-flex items-center gap-1.5 transition disabled:opacity-45"
             >
-              {{ observerRunning ? "生成中..." : "换一批" }}
+              <RefreshCw class="w-3.5 h-3.5 text-[#666B76]" :class="{ 'animate-spin': observerRunning }" />
+              <span>{{ observerRunning ? "生成中..." : "换一批" }}</span>
             </button>
           </div>
         </template>
@@ -518,7 +530,7 @@ function roomMemberNames(memberIds: string[]): string {
           <button
             type="button"
             @click="emit('closePrivateRoom')"
-            class="h-9 md:h-auto flex items-center gap-1 px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-medium transition-colors shrink-0"
+            class="h-9 md:h-auto flex items-center gap-1 px-3.5 py-1.5 rounded-xl bg-[var(--ds-danger)] hover:bg-[var(--ds-danger-hover)] text-white text-xs font-medium transition-colors shrink-0"
           >
             <X class="w-3.5 h-3.5" />
             <span>结束私聊</span>
@@ -622,7 +634,7 @@ function roomMemberNames(memberIds: string[]): string {
 
             <div
               v-if="modeMenuOpen && isDesktopComposer"
-              class="absolute left-0 bottom-full mb-2 z-30 w-64 p-1.5 rounded-2xl bg-white/95 backdrop-blur-xl border border-black/[0.08] shadow-[0_14px_38px_rgba(0,0,0,0.14)] space-y-0.5"
+              class="animate-popover absolute left-0 bottom-full mb-2 z-30 w-64 p-1.5 rounded-2xl bg-white/95 backdrop-blur-xl border border-black/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.14)] space-y-0.5"
             >
               <button
                 v-for="m in modes"
@@ -630,7 +642,7 @@ function roomMemberNames(memberIds: string[]): string {
                 type="button"
                 @click="selectMode(m.kind)"
                 class="w-full flex items-start gap-2.5 px-3 py-2 rounded-xl text-left transition-colors"
-                :class="mode === m.kind ? 'bg-black/[0.055] text-[#1D1D1F]' : 'text-slate-600 hover:bg-black/[0.035] hover:text-[#1D1D1F]'"
+                :class="mode === m.kind ? 'bg-black/[0.055] text-[#1D1D1F]' : 'text-slate-700 hover:bg-black/[0.05] hover:text-[#1D1D1F]'"
               >
                 <component :is="m.icon" class="w-4 h-4 mt-0.5 shrink-0" />
                 <div class="min-w-0">
@@ -638,7 +650,7 @@ function roomMemberNames(memberIds: string[]): string {
                     <span>{{ m.label }}</span>
                     <span
                       v-if="m.kind === 'PrivateRoom' && activePrivateRoom"
-                      class="w-1.5 h-1.5 rounded-full bg-violet-600"
+                      class="w-1.5 h-1.5 rounded-full bg-[var(--ds-accent)]"
                     ></span>
                   </div>
                   <div class="text-[11px] text-slate-400 line-clamp-1 mt-0.5">{{ m.shortHint }}</div>
@@ -650,7 +662,7 @@ function roomMemberNames(memberIds: string[]): string {
           <!-- Whisper Target Selector -->
           <div
             v-if="mode === 'GodWhisper' && agents.length > 0"
-            class="flex items-center gap-1 px-2.5 h-7 rounded-full bg-indigo-50 text-indigo-700 text-[12px]"
+            class="flex items-center gap-1 px-2.5 h-7 rounded-full bg-[var(--ds-accent-soft)] text-[var(--ds-accent)] text-[12px]"
           >
             <span class="opacity-65">→</span>
             <select
@@ -670,7 +682,7 @@ function roomMemberNames(memberIds: string[]): string {
             class="h-8 flex items-center gap-1.5 px-2.5 rounded-full text-[12.5px] font-medium transition-colors"
             :class="
               cardsOpen
-                ? 'bg-violet-50 text-violet-700'
+                ? 'bg-[var(--ds-accent-soft)] text-[var(--ds-accent)]'
                 : 'text-slate-600 md:text-slate-500 bg-[#F4F4F6] md:bg-transparent hover:text-[#1D1D1F] hover:bg-black/[0.045]'
             "
             title="查看或抽取转折事件卡"
@@ -689,7 +701,7 @@ function roomMemberNames(memberIds: string[]): string {
           <div
             v-if="activePrivateRoom"
             @click="mode = 'PrivateRoom'"
-            class="flex items-center gap-1 h-7 px-2.5 rounded-full bg-violet-50 text-violet-700 text-[11.5px] font-medium cursor-pointer"
+            class="flex items-center gap-1 h-7 px-2.5 rounded-full bg-[var(--ds-accent-soft)] text-[var(--ds-accent)] text-[11.5px] font-medium cursor-pointer"
             :title="activePrivateRoom.title || '私密房间进行中'"
           >
             <DoorClosed class="w-3 h-3" />
@@ -697,7 +709,7 @@ function roomMemberNames(memberIds: string[]): string {
             <button
               type="button"
               @click.stop="emit('closePrivateRoom')"
-              class="ml-0.5 hover:text-rose-600"
+              class="ml-0.5 hover:text-[var(--ds-danger)]"
               title="结束私聊"
             >
               <X class="w-3 h-3" />

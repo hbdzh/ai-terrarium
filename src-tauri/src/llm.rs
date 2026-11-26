@@ -512,6 +512,42 @@ pub fn build_flipped_messages_with_room(
         );
     }
 
+    let is_suspense_or_faction = config
+        .tags
+        .iter()
+        .any(|t| t == "悬疑推理" || t == "阵营博弈");
+    if is_suspense_or_faction {
+        let current_turn = timeline
+            .iter()
+            .filter(|m| m.role == SpeakerRole::Ai)
+            .map(|m| m.turn_number)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let convergence_threshold = if config.enable_narrative_arc && config.target_total_turns > 0 {
+            ((config.target_total_turns as f64) * 0.6).ceil() as u32
+        } else {
+            13
+        };
+        if current_turn < convergence_threshold {
+            status_items.push(
+                "【前期节奏约束（反早熟收敛）】当前处于试探与信息收集阶段，严禁过早达成破案共识或全员抱团锁死单一嫌疑人；面对指控时优先质疑证据链漏洞或转移怀疑焦点。"
+                    .to_string(),
+            );
+        }
+        status_items.push(
+            "【微表情破绽信号（可选）】若本轮发言你刻意隐瞒了关键事实、撒谎或内心极度紧张，可在回复最末尾附带一个微表情标记（严格仅限以下四选一：`[CUE:眼神闪躲]`、`[CUE:语速微促]`、`[CUE:指节收紧]`、`[CUE:刻意停顿]`）；若诚实坦然发言则不要添加。"
+                .to_string(),
+        );
+    }
+
+    if !node_cfg.secret_goal.trim().is_empty() && !node_cfg.goal_achieved {
+        status_items.push(format!(
+            "【你的本局暗线胜利条件（严禁泄露）】{}",
+            node_cfg.secret_goal.trim()
+        ));
+    }
+
     if !status_items.is_empty() {
         let status_board = format!("【当前局势与即时状态】\n{}", status_items.join("\n\n"));
         if mapped.last().map(|m| m.role.as_str()) == Some("user") {
@@ -525,6 +561,36 @@ pub fn build_flipped_messages_with_room(
             }
         } else {
             mapped.push(ApiChatMessage::text("user", status_board));
+        }
+    }
+
+    // 尾部「声纹与执念锚点」动态注入（不落库、不破坏前置 Prefix Cache）
+    if !(is_free_mode
+        && config.tags.is_empty()
+        && base_prompt.is_empty()
+        && node_cfg.private_state_snapshot.trim().is_empty())
+    {
+        let anchor_state = if !node_cfg.private_state_snapshot.trim().is_empty() {
+            node_cfg.private_state_snapshot.trim().to_string()
+        } else if !base_prompt.is_empty() {
+            base_prompt.chars().take(60).collect()
+        } else {
+            "保持独立视角与真实口吻".to_string()
+        };
+        let voiceprint_anchor = format!(
+            "[状态锚点：你是{}，必须严格保持你的人设口吻与性格底色；你当前的私人状态与执念是：{}。直接以角色身份自然开口，禁止使用AI总结腔或列提纲。]",
+            node_cfg.label.trim(),
+            anchor_state
+        );
+        if let Some(last_msg) = mapped.last_mut() {
+            if let Some(existing) = last_msg.content.as_mut() {
+                existing.push_str("\n\n");
+                existing.push_str(&voiceprint_anchor);
+            } else {
+                last_msg.content = Some(voiceprint_anchor);
+            }
+        } else {
+            mapped.push(ApiChatMessage::text("user", voiceprint_anchor));
         }
     }
 
@@ -1331,6 +1397,7 @@ mod tests {
             room_id: "main".to_string(),
             reasoning_content: String::new(),
             content: content.to_string(),
+            micro_cue: None,
             model_name: "test".to_string(),
             duration_ms: 100,
             prompt_tokens: 10,
@@ -1793,6 +1860,7 @@ mod tests {
             room_id: "main".to_string(),
             reasoning_content: String::new(),
             content: "你晚上吃什么？".to_string(),
+            micro_cue: None,
             model_name: "m".to_string(),
             duration_ms: 10,
             prompt_tokens: 1,

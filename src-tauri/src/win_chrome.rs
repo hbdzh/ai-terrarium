@@ -31,7 +31,7 @@ const MAX_BTN_CLASS_NAME: PCWSTR = w!("AI_TERRARIUM_MAX_BTN_CLASS");
 const MAX_BTN_WINDOW_NAME: PCWSTR = w!("AI_TERRARIUM_MAX_BTN");
 
 const CAPTION_BTN_WIDTH_LOGICAL: f32 = 46.0;
-const CAPTION_BTN_HEIGHT_LOGICAL: f32 = 36.0;
+const CAPTION_BTN_HEIGHT_LOGICAL: f32 = 42.0;
 
 /// Window styles required by Windows 11 DWM / Explorer to enable Snap Layouts on HTMAXBUTTON.
 /// `tao` keeps `WM_NCCALCSIZE -> 0` based on its internal `MARKER_DECORATIONS` flag, so keeping these

@@ -27,8 +27,8 @@ function toggle() {
     :aria-checked="modelValue"
     :disabled="disabled"
     @click="toggle"
-    class="relative inline-flex h-[22px] w-[40px] shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-150 ease-in-out focus-visible:outline-2 focus-visible:outline-[#7965CC] focus-visible:outline-offset-2 disabled:opacity-45 disabled:cursor-not-allowed"
-    :class="modelValue ? 'bg-[#7965CC] dark:bg-[#9583E0]' : 'bg-[#D6D8DE] dark:bg-white/20'"
+    class="relative inline-flex h-[22px] w-[40px] shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-150 ease-in-out focus-visible:outline-2 focus-visible:outline-[#007AFF] focus-visible:outline-offset-2 disabled:opacity-45 disabled:cursor-not-allowed"
+    :class="modelValue ? 'bg-[#007AFF] dark:bg-[#0A84FF]' : 'bg-[#D6D8DE] dark:bg-white/20'"
   >
     <span
       class="pointer-events-none inline-block h-[18px] w-[18px] transform rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.22)] transition duration-150 ease-in-out"

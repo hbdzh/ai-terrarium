@@ -158,88 +158,109 @@ function cycleApprovalMode() {
       </button>
     </div>
 
-    <!-- Approval Mode & View Switcher -->
-    <div class="px-3.5 md:px-3 py-2 md:py-1.5 bg-white flex items-center justify-between gap-2 shrink-0">
-      <div class="flex items-center gap-0.5 p-1 md:p-0.5 rounded-full bg-[#F2F2F7]">
+    <!-- Approval Mode & Light Underline View Switcher -->
+    <div class="bg-white border-b border-[#ECECF0] shrink-0">
+      <div v-if="!readOnly" class="px-4 pt-2.5 pb-1 flex items-center justify-between gap-2">
+        <span class="text-[11.5px] text-[#858A95] truncate">
+          <template v-if="lastActor">{{ lastActor }}: {{ lastReason || "已更新" }}</template>
+          <template v-else>角色共享设定与线索</template>
+        </span>
+        <button
+          type="button"
+          @click="cycleApprovalMode"
+          class="h-7 flex items-center gap-1 px-2.5 rounded-full text-[11.5px] font-medium border transition whitespace-nowrap shrink-0"
+          :class="
+            approvalMode === 'approval'
+              ? 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100/70'
+              : approvalMode === 'guardian'
+                ? 'bg-[var(--ds-accent-soft)] text-[var(--ds-accent)] border-[var(--ds-accent-border)] hover:bg-[var(--ds-accent-soft-hover)]'
+                : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100/70'
+          "
+          :title="
+            approvalMode === 'approval'
+              ? '当前：人工审核（点击切换为自动放行）'
+              : approvalMode === 'guardian'
+                ? '当前：防泄密审核（点击切换为人工审核）'
+                : '当前：自动放行（点击切换为防泄密审核）'
+          "
+        >
+          <ShieldAlert v-if="approvalMode === 'approval'" class="w-3.5 h-3.5" />
+          <Shield v-else-if="approvalMode === 'guardian'" class="w-3.5 h-3.5" />
+          <ShieldCheck v-else class="w-3.5 h-3.5" />
+          <span>{{
+            approvalMode === "approval"
+              ? "人工审核"
+              : approvalMode === "guardian"
+                ? "防泄密审核"
+                : "自动放行"
+          }}</span>
+        </button>
+      </div>
+
+      <div class="px-4 flex items-center gap-4 text-[12.5px] overflow-x-auto no-scrollbar">
         <button
           type="button"
           @click="viewMode = 'rendered'"
-          class="flex items-center gap-1 px-3 py-1 md:px-2 md:py-0.5 rounded-full text-[12px] md:text-[10.5px] font-medium transition whitespace-nowrap"
-          :class="viewMode === 'rendered' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
+          class="relative flex items-center gap-1.5 py-2.5 transition-colors whitespace-nowrap shrink-0"
+          :class="viewMode === 'rendered' ? 'text-[#1D1D1F] font-semibold' : 'text-[#858A95] hover:text-[#1D1D1F] font-medium'"
         >
-          <Eye class="w-3.5 h-3.5 md:w-3 md:h-3" />
-          预览
+          <Eye class="w-3.5 h-3.5" />
+          <span>预览</span>
+          <span
+            v-if="viewMode === 'rendered'"
+            class="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-[#1D1D1F]"
+          ></span>
         </button>
         <button
           type="button"
           @click="viewMode = 'diff'"
-          class="flex items-center gap-1 px-3 py-1 md:px-2 md:py-0.5 rounded-full text-[12px] md:text-[10.5px] font-medium transition whitespace-nowrap"
-          :class="viewMode === 'diff' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
+          class="relative flex items-center gap-1.5 py-2.5 transition-colors whitespace-nowrap shrink-0"
+          :class="viewMode === 'diff' ? 'text-[#1D1D1F] font-semibold' : 'text-[#858A95] hover:text-[#1D1D1F] font-medium'"
         >
-          <GitCompare class="w-3.5 h-3.5 md:w-3 md:h-3" />
-          修改对比
+          <GitCompare class="w-3.5 h-3.5" />
+          <span>修改对比</span>
           <span v-if="hasDiff" class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+          <span
+            v-if="viewMode === 'diff'"
+            class="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-[#1D1D1F]"
+          ></span>
         </button>
         <button
           v-if="!readOnly"
           type="button"
           @click="startEdit"
-          class="flex items-center gap-1 px-3 py-1 md:px-2 md:py-0.5 rounded-full text-[12px] md:text-[10.5px] font-medium transition whitespace-nowrap"
-          :class="viewMode === 'edit' ? 'bg-[#1D1D1F] text-white' : 'text-slate-600'"
+          class="relative flex items-center gap-1.5 py-2.5 transition-colors whitespace-nowrap shrink-0"
+          :class="viewMode === 'edit' ? 'text-[#1D1D1F] font-semibold' : 'text-[#858A95] hover:text-[#1D1D1F] font-medium'"
         >
-          <Pencil class="w-3.5 h-3.5 md:w-3 md:h-3" />
-          编辑
+          <Pencil class="w-3.5 h-3.5" />
+          <span>编辑</span>
+          <span
+            v-if="viewMode === 'edit'"
+            class="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-[#1D1D1F]"
+          ></span>
         </button>
         <button
           type="button"
           @click="viewMode = 'notes'"
-          class="flex items-center gap-1 px-3 py-1 md:px-2 md:py-0.5 rounded-full text-[12px] md:text-[10.5px] font-medium transition whitespace-nowrap"
-          :class="viewMode === 'notes' ? 'bg-violet-600 text-white' : 'text-slate-600'"
+          class="relative flex items-center gap-1.5 py-2.5 transition-colors whitespace-nowrap shrink-0"
+          :class="viewMode === 'notes' ? 'text-[var(--ds-accent)] font-semibold' : 'text-[#858A95] hover:text-[#1D1D1F] font-medium'"
           title="查看各角色的私密备忘"
         >
-          <Lock class="w-3.5 h-3.5 md:w-3 md:h-3" />
+          <Lock class="w-3.5 h-3.5" />
           <span>备忘</span>
           <span
             v-if="nonEmptyNoteCount > 0"
-            class="px-1 rounded-full text-[10px] tabular-nums"
-            :class="viewMode === 'notes' ? 'bg-white/20 text-white' : 'bg-violet-100 text-violet-700'"
+            class="px-1.5 py-0.5 rounded-full text-[10.5px] leading-none tabular-nums"
+            :class="viewMode === 'notes' ? 'bg-[var(--ds-accent-soft)] text-[var(--ds-accent)]' : 'bg-black/[0.05] text-[#666B76]'"
           >
             {{ nonEmptyNoteCount }}
           </span>
+          <span
+            v-if="viewMode === 'notes'"
+            class="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-[var(--ds-accent)]"
+          ></span>
         </button>
       </div>
-
-      <button
-        v-if="!readOnly"
-        type="button"
-        @click="cycleApprovalMode"
-        class="h-8 md:h-auto flex items-center gap-1 px-3 md:px-2 py-1 rounded-full text-[12px] md:text-[10.5px] font-medium border transition whitespace-nowrap shrink-0"
-        :class="
-          approvalMode === 'approval'
-            ? 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100/70'
-            : approvalMode === 'guardian'
-              ? 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100/70'
-              : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100/70'
-        "
-        :title="
-          approvalMode === 'approval'
-            ? '当前：人工审核（点击切换为自动放行）'
-            : approvalMode === 'guardian'
-              ? '当前：防泄密审核（点击切换为人工审核）'
-              : '当前：自动放行（点击切换为防泄密审核）'
-        "
-      >
-        <ShieldAlert v-if="approvalMode === 'approval'" class="w-3.5 h-3.5 md:w-3 md:h-3" />
-        <Shield v-else-if="approvalMode === 'guardian'" class="w-3.5 h-3.5 md:w-3 md:h-3" />
-        <ShieldCheck v-else class="w-3.5 h-3.5 md:w-3 md:h-3" />
-        <span>{{
-          approvalMode === "approval"
-            ? "人工审核"
-            : approvalMode === "guardian"
-              ? "防泄密审核"
-              : "自动放行"
-        }}</span>
-      </button>
     </div>
 
     <!-- Body -->
@@ -301,7 +322,7 @@ function cycleApprovalMode() {
         <div class="space-y-3">
           <div class="flex items-center justify-between gap-2 px-0.5">
             <div class="flex items-center gap-1.5 text-[12px] font-semibold text-[#1D1D1F]">
-              <Lock class="w-3.5 h-3.5 text-violet-600" />
+              <Lock class="w-3.5 h-3.5 text-[var(--ds-accent)]" />
               <span>角色私密备忘</span>
             </div>
             <span class="text-[11px] text-slate-400">仅本人可见</span>
@@ -309,7 +330,7 @@ function cycleApprovalMode() {
 
           <div
             v-if="blindGuessMode"
-            class="rounded-2xl border border-dashed border-violet-200 bg-violet-50/60 p-5 text-center text-xs text-violet-700 leading-relaxed space-y-1"
+            class="rounded-2xl border border-dashed border-[var(--ds-accent-border)] bg-[var(--ds-accent-soft)] p-5 text-center text-xs text-[var(--ds-accent)] leading-relaxed space-y-1"
           >
             <div class="font-semibold">盲猜模式已开启</div>
             <div class="text-[11px] text-slate-500">
@@ -323,7 +344,7 @@ function cycleApprovalMode() {
           >
             <div>未开启「角色私密备忘」</div>
             <div class="text-[11px] text-slate-400">
-              可在「设置 → 调度与安全」或新建推演时开启。
+              可在「设置 → 角色行为」或新建推演时开启。
             </div>
           </div>
 
@@ -334,7 +355,7 @@ function cycleApprovalMode() {
               class="rounded-2xl border p-3.5 space-y-1.5 transition"
               :class="
                 item.note
-                  ? 'border-violet-200/80 bg-violet-50/35'
+                  ? 'border-[var(--ds-accent-border)] bg-[var(--ds-accent-soft)]'
                   : 'border-black/[0.06] bg-[#FAFAFC]'
               "
             >
@@ -342,7 +363,7 @@ function cycleApprovalMode() {
                 <div class="flex items-center gap-1.5 min-w-0">
                   <span
                     class="w-2 h-2 rounded-full shrink-0"
-                    :class="item.note ? 'bg-violet-500' : 'bg-slate-300'"
+                    :class="item.note ? 'bg-[var(--ds-accent)]' : 'bg-slate-300'"
                   ></span>
                   <span class="text-[12.5px] font-semibold text-[#1D1D1F] truncate">{{ item.label }}</span>
                   <span v-if="item.modelName" class="text-[10.5px] text-slate-400 font-mono truncate">
@@ -388,16 +409,16 @@ function cycleApprovalMode() {
         >
           <div class="flex items-center justify-between gap-2 px-0.5">
             <div class="flex items-center gap-1.5 text-[12px] font-semibold text-[#1D1D1F]">
-              <Lock class="w-3.5 h-3.5 text-violet-600" />
+              <Lock class="w-3.5 h-3.5 text-[var(--ds-accent)]" />
               <span>角色私密备忘</span>
-              <span class="px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-700 text-[10.5px] tabular-nums">
+              <span class="px-1.5 py-0.5 rounded-full bg-[var(--ds-accent-soft)] text-[var(--ds-accent)] text-[10.5px] tabular-nums">
                 {{ nonEmptyNoteCount }}/{{ agentNoteEntries.length }}
               </span>
             </div>
             <button
               type="button"
               @click="viewMode = 'notes'"
-              class="text-[11px] font-medium text-violet-600 hover:text-violet-700"
+              class="text-[11px] font-medium text-[var(--ds-accent)] hover:text-[var(--ds-accent-hover)]"
             >
               单独查看 →
             </button>
@@ -405,7 +426,7 @@ function cycleApprovalMode() {
 
           <div
             v-if="blindGuessMode"
-            class="rounded-2xl border border-dashed border-violet-200 bg-violet-50/60 p-4 text-center text-[11.5px] text-violet-700"
+            class="rounded-2xl border border-dashed border-[var(--ds-accent-border)] bg-[var(--ds-accent-soft)] p-4 text-center text-[11.5px] text-[var(--ds-accent)]"
           >
             盲猜模式已开启，私密备忘已隐藏
           </div>
@@ -416,7 +437,7 @@ function cycleApprovalMode() {
               class="rounded-2xl border p-3 space-y-1"
               :class="
                 item.note
-                  ? 'border-violet-200/80 bg-violet-50/35'
+                  ? 'border-[var(--ds-accent-border)] bg-[var(--ds-accent-soft)]'
                   : 'border-black/[0.05] bg-[#FAFAFC]'
               "
             >

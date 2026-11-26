@@ -462,3 +462,161 @@ export async function renderPureScriptPngBytes(
   const buf = await blob.arrayBuffer();
   return new Uint8Array(buf);
 }
+
+export interface ReplayHandoutSecrets {
+  agents: {
+    label: string;
+    systemPrompt: string;
+    secretGoal: string;
+    goalAchieved: boolean;
+  }[];
+  privateRooms: {
+    roomTitle: string;
+    messages: { speaker: string; turnNumber: number; content: string }[];
+  }[];
+  finalConclusion: string;
+}
+
+export function stripMicroCueTagsClient(raw: string): string {
+  if (!raw) return "";
+  return raw.replace(/\[CUE:[^\]]*\]/g, "").trim();
+}
+
+export function buildReplayHandoutSecrets(detail: ExperimentDetail): ReplayHandoutSecrets {
+  const agentLabelMap = new Map<string, string>();
+  const agents = (detail.config.agents ?? []).map((ag, idx) => {
+    const label = ag.label || `角色 ${idx + 1}`;
+    agentLabelMap.set(ag.id, label);
+    return {
+      label,
+      systemPrompt: ag.systemPrompt?.trim() || "（无隐藏设定）",
+      secretGoal: ag.secretGoal?.trim() || "",
+      goalAchieved: Boolean(ag.goalAchieved),
+    };
+  });
+
+  const labelFor = (id: string | null) =>
+    id ? agentLabelMap.get(id) ?? id : "AI";
+
+  const roomMap = new Map<string, { speaker: string; turnNumber: number; content: string }[]>();
+  for (const m of detail.messages) {
+    const rid = m.roomId || "main";
+    if (rid === "main" || m.role === "GodWhisper") continue;
+    const clean = stripMicroCueTagsClient(stripThinkTagsClient(m.content));
+    if (!clean) continue;
+    if (!roomMap.has(rid)) roomMap.set(rid, []);
+    roomMap.get(rid)!.push({
+      speaker: m.role === "Ai" ? labelFor(m.agentId) : "系统",
+      turnNumber: m.turnNumber,
+      content: clean,
+    });
+  }
+
+  const privateRooms = Array.from(roomMap.entries()).map(([rid, msgs]) => {
+    const members = detail.roomMembers?.[rid] ?? [];
+    const roomTitle =
+      members.length > 0
+        ? `私密里屋 · ${members.map((id) => labelFor(id)).join(" × ")}`
+        : `私密里屋 (${rid})`;
+    return { roomTitle, messages: msgs };
+  });
+
+  let finalConclusion = detail.finalReport?.trim() ?? "";
+  if (!finalConclusion && detail.observerNotes.length > 0) {
+    const latest = detail.observerNotes[0];
+    const edges = (latest.relationshipMatrix ?? [])
+      .map((e) => `- ${e.from} → ${e.to}：信任度 ${e.trustScore}（${e.attitudeTag}）`)
+      .join("\n");
+    finalConclusion = [
+      `最新阶段（第 ${latest.triggerTurn} 轮 · ${latest.depthStage}）：${latest.note}`,
+      `指标：火药味 ${latest.tensionScore} / 抽象度 ${latest.abstractionScore} / 僵化度 ${latest.stagnationIndex}`,
+      edges ? `关系矩阵：\n${edges}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  return {
+    agents,
+    privateRooms,
+    finalConclusion: finalConclusion || "（暂无局势分析或结案复盘报告）",
+  };
+}
+
+export function buildReplayHandoutMarkdown(detail: ExperimentDetail): string {
+  const doc = buildPureScriptDocument(detail);
+  const secrets = buildReplayHandoutSecrets(detail);
+  const lines: string[] = [];
+
+  lines.push(`# ${doc.title} · 剧本杀复盘手卡`);
+  lines.push("");
+  if (doc.tags.length > 0) {
+    lines.push(`**标签**：${doc.tags.join(" · ")}`);
+    lines.push("");
+  }
+  if (doc.cast.length > 0) {
+    lines.push(`**参演角色**：${doc.cast.map((c) => c.label).join("、")}`);
+    lines.push("");
+  }
+  if (doc.boardContent) {
+    lines.push("## 现场线索与共识（共享白板）");
+    lines.push("");
+    lines.push(doc.boardContent);
+    lines.push("");
+  }
+
+  lines.push("## 一、 公屏剧情实录（纯净版）");
+  lines.push("");
+  for (const item of doc.items) {
+    if (item.kind === "ai" && !item.roomLabel) {
+      const clean = stripMicroCueTagsClient(item.content);
+      lines.push(`**${item.speaker}**：${clean}`);
+      lines.push("");
+    } else if (item.kind === "god_system") {
+      lines.push(`> **[场景事件]** ${stripMicroCueTagsClient(item.content)}`);
+      lines.push("");
+    } else if (item.kind === "god_public") {
+      lines.push(`> **[外部插话]** ${stripMicroCueTagsClient(item.content)}`);
+      lines.push("");
+    } else if (item.kind === "pass") {
+      lines.push(`*— ${item.content} —*`);
+      lines.push("");
+    }
+  }
+
+  lines.push("---");
+  lines.push("");
+  lines.push("## 二、 幕后真相与复盘档案");
+  lines.push("");
+  lines.push("### 1. 全员隐藏底牌与暗线胜负手");
+  lines.push("");
+  for (const ag of secrets.agents) {
+    lines.push(`#### ${ag.label}`);
+    lines.push(`- **隐藏底牌**：${ag.systemPrompt}`);
+    if (ag.secretGoal) {
+      lines.push(
+        `- **暗线胜负目标**：${ag.secretGoal}（**${ag.goalAchieved ? "🏆 已达成" : "未达成"}**）`
+      );
+    }
+    lines.push("");
+  }
+
+  if (secrets.privateRooms.length > 0) {
+    lines.push("### 2. 私密里屋密谈摘要");
+    lines.push("");
+    for (const room of secrets.privateRooms) {
+      lines.push(`#### ${room.roomTitle}`);
+      for (const m of room.messages) {
+        lines.push(`- **[第${m.turnNumber}轮 ${m.speaker}]**：${m.content}`);
+      }
+      lines.push("");
+    }
+  }
+
+  lines.push(`### ${secrets.privateRooms.length > 0 ? "3" : "2"}. 最终局势分析结论`);
+  lines.push("");
+  lines.push(secrets.finalConclusion);
+  lines.push("");
+
+  return lines.join("\n");
+}

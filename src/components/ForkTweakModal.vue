@@ -178,7 +178,7 @@ function submit(autoStep: boolean) {
     <template #header>
       <div class="px-5 py-3.5 border-b border-black/[0.06] flex items-center justify-between gap-2 bg-white shrink-0">
         <div class="flex items-center gap-2 min-w-0">
-          <div class="w-7 h-7 rounded-xl bg-violet-50 text-violet-600 flex items-center justify-center shrink-0">
+          <div class="w-7 h-7 rounded-xl bg-[var(--ds-accent-soft)] text-[var(--ds-accent)] flex items-center justify-center shrink-0">
             <GitBranch class="w-4 h-4" />
           </div>
           <div class="min-w-0">
@@ -263,7 +263,7 @@ function submit(autoStep: boolean) {
                 v-if="draftConfig.agents.length > 2"
                 type="button"
                 @click="removeAgent(idx)"
-                class="w-9 h-9 flex items-center justify-center rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                class="w-9 h-9 flex items-center justify-center rounded-xl text-slate-400 hover:text-[var(--ds-danger)] hover:bg-[var(--ds-danger-soft)]"
               >
                 <Trash2 class="w-4 h-4" />
               </button>

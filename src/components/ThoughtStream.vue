@@ -347,11 +347,6 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
 
 <template>
   <div class="relative flex-1 min-h-0 flex flex-col">
-    <!-- Top soft fade when dialogue scrolls upward under header -->
-    <div
-      class="pointer-events-none absolute inset-x-0 top-0 h-7 z-10 bg-gradient-to-b from-white via-white/80 to-transparent"
-    ></div>
-
     <div
       ref="containerRef"
       @scroll="handleScroll"
@@ -446,6 +441,7 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
         :duration-ms="item.msg.durationMs"
         :reasoning-content="item.msg.reasoningContent ?? ''"
         :content="item.msg.content"
+        :micro-cue="item.msg.microCue"
         :align-right="agentStyle(item.msg.agentId).alignRight"
         :palette="agentStyle(item.msg.agentId).palette"
         :highlighted="highlightedTurn === item.msg.turnNumber"
@@ -525,10 +521,5 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
     />
       </div>
     </div>
-
-    <!-- Bottom soft fade into floating composer -->
-    <div
-      class="pointer-events-none absolute inset-x-0 bottom-0 h-5 z-10 bg-gradient-to-t from-white via-white/80 to-transparent"
-    ></div>
   </div>
 </template>

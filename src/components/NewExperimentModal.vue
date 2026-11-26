@@ -53,6 +53,7 @@ import type {
   NodeConfig,
   PresetConfigOverrides,
   PresetTemplate,
+  TimedClue,
 } from "../types";
 
 const props = defineProps<{
@@ -77,16 +78,19 @@ const customAgents = ref<NodeConfig[]>([]);
 const customGlobalPrompt = ref("");
 const customInitialTopic = ref("");
 const customInitialBoard = ref("");
+const customTimedClues = ref<TimedClue[]>([]);
+const timedCluesOpen = ref(false);
 const enableNarrativeArc = ref(false);
 const targetTotalTurns = ref(30);
 const syncToPreset = ref(false);
 const activeTab = ref<"basic" | "advanced" | "ai">("basic");
 const editingAgentIdx = ref<number | null>(null);
 const isNewRoleDraft = ref(false);
-const editingDraft = ref<{ label: string; apiProfileId: string; systemPrompt: string; avatarSeed: number }>({
+const editingDraft = ref<{ label: string; apiProfileId: string; systemPrompt: string; secretGoal: string; avatarSeed: number }>({
   label: "",
   apiProfileId: "",
   systemPrompt: "",
+  secretGoal: "",
   avatarSeed: 1,
 });
 const avatarSeeds = ref<Record<string, number>>({});
@@ -169,6 +173,7 @@ function openRoleEditor(idx: number) {
     label: ag.label,
     apiProfileId: ag.apiProfileId || props.apiProfiles[0]?.id || "",
     systemPrompt: ag.systemPrompt,
+    secretGoal: ag.secretGoal ?? "",
     avatarSeed: getRoleAvatarSeed(ag),
   };
 }
@@ -194,6 +199,7 @@ function saveRoleEditor() {
         modelName: prof.modelName,
         temperature: 0.9,
         systemPrompt: editingDraft.value.systemPrompt,
+        secretGoal: editingDraft.value.secretGoal.trim(),
       },
       prof
     );
@@ -209,6 +215,7 @@ function saveRoleEditor() {
   }
   ag.label = editingDraft.value.label;
   ag.systemPrompt = editingDraft.value.systemPrompt;
+  ag.secretGoal = editingDraft.value.secretGoal.trim();
   avatarSeeds.value[ag.id] = editingDraft.value.avatarSeed;
   if (editingDraft.value.apiProfileId) {
     selectAgentProfile(ag, editingDraft.value.apiProfileId);
@@ -244,6 +251,7 @@ function addModalAgentAndEdit() {
     label: nextUniqueAgentLabel(customAgents.value),
     apiProfileId: defaultProfile().id,
     systemPrompt: "",
+    secretGoal: "",
     avatarSeed: randomAvatarSeed(),
   };
 }
@@ -399,6 +407,8 @@ watch(
       title.value = `${first?.name.replace(/（.*?）/g, "") ?? "自由漫谈"} #${Math.floor(10 + Math.random() * 90)}`;
       syncToPreset.value = false;
       customInitialBoard.value = "";
+      customTimedClues.value = [];
+      timedCluesOpen.value = false;
       enableNarrativeArc.value = props.currentConfig?.enableNarrativeArc ?? false;
       targetTotalTurns.value = props.currentConfig?.targetTotalTurns ?? 30;
       ideaInput.value = "";
@@ -426,6 +436,8 @@ async function generateFromIdea() {
     customGlobalPrompt.value = res.globalSystemPrompt;
     customInitialTopic.value = res.initialTopic;
     customInitialBoard.value = res.initialBoard;
+    customTimedClues.value = res.timedClues ?? [];
+    timedCluesOpen.value = customTimedClues.value.length > 0;
     applyRecommendedConfig({
       allowPassTurn: false,
       randomMoodDice: false,
@@ -450,6 +462,7 @@ async function generateFromIdea() {
           modelName: matched.modelName,
           temperature: existing?.temperature ?? 0.9,
           systemPrompt: ag.systemPrompt,
+          secretGoal: ag.secretGoal ?? "",
         },
         matched
       );
@@ -582,6 +595,7 @@ function handleCreate() {
   base.enablePrivateNotes = enablePrivateNotes.value;
   base.enableBoardTools = enableBoardTools.value;
   base.enableSmartSelector = enableSmartSelector.value;
+  base.timedClues = customTimedClues.value.map((c) => ({ ...c }));
   base.agents = customAgents.value.map((a, idx) => ({
     ...a,
     label: a.label.trim() || `角色 ${idx + 1}`,
@@ -670,7 +684,7 @@ function handleCreate() {
                   class="hidden md:grid place-items-center w-[29px] h-[29px] rounded-[8px] border shrink-0 transition-colors"
                   :class="
                     selectedPresetId === p.id
-                      ? 'bg-[#F4F0FF] border-[#DBD4ED] text-[#7463AA]'
+                      ? 'bg-[var(--ds-accent-soft)] border-[var(--ds-accent-border)] text-[var(--ds-accent)]'
                       : 'bg-white border-[#E2E2E7] text-[#777681]'
                   "
                 >
@@ -685,7 +699,7 @@ function handleCreate() {
                   v-if="!p.isBuiltin"
                   type="button"
                   @click.stop="handleDeletePresetItem(p)"
-                  class="p-1 rounded text-slate-400 opacity-0 group-hover:opacity-100 hover:text-rose-600 transition shrink-0"
+                  class="p-1 rounded text-slate-400 opacity-0 group-hover:opacity-100 hover:text-[var(--ds-danger)] transition shrink-0"
                   title="删除此自定义预设"
                 >
                   <Trash2 class="w-3 h-3" />
@@ -734,13 +748,13 @@ function handleCreate() {
                   type="button"
                   @click="activeTab = 'ai'"
                   class="relative flex items-center gap-1.5 text-[13px] transition-colors outline-none"
-                  :class="activeTab === 'ai' ? 'text-[#6D5AA6] font-semibold' : 'text-[#82838C] font-medium hover:text-[#292A30]'"
+                  :class="activeTab === 'ai' ? 'text-[var(--ds-accent)] font-semibold' : 'text-[#82838C] font-medium hover:text-[#292A30]'"
                 >
                   <Sparkles class="w-3.5 h-3.5" />
                   <span>AI 剧本创作</span>
                   <span
                     v-if="activeTab === 'ai'"
-                    class="absolute bottom-0 left-0 right-0 h-[2px] bg-[#6D5AA6] rounded-full"
+                    class="absolute bottom-0 left-0 right-0 h-[2px] bg-[var(--ds-accent)] rounded-full"
                   ></span>
                 </button>
               </div>
@@ -750,7 +764,7 @@ function handleCreate() {
                   v-if="selectedPresetId !== 'free' && selectedPresetId !== 'custom'"
                   type="button"
                   @click="overwriteSelectedPreset"
-                  class="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-slate-400 hover:text-[#7063AD] hover:bg-[#F4F0FF] transition"
+                  class="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-slate-400 hover:text-[var(--ds-accent)] hover:bg-[var(--ds-accent-soft)] transition"
                   title="覆盖保存当前选中的预设"
                 >
                   <Save class="w-3 h-3" />
@@ -792,7 +806,7 @@ function handleCreate() {
                     <h2 class="text-[14px] font-semibold text-[#202222]">场景与规则</h2>
                     <span class="text-[11px] text-[#AAAAAA]">可选</span>
                   </div>
-                  <div class="flex items-start gap-2.5 px-3 py-2.5 rounded-[9px] bg-[#FAFAFA] border border-[#EFEFF0] focus-within:border-[#D1CDDD] focus-within:bg-white transition">
+                  <div class="flex items-start gap-2.5 px-3 py-2.5 rounded-[9px] bg-[#FAFAFA] border border-[#EFEFF0] focus-within:border-[#007AFF]/50 focus-within:bg-white transition">
                     <BookOpen class="w-4 h-4 text-[#A0A2A8] mt-0.5 shrink-0" />
                     <textarea
                       v-model="customGlobalPrompt"
@@ -830,7 +844,7 @@ function handleCreate() {
                       :class="
                         duplicateLabels.has(effectiveAgentLabel(ag, idx))
                           ? 'border-rose-400 ring-2 ring-rose-100'
-                          : 'border-[#E6E6E9] hover:border-[#D1CDDD] hover:shadow-[0_2px_9px_rgba(41,35,55,0.04)]'
+                          : 'border-[#E6E6E9] hover:border-[#007AFF]/45 hover:shadow-[0_2px_9px_rgba(0,122,255,0.06)]'
                       "
                     >
                       <div class="flex items-center gap-2.5">
@@ -847,7 +861,7 @@ function handleCreate() {
                           v-if="customAgents.length > 2"
                           type="button"
                           @click.stop="removeModalAgent(idx)"
-                          class="w-7 h-7 grid place-items-center rounded-[7px] text-[#909197] opacity-0 group-hover:opacity-100 hover:bg-rose-50 hover:text-rose-600 self-start shrink-0 transition"
+                          class="w-7 h-7 grid place-items-center rounded-[7px] text-[#909197] opacity-0 group-hover:opacity-100 hover:bg-[var(--ds-danger-soft)] hover:text-[var(--ds-danger)] self-start shrink-0 transition"
                           title="移除角色"
                         >
                           <Trash2 class="w-3.5 h-3.5" />
@@ -919,7 +933,7 @@ function handleCreate() {
                       </div>
                       <span
                         class="w-[31px] h-[18px] rounded-full relative shrink-0 transition-colors"
-                        :class="item.refVal.value ? 'bg-[#8172BA]' : 'bg-[#D9D9DE]'"
+                        :class="item.refVal.value ? 'bg-[var(--ds-accent)]' : 'bg-[#D9D9DE]'"
                       >
                         <span
                           class="absolute top-[2px] left-[2px] w-[14px] h-[14px] rounded-full bg-white shadow-xs transition-transform"
@@ -955,6 +969,60 @@ function handleCreate() {
                         rows="3"
                         class="w-full resize-none rounded-[8px] border border-[#E9E9ED] bg-[#FAFAFA] focus:bg-white px-3 py-2 text-[12px] font-mono leading-relaxed outline-none"
                       ></textarea>
+                    </div>
+
+                    <div class="p-3.5 space-y-2.5">
+                      <button
+                        type="button"
+                        @click="timedCluesOpen = !timedCluesOpen"
+                        class="w-full flex items-center justify-between text-left"
+                      >
+                        <span class="text-[12.5px] font-medium text-[#202222]">
+                          定时线索（分幕物证）
+                          <span v-if="customTimedClues.length > 0" class="ml-1 text-[11px] text-slate-400">
+                            ({{ customTimedClues.length }} 条)
+                          </span>
+                        </span>
+                        <span class="text-[11px] text-slate-400">{{ timedCluesOpen ? "收起" : "展开" }}</span>
+                      </button>
+
+                      <div v-if="timedCluesOpen" class="space-y-2 pt-1">
+                        <div
+                          v-for="(clue, cIdx) in customTimedClues"
+                          :key="cIdx"
+                          class="flex items-center gap-2"
+                        >
+                          <span class="text-[11px] text-slate-500 shrink-0">第</span>
+                          <input
+                            v-model.number="clue.triggerTurn"
+                            type="number"
+                            min="2"
+                            max="200"
+                            class="w-14 h-7 rounded-md border border-[#E2E2E6] bg-white px-1.5 text-[12px] text-center outline-none"
+                          />
+                          <span class="text-[11px] text-slate-500 shrink-0">轮</span>
+                          <input
+                            v-model="clue.content"
+                            type="text"
+                            placeholder="输入届时释放的客观物证或突发线索…"
+                            class="flex-1 h-7 rounded-md border border-[#E2E2E6] bg-white px-2 text-[12px] outline-none"
+                          />
+                          <button
+                            type="button"
+                            @click="customTimedClues.splice(cIdx, 1)"
+                            class="text-[11px] text-slate-400 hover:text-rose-600 px-1.5"
+                          >
+                            删除
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          @click="customTimedClues.push({ triggerTurn: 6 + customTimedClues.length * 4, content: '', triggered: false })"
+                          class="text-[11.5px] font-medium text-[#007AFF] hover:underline"
+                        >
+                          + 添加定时线索
+                        </button>
+                      </div>
                     </div>
 
                     <div class="p-3.5 flex flex-wrap items-center justify-between gap-2">
@@ -994,8 +1062,8 @@ function handleCreate() {
                 </div>
 
                 <div class="rounded-[13px] border border-[#E6E2EF] bg-gradient-to-br from-[#F8F7FC] to-[#FDFCFE] p-4 space-y-3">
-                  <div class="flex items-center gap-2 text-[12px] font-semibold text-[#6D5AA6]">
-                    <span class="w-6 h-6 rounded-[7px] bg-[#EDE8FA] grid place-items-center shrink-0">
+                  <div class="flex items-center gap-2 text-[12px] font-semibold text-[var(--ds-accent)]">
+                    <span class="w-6 h-6 rounded-[7px] bg-[var(--ds-accent-soft)] grid place-items-center shrink-0">
                       <Sparkles class="w-3.5 h-3.5" />
                     </span>
                     <span>剧本灵感</span>
@@ -1013,7 +1081,7 @@ function handleCreate() {
                       type="button"
                       @click="generateFromIdea"
                       :disabled="!ideaInput.trim() || generatingScenario"
-                      class="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-[7px] bg-[#E9E4F5] hover:bg-[#DDD5EF] border border-[#E1D9F0] text-[#655396] text-[12px] font-semibold transition disabled:opacity-45"
+                      class="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-[7px] bg-[var(--ds-accent-soft)] hover:bg-[var(--ds-accent-soft-hover)] border border-[var(--ds-accent-border)] text-[var(--ds-accent)] text-[12px] font-semibold transition disabled:opacity-45"
                     >
                       <Loader2 v-if="generatingScenario" class="w-3.5 h-3.5 animate-spin" />
                       <span>{{ generatingScenario ? "生成中..." : "生成剧本" }}</span>
@@ -1036,7 +1104,7 @@ function handleCreate() {
                       :key="sample"
                       type="button"
                       @click="ideaInput = sample"
-                      class="px-3 py-1.5 rounded-lg bg-[#F5F5F7] hover:bg-[#ECEAF5] text-[12px] text-[#5D6268] hover:text-[#655396] transition"
+                      class="px-3 py-1.5 rounded-lg bg-[#F5F5F7] hover:bg-[var(--ds-accent-soft)] text-[12px] text-[#5D6268] hover:text-[var(--ds-accent)] transition"
                     >
                       {{ sample }}
                     </button>
@@ -1046,7 +1114,7 @@ function handleCreate() {
             </div>
 
             <!-- Footer -->
-            <footer class="h-[62px] border-t border-[#EDEDEE] flex items-center gap-3 px-4 md:px-7 shrink-0 bg-white">
+            <footer class="h-[62px] flex items-center gap-3 px-4 md:px-7 shrink-0 bg-white">
               <div class="hidden sm:flex items-center gap-2 text-[11.5px] text-[#95979D]">
                 <span class="w-[7px] h-[7px] rounded-full bg-[#82AA91]"></span>
                 <span>{{ customAgents.length }} 位角色 · 已准备就绪</span>
@@ -1134,6 +1202,16 @@ function handleCreate() {
                   placeholder="描述角色的身份、性格、目标或隐藏动机…"
                   class="w-full resize-y min-h-[100px] rounded-[8px] border border-[#E2E2E6] bg-[#FAFAFA] focus:bg-white p-2.5 text-[12.5px] leading-relaxed outline-none"
                 ></textarea>
+              </div>
+
+              <div>
+                <label class="block text-[12px] text-[#757780] mb-1.5">本局暗线目标（可选）</label>
+                <input
+                  v-model="editingDraft.secretGoal"
+                  type="text"
+                  placeholder="例如：在不暴露真实身份的前提下让众人怀疑其他人…"
+                  class="w-full rounded-[8px] border border-[#E2E2E6] bg-[#FAFAFA] focus:bg-white px-2.5 py-2 text-[12.5px] outline-none"
+                />
               </div>
 
               <div class="flex items-center justify-end gap-2 pt-1">

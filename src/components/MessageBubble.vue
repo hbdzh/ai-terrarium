@@ -10,7 +10,6 @@ import {
   DropdownMenuTrigger,
 } from "reka-ui";
 import {
-  ChevronDown,
   ChevronRight,
   GitBranch,
   Pencil,
@@ -39,6 +38,7 @@ const props = defineProps<{
   durationMs?: number;
   reasoningContent: string;
   content: string;
+  microCue?: string | null;
   isStreaming?: boolean;
   reasoningElapsedMs?: number;
   alignRight: boolean;
@@ -170,7 +170,7 @@ function submitEditReplay() {
 <template>
   <div
     :data-turn="turnNumber"
-    class="terrarium-msg-item flex min-w-0"
+    class="terrarium-msg-item animate-msg-in flex min-w-0"
     :class="alignRight ? 'justify-end md:justify-start' : 'justify-start'"
   >
     <!-- Mobile (< md): Compact rounded bubble; Desktop (>= md): ChatGPT/Codex-style borderless document thread -->
@@ -198,6 +198,13 @@ function submitEditReplay() {
 
         <span class="font-semibold truncate max-w-[160px] sm:max-w-[220px] md:text-[13.5px]" :class="palette.label">
           {{ agentLabel }}
+        </span>
+        <span
+          v-if="microCue"
+          class="px-1.5 py-0.5 rounded-full bg-slate-100/90 text-slate-500 border border-slate-200/70 text-[10.5px] font-medium shrink-0"
+          title="微表情 / 生理破绽信号"
+        >
+          {{ microCue }}
         </span>
         <span
           v-if="roomId && roomId !== 'main'"
@@ -287,15 +294,15 @@ function submitEditReplay() {
               class="w-1.5 h-1.5 rounded-full bg-slate-500 animate-pulse shrink-0"
             ></span>
             <span class="truncate font-medium md:font-normal">{{ thinkingSummary }}</span>
-            <component
-              :is="reasoningOpen ? ChevronDown : ChevronRight"
-              class="w-3.5 h-3.5 text-slate-400 ml-auto md:ml-0 shrink-0"
+            <ChevronRight
+              class="w-3.5 h-3.5 text-slate-400 ml-auto md:ml-0 shrink-0 transition-transform duration-200"
+              :class="reasoningOpen ? 'rotate-90' : ''"
             />
           </button>
 
           <div
             v-if="reasoningOpen"
-            class="mt-1.5 px-3.5 py-2.5 md:px-3.5 md:py-2 rounded-xl md:rounded-none bg-slate-900/[0.035] md:bg-transparent border border-black/[0.05] md:border-0 md:border-l-2 md:border-slate-200 text-xs md:text-[13px] leading-relaxed text-slate-500 whitespace-pre-wrap break-words max-h-64 overflow-y-auto font-mono md:font-sans"
+            class="animate-tab-in mt-1.5 px-3.5 py-2.5 md:px-3.5 md:py-2 rounded-xl md:rounded-none bg-slate-900/[0.035] md:bg-transparent border border-black/[0.05] md:border-0 md:border-l-2 md:border-slate-200 text-xs md:text-[13px] leading-relaxed text-slate-500 whitespace-pre-wrap break-words max-h-64 overflow-y-auto font-mono md:font-sans"
           >
             {{ reasoningContent }}
           </div>

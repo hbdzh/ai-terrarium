@@ -7,7 +7,6 @@ import {
   StepForward,
   ChevronDown,
   AlertCircle,
-  Film,
   PanelLeft,
   PanelRight,
   UserCheck,
@@ -34,7 +33,6 @@ const props = defineProps<{
   engineState: EngineState;
   statusReason: string | null;
   missingKeys: boolean;
-  replayActive?: boolean;
   sidebarOpen?: boolean;
   trafficLightClearance?: boolean;
   hideSidebarToggle?: boolean;
@@ -45,6 +43,7 @@ const props = defineProps<{
   contextActiveTokens?: number;
   compactMobile?: boolean;
   blindGuessMode?: boolean;
+  inTitlebar?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -54,7 +53,6 @@ const emit = defineEmits<{
   openSettings: [];
   openScript: [];
   renameExperiment: [title: string];
-  toggleReplay: [];
   toggleSidebar: [];
   toggleInspector: [];
   toggleBlindGuess: [];
@@ -169,19 +167,24 @@ const headerHorizontalPadding = computed(() => {
 
 <template>
   <header
-    :data-tauri-drag-region="isMacOS ? '' : undefined"
-    class="@container shrink-0 flex items-center justify-between gap-2 bg-white z-20 select-none antialiased"
+    :data-tauri-drag-region="isMacOS || inTitlebar ? '' : undefined"
+    class="@container shrink-0 flex items-center justify-between gap-2 z-20 select-none antialiased"
     :class="[
-      isDesktopOrWideTablet
-        ? isMobileOS
-          ? 'pt-[var(--safe-top,env(safe-area-inset-top))] min-h-[calc(46px+var(--safe-top,0px))]'
-          : 'h-[46px]'
-        : 'min-h-[52px] pt-[calc(0.35rem+var(--safe-top,env(safe-area-inset-top)))] pb-1.5',
-      headerHorizontalPadding,
+      inTitlebar
+        ? 'w-full h-[42px] bg-transparent pl-2 pr-1.5'
+        : [
+            'bg-white',
+            isDesktopOrWideTablet
+              ? isMobileOS
+                ? 'pt-[var(--safe-top,env(safe-area-inset-top))] min-h-[calc(46px+var(--safe-top,0px))]'
+                : 'h-[46px]'
+              : 'min-h-[52px] pt-[calc(0.35rem+var(--safe-top,env(safe-area-inset-top)))] pb-1.5',
+            headerHorizontalPadding,
+          ],
     ]"
   >
     <!-- Left: Sidebar toggle + title block -->
-    <div :data-tauri-drag-region="isMacOS ? '' : undefined" class="flex items-center gap-2 min-w-0 flex-1">
+    <div :data-tauri-drag-region="isMacOS || inTitlebar ? '' : undefined" class="flex items-center gap-2 min-w-0 flex-1">
       <button
         v-if="!hideSidebarToggle"
         type="button"
@@ -269,12 +272,10 @@ const headerHorizontalPadding = computed(() => {
         <span class="@[680px]:hidden">缺 Key</span>
       </button>
 
-      <!-- Desktop Subtle Inline Metrics (Clickable to open settings, zero box clutter) -->
-      <button
+      <!-- Desktop Subtle Inline Metrics (Display-only, zero click action) -->
+      <div
         v-if="isDesktopOrWideTablet"
-        type="button"
-        @click="emit('openSettings')"
-        class="hidden @[580px]:flex items-center gap-1.5 h-7 px-2 rounded-lg text-[12px] text-slate-400 hover:text-slate-700 hover:bg-black/[0.04] transition-colors shrink-0 mr-1"
+        class="hidden @[580px]:flex items-center gap-1.5 h-7 px-2 rounded-lg text-[12px] text-slate-400 cursor-default shrink-0 mr-1"
         :title="
           tokenBudget > 0
             ? `总轮数 ${experiment?.totalTurns ?? 0} · Token ${(experiment?.totalTokens ?? 0).toLocaleString()} / ${tokenBudget.toLocaleString()} (${budgetPct}%) · 记忆 ${contextUsagePct ?? 0}%`
@@ -290,7 +291,7 @@ const headerHorizontalPadding = computed(() => {
             {{ contextUsagePct }}%
           </span>
         </template>
-      </button>
+      </div>
 
       <!-- Start / Pause -->
       <button
@@ -349,7 +350,7 @@ const headerHorizontalPadding = computed(() => {
 
         <div
           v-if="stepMenuOpen"
-          class="absolute right-0 top-full mt-2 z-30 w-56 md:w-52 p-1.5 rounded-2xl bg-white/95 backdrop-blur-xl border border-black/[0.08] shadow-[0_14px_36px_rgba(0,0,0,0.14)] space-y-0.5"
+          class="animate-popover absolute right-0 top-full mt-2 z-30 w-56 md:w-52 p-1.5 rounded-2xl bg-white/95 backdrop-blur-xl border border-black/[0.08] shadow-[0_14px_36px_rgba(0,0,0,0.14)] space-y-0.5"
         >
           <button
             type="button"
@@ -371,7 +372,7 @@ const headerHorizontalPadding = computed(() => {
             :key="ag.id"
             type="button"
             @click="triggerStep(ag.id)"
-            class="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl text-[12.5px] text-[#1D1D1F] hover:bg-[#007AFF]/10 hover:text-[#0062CC] transition-colors text-left"
+            class="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl text-[12.5px] text-slate-700 hover:bg-black/[0.05] transition-colors text-left"
           >
             <span class="flex items-center gap-2 min-w-0">
               <UserCheck class="w-3.5 h-3.5 shrink-0 text-[#007AFF]" />
@@ -392,8 +393,7 @@ const headerHorizontalPadding = computed(() => {
         <DropdownMenuTrigger as-child>
           <button
             type="button"
-            class="w-9 h-9 rounded-full flex items-center justify-center border border-black/[0.08] transition-colors active:scale-95"
-            :class="replayActive ? 'bg-[#007AFF] text-white border-[#007AFF]' : 'bg-[#F2F2F7] text-slate-700'"
+            class="w-9 h-9 rounded-full flex items-center justify-center border border-black/[0.08] bg-[#F2F2F7] text-slate-700 transition-colors active:scale-95"
             aria-label="更多功能"
           >
             <MoreHorizontal class="w-4 h-4" />
@@ -420,17 +420,9 @@ const headerHorizontalPadding = computed(() => {
               @select="emit('toggleBlindGuess')"
               class="flex items-center gap-2.5 px-3 py-2.5 rounded-xl cursor-pointer outline-none hover:bg-black/[0.05]"
             >
-              <EyeOff v-if="blindGuessMode" class="w-4 h-4 text-violet-600" />
+              <EyeOff v-if="blindGuessMode" class="w-4 h-4 text-[var(--ds-accent)]" />
               <Eye v-else class="w-4 h-4 text-slate-600" />
               <span>{{ blindGuessMode ? "退出盲猜（显示底牌）" : "盲猜模式（隐藏思考与私聊）" }}</span>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              :disabled="isRunning || isStepping || (experiment?.messages.length ?? 0) === 0"
-              @select="emit('toggleReplay')"
-              class="flex items-center gap-2.5 px-3 py-2.5 rounded-xl cursor-pointer outline-none hover:bg-black/[0.05] data-[disabled]:opacity-40"
-            >
-              <Film class="w-4 h-4 text-[#007AFF]" />
-              <span>{{ replayActive ? "退出回放" : "回放" }}</span>
             </DropdownMenuItem>
             <template v-if="agents.length > 0">
               <DropdownMenuSeparator class="my-1 h-px bg-black/[0.06]" />
@@ -473,55 +465,45 @@ const headerHorizontalPadding = computed(() => {
         <button
           type="button"
           @click="triggerHaptic('light'); emit('openScript')"
-          class="h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-[12px] font-medium text-slate-600 hover:text-[#1D1D1F] hover:bg-black/[0.05] transition-colors outline-none"
+          class="flex items-center justify-center gap-1.5 rounded-lg text-[12px] font-medium text-slate-600 hover:text-[#1D1D1F] hover:bg-black/[0.05] transition-colors outline-none"
+          :class="inTitlebar ? 'w-7 h-7' : 'h-8 px-2.5'"
           :title="`编辑本局剧本、标签与角色设定（${agents.length} 位）`"
         >
           <ScrollText class="w-3.5 h-3.5 text-slate-500" />
-          <span class="hidden @[560px]:inline">剧本与角色</span>
-          <span class="hidden @[720px]:inline text-[11px] text-slate-400 tabular-nums">({{ agents.length }})</span>
+          <template v-if="!inTitlebar">
+            <span class="hidden @[560px]:inline">剧本与角色</span>
+            <span class="hidden @[720px]:inline text-[11px] text-slate-400 tabular-nums">({{ agents.length }})</span>
+          </template>
         </button>
 
         <button
           type="button"
           @click="triggerHaptic('light'); emit('toggleBlindGuess')"
-          class="h-8 flex items-center gap-1 px-2.5 rounded-lg text-[12px] font-medium transition-colors outline-none"
-          :class="
+          class="flex items-center justify-center gap-1 rounded-lg text-[12px] font-medium transition-colors outline-none"
+          :class="[
+            inTitlebar ? 'w-7 h-7' : 'h-8 px-2.5',
             blindGuessMode
-              ? 'bg-violet-50 text-violet-700'
-              : 'text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.05]'
-          "
+              ? 'bg-[var(--ds-accent-soft)] text-[var(--ds-accent)]'
+              : 'text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.05]',
+          ]"
           :title="blindGuessMode ? '盲猜模式已开启，点击显示思考与私聊' : '隐藏角色思考、私聊与关系分析'"
         >
           <EyeOff v-if="blindGuessMode" class="w-3.5 h-3.5" />
           <Eye v-else class="w-3.5 h-3.5" />
-          <span class="hidden @[640px]:inline">盲猜模式</span>
-        </button>
-
-        <button
-          type="button"
-          @click="emit('toggleReplay')"
-          :disabled="isRunning || isStepping || (experiment?.messages.length ?? 0) === 0"
-          class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors disabled:opacity-35 outline-none"
-          :class="
-            replayActive
-              ? 'bg-[#007AFF]/12 text-[#007AFF]'
-              : 'text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.05]'
-          "
-          :title="replayActive ? '退出回放' : '回放'"
-        >
-          <Film class="w-4 h-4" />
+          <span v-if="!inTitlebar" class="hidden @[640px]:inline">盲猜模式</span>
         </button>
 
         <button
           v-if="!hideInspectorToggle"
           type="button"
           @click="triggerHaptic('light'); emit('toggleInspector')"
-          class="relative w-8 h-8 flex items-center justify-center rounded-lg transition-colors outline-none"
-          :class="
+          class="relative flex items-center justify-center rounded-lg hover:scale-[1.06] active:scale-[0.95] transition-all duration-150 outline-none"
+          :class="[
+            inTitlebar ? 'w-7 h-7' : 'w-8 h-8',
             inspectorOpen
               ? 'bg-black/[0.06] text-[#1D1D1F]'
-              : 'text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.05]'
-          "
+              : 'text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.05]',
+          ]"
           title="展开/收起右侧分析与白板 (Ctrl+\)"
         >
           <PanelRight class="w-4 h-4 stroke-[1.75]" />

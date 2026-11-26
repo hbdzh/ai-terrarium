@@ -58,10 +58,10 @@ function handleOpenChange(val: boolean) {
   <DialogRoot v-if="isDesktop" :open="open" @update:open="handleOpenChange">
     <DialogPortal>
       <DialogOverlay
-        class="fixed inset-0 z-50 bg-black/30 backdrop-blur-[3px] data-[state=open]:animate-in data-[state=closed]:animate-out"
+        class="ds-modal-overlay fixed inset-0 z-50 bg-black/30 backdrop-blur-[3px]"
       />
       <DialogContent
-        class="fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 w-[calc(100vw-2rem-var(--safe-left,0px)-var(--safe-right,0px))] flex flex-col rounded-3xl bg-white/95 backdrop-blur-2xl shadow-[0_24px_64px_rgba(0,0,0,0.22)] border border-black/[0.08] overflow-hidden outline-none"
+        class="ds-modal-content fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem-var(--safe-left,0px)-var(--safe-right,0px))] flex flex-col rounded-3xl bg-white/95 backdrop-blur-2xl shadow-[0_24px_64px_rgba(0,0,0,0.22)] border border-black/[0.08] overflow-hidden outline-none"
         :class="[
           isMobileOS
             ? 'max-h-[calc(100dvh-var(--safe-top,0px)-var(--safe-bottom,0px)-24px)]'

@@ -2,6 +2,7 @@ mod compactor;
 mod db;
 mod engine;
 mod llm;
+mod local_api;
 mod models;
 mod observer;
 mod sandbox_tools;
@@ -19,6 +20,7 @@ use uuid::Uuid;
 
 use crate::db::Database;
 use crate::engine::TerrariumEngine;
+use crate::local_api::LocalApiManager;
 use crate::models::{
     ActivePrivateRoom, BoardApprovalMode, CharacterCard, DiffLine, EngineState, ExperimentConfig,
     ExperimentDetail, ExperimentSummary, InterventionInput, PresetTemplate, ScenarioPackage,
@@ -30,6 +32,7 @@ use crate::sandbox_tools::ApprovalDecision;
 struct AppState {
     db: Arc<Database>,
     engine: Arc<TerrariumEngine>,
+    local_api: Arc<LocalApiManager>,
 }
 
 #[tauri::command]
@@ -426,8 +429,24 @@ fn get_ui_prefs(state: State<'_, AppState>) -> Result<UiPrefs, String> {
 }
 
 #[tauri::command]
-fn save_ui_prefs(state: State<'_, AppState>, prefs: UiPrefs) -> Result<(), String> {
-    state.db.save_ui_prefs(&prefs).map_err(|e| e.to_string())
+async fn save_ui_prefs(state: State<'_, AppState>, prefs: UiPrefs) -> Result<(), String> {
+    state.db.save_ui_prefs(&prefs).map_err(|e| e.to_string())?;
+    state
+        .local_api
+        .sync_config(
+            prefs.enable_local_api,
+            prefs.local_api_port,
+            prefs.local_api_token.clone(),
+            Arc::clone(&state.db),
+            Arc::clone(&state.engine),
+        )
+        .await?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_blind_guess_mode(state: State<'_, AppState>, enabled: bool) {
+    state.engine.set_blind_guess_mode(enabled);
 }
 
 #[tauri::command]
@@ -969,11 +988,26 @@ pub fn run() {
                 .expect("failed to ensure default experiment");
             let engine = TerrariumEngine::new(Arc::clone(&db), default_exp.id);
 
-            let initial_theme = db
-                .get_ui_prefs()
-                .map(|p| p.theme_preference)
-                .unwrap_or_else(|_| "system".to_string());
-            app.manage(AppState { db, engine });
+            let ui_prefs = db.get_ui_prefs().unwrap_or_default();
+            let initial_theme = ui_prefs.theme_preference.clone();
+            let local_api = Arc::new(LocalApiManager::new());
+            if ui_prefs.enable_local_api {
+                let api_mgr = Arc::clone(&local_api);
+                let db_clone = Arc::clone(&db);
+                let engine_clone = Arc::clone(&engine);
+                let port = ui_prefs.local_api_port;
+                let token = ui_prefs.local_api_token.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = api_mgr
+                        .sync_config(true, port, token, db_clone, engine_clone)
+                        .await;
+                });
+            }
+            app.manage(AppState {
+                db,
+                engine,
+                local_api,
+            });
 
             // On Windows, apply frameless Mica backdrop, disable WebView2 browser menu, and enable Win11 Snap Layouts
             #[cfg(target_os = "windows")]
@@ -1027,6 +1061,7 @@ pub fn run() {
             compute_line_diff,
             get_ui_prefs,
             save_ui_prefs,
+            set_blind_guess_mode,
             get_api_profiles,
             save_api_profiles,
             fork_experiment,

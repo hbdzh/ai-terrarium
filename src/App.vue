@@ -8,9 +8,11 @@ import { writeClipboardText, readClipboardText } from "./utils/clipboard";
 import { warmupMarkdownParser } from "./utils/markdown";
 import { triggerHaptic } from "./utils/native";
 import { resolvedTheme, setThemePreference, syncThemeVisuals, themePreference } from "./utils/theme";
+import { titlebarLayoutMode } from "./utils/layout";
 import { initialDataPromises } from "./bootstrap";
 import { seedApiProfilesFromConfig } from "./utils/config";
-import { renderPureScriptPngBytes } from "./utils/scriptExport";
+import { buildReplayHandoutMarkdown, renderPureScriptPngBytes } from "./utils/scriptExport";
+import { globalTooltipState, installGlobalTooltip } from "./utils/globalTooltip";
 import WindowsTitleBar from "./components/WindowsTitleBar.vue";
 import ResizablePanelGroup from "./components/ui/ResizablePanelGroup.vue";
 import ResizablePanel from "./components/ui/ResizablePanel.vue";
@@ -24,7 +26,6 @@ import PureScriptPrintView from "./components/PureScriptPrintView.vue";
 
 const AdaptiveModal = defineAsyncComponent(() => import("./components/ui/AdaptiveModal.vue"));
 const Sheet = defineAsyncComponent(() => import("./components/ui/Sheet.vue"));
-const ReplayController = defineAsyncComponent(() => import("./components/ReplayController.vue"));
 const SharedBoardDrawer = defineAsyncComponent(() => import("./components/SharedBoardDrawer.vue"));
 const SettingsDrawer = defineAsyncComponent(() => import("./components/SettingsDrawer.vue"));
 const ScenarioScriptModal = defineAsyncComponent(() => import("./components/ScenarioScriptModal.vue"));
@@ -45,7 +46,6 @@ import type {
   SpeakerRole,
   StreamEvent,
   TimelineMessage,
-  TurnSnapshot,
   UiPrefs,
 } from "./types";
 
@@ -63,6 +63,9 @@ const distillingImprints = ref(false);
 const comparisonReport = ref("");
 const generatingComparison = ref(false);
 const blindGuessMode = ref(false);
+watch(blindGuessMode, (enabled) => {
+  invoke("set_blind_guess_mode", { enabled }).catch(() => {});
+});
 const forkTweakOpen = ref(false);
 const directorBusy = ref(false);
 const finalePromptVisible = ref(false);
@@ -238,40 +241,19 @@ const boardLastReason = ref<string>("");
 const mobileTab = ref<"stream" | "board" | "observer">("stream");
 const streamRef = ref<InstanceType<typeof ThoughtStream> | null>(null);
 
-// Theater Replay State
-const replayActive = ref(false);
-const replayPlaying = ref(false);
-const replaySpeed = ref<1 | 2 | 5>(1);
-const replayMsgIndex = ref(0);
-const replaySnapshots = ref<TurnSnapshot[]>([]);
-const replayStreaming = ref<StreamingDraft | null>(null);
-let replayTimer: number | null = null;
-
 const canBranch = computed(
   () =>
-    !replayActive.value &&
     engineState.value !== "running" &&
     engineState.value !== "stepping"
 );
 
-const displayMessages = computed<TimelineMessage[]>(() => {
-  if (!experiment.value) return [];
-  if (!replayActive.value) return experiment.value.messages;
-  return experiment.value.messages.slice(0, replayMsgIndex.value);
-});
+const displayMessages = computed<TimelineMessage[]>(() =>
+  experiment.value?.messages ?? []
+);
 
-const replayCurrentTurn = computed(() => {
-  if (!replayActive.value || !experiment.value) return experiment.value?.totalTurns ?? 0;
-  if (replayStreaming.value) return replayStreaming.value.turnNumber;
-  const vis = displayMessages.value;
-  return vis.length > 0 ? vis[vis.length - 1].turnNumber : 0;
-});
-
-const displayObserverNotes = computed(() => {
-  const notes = experiment.value?.observerNotes ?? [];
-  if (!replayActive.value) return notes;
-  return notes.filter((n) => n.triggerTurn <= replayCurrentTurn.value);
-});
+const displayObserverNotes = computed(() =>
+  experiment.value?.observerNotes ?? []
+);
 
 const latestCrisisCards = computed(() => {
   const notes = experiment.value?.observerNotes ?? [];
@@ -283,39 +265,19 @@ const latestCrisisCards = computed(() => {
   return [];
 });
 
-const displayStreaming = computed(() =>
-  replayActive.value ? replayStreaming.value : streaming.value
+const displayStreaming = computed(() => streaming.value);
+
+const displayBoardContent = computed(() =>
+  experiment.value?.boardContent ?? ""
 );
 
-const displayBoardContent = computed(() => {
-  if (!experiment.value) return "";
-  if (!replayActive.value) return experiment.value.boardContent ?? "";
-  const turn = replayCurrentTurn.value;
-  const matching = [...replaySnapshots.value]
-    .reverse()
-    .find((s) => s.turnNumber <= turn);
-  return matching ? matching.boardContent : (experiment.value.config.initialBoard ?? "");
-});
+const displayBoardPrevContent = computed(() =>
+  experiment.value?.boardPrevContent ?? ""
+);
 
-const displayBoardPrevContent = computed(() => {
-  if (!experiment.value) return "";
-  if (!replayActive.value) return experiment.value.boardPrevContent ?? "";
-  const turn = replayCurrentTurn.value;
-  const prevSnap = [...replaySnapshots.value]
-    .reverse()
-    .find((s) => s.turnNumber < turn);
-  return prevSnap ? prevSnap.boardContent : (experiment.value.config.initialBoard ?? "");
-});
-
-const displayPrivateNotes = computed<Record<string, string>>(() => {
-  if (!experiment.value) return {};
-  if (!replayActive.value) return experiment.value.privateNotes ?? {};
-  const turn = replayCurrentTurn.value;
-  const matching = [...replaySnapshots.value]
-    .reverse()
-    .find((s) => s.turnNumber <= turn);
-  return matching?.privateNotes ?? {};
-});
+const displayPrivateNotes = computed<Record<string, string>>(() =>
+  experiment.value?.privateNotes ?? {}
+);
 
 const activePrivateNotesCount = computed(
   () =>
@@ -323,139 +285,9 @@ const activePrivateNotesCount = computed(
       .length
 );
 
-const displayCompactedSummary = computed(() => {
-  if (!experiment.value) return "";
-  if (!replayActive.value) return experiment.value.compactedSummary ?? "";
-  const turn = replayCurrentTurn.value;
-  const matching = [...replaySnapshots.value]
-    .reverse()
-    .find((s) => s.turnNumber <= turn);
-  if (matching) return matching.compactedSummary ?? "";
-  return turn >= (experiment.value.totalTurns ?? 0)
-    ? (experiment.value.compactedSummary ?? "")
-    : "";
-});
-
-function stopReplayTimer() {
-  if (replayTimer !== null) {
-    window.clearTimeout(replayTimer);
-    replayTimer = null;
-  }
-}
-
-function exitReplay() {
-  stopReplayTimer();
-  replayActive.value = false;
-  replayPlaying.value = false;
-  replayStreaming.value = null;
-  replayMsgIndex.value = 0;
-}
-
-async function toggleReplay() {
-  if (replayActive.value) {
-    exitReplay();
-    return;
-  }
-  if (!experiment.value || experiment.value.messages.length === 0) return;
-  try {
-    replaySnapshots.value = await invoke<TurnSnapshot[]>("get_experiment_snapshots", {
-      experimentId: experiment.value.id,
-    });
-  } catch {
-    replaySnapshots.value = [];
-  }
-  replayActive.value = true;
-  replayMsgIndex.value = 0;
-  replayStreaming.value = null;
-  replayPlaying.value = true;
-  scheduleNextReplayTick();
-}
-
-function scheduleNextReplayTick() {
-  stopReplayTimer();
-  if (!replayActive.value || !replayPlaying.value || !experiment.value) return;
-
-  const allMsgs = experiment.value.messages;
-  if (replayMsgIndex.value >= allMsgs.length && !replayStreaming.value) {
-    replayPlaying.value = false;
-    return;
-  }
-
-  const speed = replaySpeed.value;
-  if (!replayStreaming.value) {
-    const nextMsg = allMsgs[replayMsgIndex.value];
-    if (nextMsg.role !== "Ai") {
-      replayMsgIndex.value += 1;
-      replayTimer = window.setTimeout(scheduleNextReplayTick, Math.round(450 / speed));
-      return;
-    }
-    const label =
-      experiment.value.config.agents.find((a) => a.id === nextMsg.agentId)?.label ?? "AI";
-    replayStreaming.value = {
-      messageId: nextMsg.id,
-      agentId: nextMsg.agentId ?? "AiA",
-      agentLabel: label,
-      turnNumber: nextMsg.turnNumber,
-      modelName: nextMsg.modelName,
-      reasoningContent: nextMsg.reasoningContent ?? "",
-      reasoningStartedAt: null,
-      reasoningElapsedMs: 0,
-      content: "",
-    };
-  }
-
-  const targetMsg = allMsgs[replayMsgIndex.value];
-  const currentDraft = replayStreaming.value;
-  if (!targetMsg || !currentDraft) return;
-
-  const fullText = targetMsg.content ?? "";
-  const curLen = currentDraft.content.length;
-  if (curLen < fullText.length) {
-    const stepChars = Math.max(2, Math.round(4 * speed));
-    currentDraft.content = fullText.slice(0, curLen + stepChars);
-    replayTimer = window.setTimeout(scheduleNextReplayTick, 28);
-  } else {
-    replayStreaming.value = null;
-    replayMsgIndex.value += 1;
-    replayTimer = window.setTimeout(scheduleNextReplayTick, Math.round(500 / speed));
-  }
-}
-
-function toggleReplayPlay() {
-  if (!experiment.value) return;
-  if (!replayPlaying.value && replayMsgIndex.value >= experiment.value.messages.length) {
-    replayMsgIndex.value = 0;
-    replayStreaming.value = null;
-  }
-  replayPlaying.value = !replayPlaying.value;
-  if (replayPlaying.value) {
-    scheduleNextReplayTick();
-  } else {
-    stopReplayTimer();
-  }
-}
-
-function setReplaySpeed(sp: 1 | 2 | 5) {
-  replaySpeed.value = sp;
-}
-
-function seekReplay(idx: number) {
-  stopReplayTimer();
-  replayStreaming.value = null;
-  replayMsgIndex.value = idx;
-  if (replayPlaying.value) {
-    scheduleNextReplayTick();
-  }
-}
-
-function stepReplay(delta: number) {
-  if (!experiment.value) return;
-  stopReplayTimer();
-  replayPlaying.value = false;
-  replayStreaming.value = null;
-  const max = experiment.value.messages.length;
-  replayMsgIndex.value = Math.max(0, Math.min(max, replayMsgIndex.value + delta));
-}
+const displayCompactedSummary = computed(() =>
+  experiment.value?.compactedSummary ?? ""
+);
 
 function handleGlobalKeydown(e: KeyboardEvent) {
   if (!(e.metaKey || e.ctrlKey)) return;
@@ -644,11 +476,14 @@ async function execContextAction(action: "cut" | "copy" | "paste" | "selectAll")
   }
 }
 
+let uninstallGlobalTooltip: (() => void) | null = null;
+
 onUnmounted(() => {
+  uninstallGlobalTooltip?.();
+  uninstallGlobalTooltip = null;
   window.removeEventListener("keydown", handleGlobalKeydown);
   window.removeEventListener("contextmenu", handleDesktopContextMenu);
   window.removeEventListener("mousedown", handleContextMenuPointerDown, true);
-  stopReplayTimer();
   resetStreamDeltaBuffer();
   const win = window as unknown as { __handleAndroidBack?: () => boolean };
   delete win.__handleAndroidBack;
@@ -1005,10 +840,15 @@ function handleStreamEvent(ev: StreamEvent) {
       finalePromptVisible.value = true;
       showToast(`已达第 ${ev.totalTurns}/${ev.targetTurns} 轮目标，本局已收尾`);
       break;
+
+    case "secret_goal_achieved":
+      showToast(`🏆 [${ev.agentLabel}] 已暗中达成其隐藏胜负目标：${ev.secretGoal}`);
+      break;
   }
 }
 
 onMounted(async () => {
+  uninstallGlobalTooltip = installGlobalTooltip();
   if (isWindows) {
     document.documentElement.classList.add("win-acrylic");
   }
@@ -1058,10 +898,6 @@ onMounted(async () => {
     }
     if (isMobile.value && mobileTab.value !== "stream") {
       mobileTab.value = "stream";
-      return true;
-    }
-    if (replayActive.value) {
-      exitReplay();
       return true;
     }
     return false;
@@ -1204,7 +1040,6 @@ async function renameExperiment(newTitle: string) {
 }
 
 async function selectExperiment(id: string) {
-  exitReplay();
   finalePromptVisible.value = false;
   comparisonReport.value = "";
   streaming.value = null;
@@ -1221,7 +1056,6 @@ async function selectExperiment(id: string) {
 }
 
 async function createNewExperiment(title: string, config: ExperimentConfig) {
-  exitReplay();
   finalePromptVisible.value = false;
   comparisonReport.value = "";
   streaming.value = null;
@@ -1240,7 +1074,6 @@ async function createNewExperiment(title: string, config: ExperimentConfig) {
 
 async function handleFork(payload: { turnNumber: number; messageId?: string | null }) {
   if (!experiment.value) return;
-  exitReplay();
   finalePromptVisible.value = false;
   comparisonReport.value = "";
   streaming.value = null;
@@ -1284,7 +1117,6 @@ async function handleEditAndReplay(payload: {
   content: string;
 }) {
   if (!experiment.value) return;
-  exitReplay();
   finalePromptVisible.value = false;
   comparisonReport.value = "";
   streaming.value = null;
@@ -1348,7 +1180,6 @@ async function handleResolveApproval(payload: {
 }
 
 async function deleteExperiment(id: string) {
-  exitReplay();
   finalePromptVisible.value = false;
   streaming.value = null;
   queueLen.value = 0;
@@ -1587,7 +1418,6 @@ async function handleImportScenario() {
             initialBoard: raw?.initialBoard ?? "",
           };
 
-    exitReplay();
     streaming.value = null;
     queueLen.value = 0;
     pendingApproval.value = null;
@@ -1679,10 +1509,40 @@ async function exportPurePng() {
 
 async function exportPurePdf() {
   if (!experiment.value) return;
-  window.dispatchEvent(new Event("terrarium:prepare-print"));
+  window.dispatchEvent(new CustomEvent("terrarium:prepare-print", { detail: { mode: "pure" } }));
   await nextTick();
   window.print();
   showToast("已打开系统打印 / 导出 PDF 视图");
+}
+
+async function exportReplayMd() {
+  if (!experiment.value) return;
+  try {
+    const md = buildReplayHandoutMarkdown(experiment.value);
+    const safeName = experiment.value.title.replace(/[\\/:*?"<>|]/g, "_");
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const filePath = await save({
+      defaultPath: `${safeName}_剧本杀复盘手卡.md`,
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+    if (filePath) {
+      await invoke("save_markdown_to_file", {
+        path: filePath,
+        content: md,
+      });
+      showToast("剧本杀复盘手卡 (.md) 已导出");
+    }
+  } catch (err: any) {
+    showToast(`导出复盘手卡失败: ${err?.toString?.() ?? err}`);
+  }
+}
+
+async function exportReplayPdf() {
+  if (!experiment.value) return;
+  window.dispatchEvent(new CustomEvent("terrarium:prepare-print", { detail: { mode: "replay" } }));
+  await nextTick();
+  window.print();
+  showToast("已打开剧本杀复盘手卡打印 / 导出 PDF 视图");
 }
 
 async function handleJumpToTurn(turnNumber: number) {
@@ -1733,13 +1593,51 @@ async function copyRawPrompt() {
 <template>
   <div
     id="app-main-shell"
-    class="relative h-dvh w-screen flex overflow-hidden text-[#1D1D1F]"
+    class="relative h-dvh w-screen flex flex-col overflow-hidden text-[#1D1D1F]"
     :class="[
       isWindows ? 'bg-transparent' : isMobileOS && isDesktopSidebar && desktopLeftSidebarOpen ? 'bg-[#F9F9FB]' : 'bg-white',
       isMobileOS ? 'pl-[var(--safe-left,0px)] pr-[var(--safe-right,0px)]' : '',
     ]"
   >
-    <!-- Persistent Fixed Left Sidebar Toggle on Desktop (never shifts on open/collapse) -->
+    <WindowsTitleBar
+      v-if="isWindows"
+      :show-sidebar-toggle="isDesktopSidebar"
+      :sidebar-open="desktopLeftSidebarOpen"
+      :compact="titlebarLayoutMode === 'compact' && !isMobile"
+      @toggle-sidebar="triggerHaptic('light'); leftSidebarOpen = !leftSidebarOpen"
+      @open-new-experiment="newExpOpen = true"
+    >
+      <TopControlBar
+        v-if="!isMobile && titlebarLayoutMode === 'compact'"
+        :in-titlebar="true"
+        :experiment="experiment"
+        :engine-state="engineState"
+        :status-reason="statusReason"
+        :missing-keys="missingKeys"
+        :sidebar-open="leftSidebarOpen"
+        :traffic-light-clearance="isMacOS && !(isDesktopSidebar && desktopLeftSidebarOpen)"
+        :hide-sidebar-toggle="true"
+        :inspector-open="inspectorOpen"
+        :hide-inspector-toggle="false"
+        :has-pending-approval="Boolean(pendingApproval)"
+        :context-usage-pct="contextUsagePct"
+        :context-active-tokens="contextActiveTokens"
+        :compact-mobile="false"
+        :blind-guess-mode="blindGuessMode"
+        @start="startEngine"
+        @pause="pauseEngine"
+        @step="stepEngine"
+        @open-settings="settingsOpen = true"
+        @open-script="scriptModalOpen = true"
+        @rename-experiment="renameExperiment"
+        @toggle-blind-guess="blindGuessMode = !blindGuessMode"
+        @toggle-sidebar="leftSidebarOpen = !leftSidebarOpen"
+        @toggle-inspector="inspectorOpen = !inspectorOpen"
+      />
+    </WindowsTitleBar>
+
+    <div class="flex-1 min-h-0 flex overflow-hidden">
+    <!-- Persistent Fixed Left Sidebar Toggle on non-Windows Desktop -->
     <div
       v-if="isDesktopSidebar && !isWindows"
       class="pointer-events-none absolute top-0 left-0 z-30 h-[46px] flex items-center"
@@ -1789,6 +1687,8 @@ async function copyRawPrompt() {
           @export-pure-md="exportPureMarkdown"
           @export-pure-png="exportPurePng"
           @export-pure-pdf="exportPurePdf"
+          @export-replay-md="exportReplayMd"
+          @export-replay-pdf="exportReplayPdf"
           @distill-imprints="handleDistillImprints"
           @update-card-imprints="handleUpdateCardImprints"
           @delete-character-card="handleDeleteCharacterCard"
@@ -1822,6 +1722,8 @@ async function copyRawPrompt() {
         @export-pure-md="exportPureMarkdown"
         @export-pure-png="exportPurePng"
         @export-pure-pdf="exportPurePdf"
+        @export-replay-md="exportReplayMd"
+        @export-replay-pdf="exportReplayPdf"
         @distill-imprints="handleDistillImprints"
         @update-card-imprints="handleUpdateCardImprints"
         @delete-character-card="handleDeleteCharacterCard"
@@ -1829,12 +1731,8 @@ async function copyRawPrompt() {
       />
     </Sheet>
 
-    <!-- Right Frame: Transparent Windows Titlebar Strip + Floating White Workspace Card -->
+    <!-- Right Frame: Floating White Workspace Card -->
     <div class="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
-      <WindowsTitleBar
-        v-if="isWindows"
-        :show-brand="!(isDesktopSidebar && desktopLeftSidebarOpen)"
-      />
 
       <div
         class="relative flex-1 min-h-0 flex flex-col overflow-hidden bg-white transition-[border-radius] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
@@ -1846,15 +1744,15 @@ async function copyRawPrompt() {
             : ''
         "
       >
-        <!-- Persistent Single Right Inspector Toggle at Top-Right Corner on Wide Desktop (replaces duplicate toggle + X) -->
+        <!-- Persistent Single Right Inspector Toggle at Top-Right Corner on Wide Desktop (hidden when in compact TitleBar) -->
         <div
-          v-if="isWideDesktop"
+          v-if="isWideDesktop && !(isWindows && titlebarLayoutMode === 'compact')"
           class="pointer-events-none absolute top-0 right-3.5 z-30 h-[46px] flex items-center"
         >
           <button
             type="button"
             @click="triggerHaptic('light'); inspectorOpen = !inspectorOpen"
-            class="pointer-events-auto relative w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.05] active:bg-black/[0.08] transition-colors outline-none"
+            class="pointer-events-auto relative w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:text-[#1D1D1F] hover:bg-black/[0.05] active:bg-black/[0.08] hover:scale-[1.06] active:scale-[0.95] transition-all duration-150 outline-none"
             title="展开/收起右侧边栏 (Ctrl+\)"
           >
             <PanelRight class="w-4 h-4 stroke-[1.75]" />
@@ -1867,14 +1765,14 @@ async function copyRawPrompt() {
 
         <template v-if="!isWideDesktop">
         <TopControlBar
+          v-if="!(isWindows && !isMobile && titlebarLayoutMode === 'compact')"
           :experiment="experiment"
           :engine-state="engineState"
           :status-reason="statusReason"
           :missing-keys="missingKeys"
-          :replay-active="replayActive"
           :sidebar-open="leftSidebarOpen"
           :traffic-light-clearance="isMacOS && !(isDesktopSidebar && desktopLeftSidebarOpen)"
-          :hide-sidebar-toggle="isDesktopSidebar && !isWindows"
+          :hide-sidebar-toggle="isDesktopSidebar"
           :inspector-open="inspectorOpen"
           :hide-inspector-toggle="false"
           :has-pending-approval="Boolean(pendingApproval)"
@@ -1888,7 +1786,6 @@ async function copyRawPrompt() {
           @open-settings="settingsOpen = true"
           @open-script="scriptModalOpen = true"
           @rename-experiment="renameExperiment"
-          @toggle-replay="toggleReplay"
           @toggle-blind-guess="blindGuessMode = !blindGuessMode"
           @toggle-sidebar="leftSidebarOpen = !leftSidebarOpen"
           @toggle-inspector="inspectorOpen = !inspectorOpen"
@@ -1908,7 +1805,7 @@ async function copyRawPrompt() {
             >
               <span>对话流</span>
               <span class="text-[11px] opacity-65 tabular-nums">
-                ({{ replayActive ? replayCurrentTurn : (experiment?.totalTurns ?? 0) }})
+                ({{ experiment?.totalTurns ?? 0 }})
               </span>
             </button>
             <button
@@ -1964,14 +1861,14 @@ async function copyRawPrompt() {
         >
           <section class="relative flex-1 h-full flex flex-col bg-white min-w-0">
             <TopControlBar
+              v-if="!(isWindows && titlebarLayoutMode === 'compact')"
               :experiment="experiment"
               :engine-state="engineState"
               :status-reason="statusReason"
               :missing-keys="missingKeys"
-              :replay-active="replayActive"
               :sidebar-open="leftSidebarOpen"
               :traffic-light-clearance="isMacOS && !(isDesktopSidebar && desktopLeftSidebarOpen)"
-              :hide-sidebar-toggle="isDesktopSidebar && !isWindows"
+              :hide-sidebar-toggle="isDesktopSidebar"
               :inspector-open="inspectorOpen"
               :hide-inspector-toggle="true"
               :has-pending-approval="Boolean(pendingApproval)"
@@ -1985,7 +1882,6 @@ async function copyRawPrompt() {
               @open-settings="settingsOpen = true"
               @open-script="scriptModalOpen = true"
               @rename-experiment="renameExperiment"
-              @toggle-replay="toggleReplay"
               @toggle-blind-guess="blindGuessMode = !blindGuessMode"
               @toggle-sidebar="leftSidebarOpen = !leftSidebarOpen"
               @toggle-inspector="inspectorOpen = !inspectorOpen"
@@ -2007,23 +1903,7 @@ async function copyRawPrompt() {
               @inspect-prompt="handleInspectPrompt"
             />
 
-            <ReplayController
-              v-if="replayActive"
-              :playing="replayPlaying"
-              :speed="replaySpeed"
-              :current-index="replayMsgIndex"
-              :total-count="experiment?.messages.length ?? 0"
-              :current-turn="replayCurrentTurn"
-              :total-turns="experiment?.totalTurns ?? 0"
-              @toggle-play="toggleReplayPlay"
-              @set-speed="setReplaySpeed"
-              @seek="seekReplay"
-              @step-prev="stepReplay(-1)"
-              @step-next="stepReplay(1)"
-              @exit="exitReplay"
-            />
             <CreatorConsole
-              v-else
               :queue-len="queueLen"
               :agents="experiment?.config.agents ?? []"
               :pending-approval="pendingApproval"
@@ -2130,7 +2010,7 @@ async function copyRawPrompt() {
                   :approval-mode="experiment?.config.boardApprovalMode ?? 'auto'"
                   :last-actor="boardLastActor"
                   :last-reason="boardLastReason"
-                  :read-only="replayActive"
+                  :read-only="false"
                   :agents="experiment?.config.agents ?? []"
                   :private-notes="displayPrivateNotes"
                   :enable-private-notes="Boolean(experiment?.config.enablePrivateNotes)"
@@ -2146,7 +2026,7 @@ async function copyRawPrompt() {
                   :notes="displayObserverNotes"
                   :observer-running="observerRunning"
                   :observer-interval="experiment?.config.observerInterval ?? 10"
-                  :total-turns="replayActive ? replayCurrentTurn : (experiment?.totalTurns ?? 0)"
+                  :total-turns="experiment?.totalTurns ?? 0"
                   :has-observer-key="hasObserverKey"
                   :final-report="experiment?.finalReport ?? ''"
                   :generating-report="generatingReport"
@@ -2190,23 +2070,7 @@ async function copyRawPrompt() {
             @inspect-prompt="handleInspectPrompt"
           />
 
-          <ReplayController
-            v-if="replayActive"
-            :playing="replayPlaying"
-            :speed="replaySpeed"
-            :current-index="replayMsgIndex"
-            :total-count="experiment?.messages.length ?? 0"
-            :current-turn="replayCurrentTurn"
-            :total-turns="experiment?.totalTurns ?? 0"
-            @toggle-play="toggleReplayPlay"
-            @set-speed="setReplaySpeed"
-            @seek="seekReplay"
-            @step-prev="stepReplay(-1)"
-            @step-next="stepReplay(1)"
-            @exit="exitReplay"
-          />
           <CreatorConsole
-            v-else
             :queue-len="queueLen"
             :agents="experiment?.config.agents ?? []"
             :pending-approval="pendingApproval"
@@ -2297,7 +2161,7 @@ async function copyRawPrompt() {
               :approval-mode="experiment?.config.boardApprovalMode ?? 'auto'"
               :last-actor="boardLastActor"
               :last-reason="boardLastReason"
-              :read-only="replayActive"
+              :read-only="false"
               :agents="experiment?.config.agents ?? []"
               :private-notes="displayPrivateNotes"
               :enable-private-notes="Boolean(experiment?.config.enablePrivateNotes)"
@@ -2313,7 +2177,7 @@ async function copyRawPrompt() {
               :notes="displayObserverNotes"
               :observer-running="observerRunning"
               :observer-interval="experiment?.config.observerInterval ?? 10"
-              :total-turns="replayActive ? replayCurrentTurn : (experiment?.totalTurns ?? 0)"
+              :total-turns="experiment?.totalTurns ?? 0"
               :has-observer-key="hasObserverKey"
               :final-report="experiment?.finalReport ?? ''"
               :generating-report="generatingReport"
@@ -2348,7 +2212,7 @@ async function copyRawPrompt() {
               :approval-mode="experiment?.config.boardApprovalMode ?? 'auto'"
               :last-actor="boardLastActor"
               :last-reason="boardLastReason"
-              :read-only="replayActive"
+              :read-only="false"
               :agents="experiment?.config.agents ?? []"
               :private-notes="displayPrivateNotes"
               :enable-private-notes="Boolean(experiment?.config.enablePrivateNotes)"
@@ -2364,7 +2228,7 @@ async function copyRawPrompt() {
               :notes="displayObserverNotes"
               :observer-running="observerRunning"
               :observer-interval="experiment?.config.observerInterval ?? 10"
-              :total-turns="replayActive ? replayCurrentTurn : (experiment?.totalTurns ?? 0)"
+              :total-turns="experiment?.totalTurns ?? 0"
               :has-observer-key="hasObserverKey"
               :final-report="experiment?.finalReport ?? ''"
               :generating-report="generatingReport"
@@ -2387,6 +2251,7 @@ async function copyRawPrompt() {
     </main>
     </div>
     </div>
+    </div>
 
     <!-- Custom Lightweight Text Context Menu (Replaces WebView2 browser menu) -->
     <Teleport to="body">
@@ -2394,13 +2259,13 @@ async function copyRawPrompt() {
         v-if="textContextMenu.open"
         data-text-context-menu
         :style="{ left: `${textContextMenu.x}px`, top: `${textContextMenu.y}px` }"
-        class="pointer-events-auto fixed z-[200] w-[164px] py-1 rounded-xl bg-white/95 backdrop-blur-xl border border-black/[0.08] shadow-[0_10px_30px_rgba(0,0,0,0.16)] text-[12.5px] text-[#1D1D1F] select-none"
+        class="animate-popover pointer-events-auto fixed z-[200] w-[172px] p-1.5 rounded-2xl bg-white/95 backdrop-blur-xl border border-black/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.14)] space-y-0.5 text-[12.5px] text-[#1D1D1F] select-none antialiased"
       >
         <button
           v-if="textContextMenu.canCut"
           type="button"
           @mousedown.prevent="execContextAction('cut')"
-          class="w-full px-3 py-1.5 flex items-center justify-between hover:bg-black/[0.05] transition text-left"
+          class="w-full px-3 py-1.5 rounded-xl flex items-center justify-between text-slate-700 hover:bg-black/[0.05] hover:text-[#1D1D1F] transition-colors text-left"
         >
           <span class="flex items-center gap-2">
             <Scissors class="w-3.5 h-3.5 text-slate-500" />
@@ -2412,7 +2277,7 @@ async function copyRawPrompt() {
           v-if="textContextMenu.canCopy"
           type="button"
           @mousedown.prevent="execContextAction('copy')"
-          class="w-full px-3 py-1.5 flex items-center justify-between hover:bg-black/[0.05] transition text-left"
+          class="w-full px-3 py-1.5 rounded-xl flex items-center justify-between text-slate-700 hover:bg-black/[0.05] hover:text-[#1D1D1F] transition-colors text-left"
         >
           <span class="flex items-center gap-2">
             <Copy class="w-3.5 h-3.5 text-slate-500" />
@@ -2424,7 +2289,7 @@ async function copyRawPrompt() {
           v-if="textContextMenu.canPaste"
           type="button"
           @mousedown.prevent="execContextAction('paste')"
-          class="w-full px-3 py-1.5 flex items-center justify-between hover:bg-black/[0.05] transition text-left"
+          class="w-full px-3 py-1.5 rounded-xl flex items-center justify-between text-slate-700 hover:bg-black/[0.05] hover:text-[#1D1D1F] transition-colors text-left"
         >
           <span class="flex items-center gap-2">
             <ClipboardPaste class="w-3.5 h-3.5 text-slate-500" />
@@ -2436,7 +2301,7 @@ async function copyRawPrompt() {
           v-if="textContextMenu.canSelectAll"
           type="button"
           @mousedown.prevent="execContextAction('selectAll')"
-          class="w-full px-3 py-1.5 flex items-center justify-between hover:bg-black/[0.05] transition text-left"
+          class="w-full px-3 py-1.5 rounded-xl flex items-center justify-between text-slate-700 hover:bg-black/[0.05] hover:text-[#1D1D1F] transition-colors text-left"
         >
           <span class="flex items-center gap-2">
             <TextSelect class="w-3.5 h-3.5 text-slate-500" />
@@ -2513,6 +2378,7 @@ async function copyRawPrompt() {
       :config="experiment?.config ?? null"
       :character-cards="characterCards"
       :api-profiles="apiProfiles"
+      :blind-guess-mode="blindGuessMode"
       @close="scriptModalOpen = false"
       @save="saveConfig"
       @save-preset="handleSavePreset"
@@ -2527,6 +2393,7 @@ async function copyRawPrompt() {
       :current-config="experiment?.config ?? null"
       :character-cards="characterCards"
       :api-profiles="apiProfiles"
+      :blind-guess-mode="blindGuessMode"
       @close="newExpOpen = false"
       @create="createNewExperiment"
       @save-preset="handleSavePreset"
@@ -2539,6 +2406,7 @@ async function copyRawPrompt() {
       :config="experiment?.config ?? null"
       :character-cards="characterCards"
       :api-profiles="apiProfiles"
+      :blind-guess-mode="blindGuessMode"
       @close="forkTweakOpen = false"
       @save-and-continue="handleSaveForkTweak"
     />
@@ -2648,4 +2516,22 @@ async function copyRawPrompt() {
   </div>
 
   <PureScriptPrintView :experiment="experiment" />
+
+  <Teleport to="body">
+    <div
+      v-if="globalTooltipState"
+      class="pointer-events-none fixed z-[9999] max-w-[280px] px-2.5 py-1.5 rounded-lg bg-[#1D1D1F]/95 text-white text-[11.5px] leading-snug font-medium shadow-[0_6px_18px_rgba(0,0,0,0.18)] backdrop-blur-md"
+      :class="[
+        globalTooltipState.placement === 'top' ? '-translate-y-full' : '',
+        globalTooltipState.align === 'center'
+          ? '-translate-x-1/2 text-center'
+          : globalTooltipState.align === 'right'
+            ? '-translate-x-full text-right'
+            : 'text-left',
+      ]"
+      :style="{ left: `${globalTooltipState.x}px`, top: `${globalTooltipState.y}px` }"
+    >
+      {{ globalTooltipState.text }}
+    </div>
+  </Teleport>
 </template>
