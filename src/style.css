@@ -365,12 +365,12 @@ html.mobile-os .sheet-content-right[data-state="closed"] {
 }
 
 @keyframes ds-modal-mobile-in {
-  from { opacity: 0; transform: translate3d(-50%, -49%, 0) scale(0.97); }
-  to { opacity: 1; transform: translate3d(-50%, -50%, 0) scale(1); }
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
 }
 @keyframes ds-modal-mobile-out {
-  from { opacity: 1; transform: translate3d(-50%, -50%, 0) scale(1); }
-  to { opacity: 0; transform: translate3d(-50%, -49%, 0) scale(0.98); }
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.98); }
 }
 
 html.mobile-os .ds-modal-content[data-state="open"] {
@@ -852,12 +852,12 @@ html.dark .text-\[\#007AFF\] {
   to { opacity: 0; }
 }
 @keyframes ds-modal-in {
-  from { opacity: 0; transform: translate3d(-50%, -48.5%, 0) scale(0.96); }
-  to { opacity: 1; transform: translate3d(-50%, -50%, 0) scale(1); }
+  from { opacity: 0; transform: translate3d(0, 8px, 0) scale(0.96); }
+  to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
 }
 @keyframes ds-modal-out {
-  from { opacity: 1; transform: translate3d(-50%, -50%, 0) scale(1); }
-  to { opacity: 0; transform: translate3d(-50%, -49%, 0) scale(0.97); }
+  from { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+  to { opacity: 0; transform: translate3d(0, 6px, 0) scale(0.97); }
 }
 @keyframes ds-popover-in {
   from { opacity: 0; transform: translateY(4px) scale(0.96); }
