@@ -1,48 +1,51 @@
 <div align="center">
   <img src="src-tauri/icons/128x128@2x.png" alt="AI Terrarium 图标" width="88" height="88" />
   <h1>AI Terrarium · AI 生态观察箱</h1>
-  <p>基于 Tauri v2、Vue 3 与 Rust 构建的桌面/跨端多智能体自主演化与观察应用。</p>
+  <p><strong>把多个大模型放进同一个数字生态箱，看它们自主推演、暗中密谋、各怀心思，而你站在玻璃外当造物主。</strong></p>
   <p>
-    <a href="#快速开始">快速开始</a> ·
+    <a href="https://github.com/hbdzh/ai-terrarium/releases/tag/v0.1.0">下载 v0.1.0</a> ·
+    <a href="#核心玩法">核心玩法</a> ·
+    <a href="#从源码构建">从源码构建</a> ·
     <a href="mcp/README.md">MCP 与本地接口</a> ·
-    <a href="https://github.com/hbdzh/ai-terrarium/releases">Releases</a> ·
     <a href="README_EN.md">English</a>
   </p>
 </div>
 
 ---
 
-AI Terrarium 为多角色大模型对话提供一个可观察、可干预的沙盒空间。你可以配置多个不同模型与人设的智能体，让它们在隔离或共享的语境中自主推演，并以“观察者 / 导演”视角实时介入、记录演化轨迹与分析动态。
+AI Terrarium 是一个基于 **Tauri v2 + Vue 3 + Rust** 构建的跨端多智能体自主演化与观察应用。
 
-## 核心功能
+在这里，角色不再只是“一问一答的工具”，而是拥有各自模型、人设、思考深度与私密记忆的独立个体。你可以袖手旁观它们的自由演化，也可以随时打破平静——丢入一条突发环境事件、向某个角色悄悄“传音”、拉几个角色进限时私密房间，甚至开启**盲猜模式**隐藏它们的内心独白，像追一场无法预测结局的群像剧。
 
-- **多智能体自主推演与导演干预**
-  - 支持连续自动推演与单步推进（可指定下一位发言角色）。
-  - 支持注入全员可见的突发场景事件、向单个角色发送私密定向提示、以路人/弹幕身份插话，以及开启限时私密房间。
-  - 提供**盲猜观察模式**，可按需隐藏角色思考链与私密对话内容，还原纯观察视角。
-- **结构化信息隔离与双轨记忆**
-  - 基于结构化可见性规则（公开、房间、私密、导演专属）严格隔离不同角色与房间的上下文。
-  - 支持**角色私密备忘**与**共享 Markdown 白板**，白板写入支持守门员自动防泄密审核或人工审批。
-  - 内置长对话上下文压缩，将历史记录结构化归纳为“已确认客观事实”“角色主观陈述与猜测”与“未解悬念与分歧”。
-- **拟人化调度与后台辅助分流**
-  - 支持智能点名、允许跳过发言（`[PASS]`）、快反应回复、随机情绪扰动，以及按角色独立配置思考深度。
-  - 可选配置独立的**后台辅助调度模型**，将智能点名与守门员审核等高频轻量任务从主模型分流。
-- **多模型接入与外部联动**
-  - 支持自定义 OpenAI 兼容接口，内置 DeepSeek、阿里云百炼 (Qwen)、月之暗面 (Kimi)、火山引擎 (豆包)、OpenAI、Google Gemini、智谱清言 (GLM)、MiniMax、OpenRouter 等常用预设。
-  - 内置默认关闭、仅监听 `127.0.0.1` 的本地 HTTP / WebSocket 接口与零依赖 Node.js MCP 桥接（[mcp/terrarium_mcp.mjs](mcp/terrarium_mcp.mjs)），可接入 Claude Desktop 或 Cursor 等客户端。
+## 核心玩法
+
+- **造物主视角与实时干预**
+  - **自由推演 / 单步掌控**：支持全自动连续对话，也可随时暂停、单步推进或强制指定下一位发言者。
+  - **多样化剧本干预**：支持向全员注入突发场景事件、给单个角色发送私密传音、以路人/弹幕身份插话，以及开启限时私密房间。
+  - **盲猜观察模式**：一键隐藏角色思考链（`<think>`）与私密房间内容，仅凭公开台词推理谁在演戏、谁在藏底牌。
+- **真正的信息差与双轨记忆**
+  - **结构化可见性隔离**：严格区分公开、房间、私密与导演专属信息，角色不会“偷看”不该知道的秘密。
+  - **私密备忘 + 共享白板**：角色可记录仅自己可见的判断，也可向公共 Markdown 白板写入共识或线索；白板支持守门员自动防泄密审核或人工审批。
+  - **结构化记忆压缩**：长对话自动归纳为“已确认客观事实”“角色主观陈述与猜测”和“未解悬念与分歧”，长线推演不易失忆或串台。
+- **拟人化调度与轻量分流**
+  - **让 AI 像真人一样聊天**：支持智能点名、无话可说时跳过（`[PASS]`）、快反应短句接话、随机情绪扰动，以及按角色独立配置思考深度。
+  - **后台辅助模型分流**：可单独指定轻量辅助模型承担智能点名与白板防泄密审核，降低主模型开销。
+- **多模型混搭与外部联动**
+  - 支持任意 OpenAI 兼容接口，内置 DeepSeek、阿里云百炼 (Qwen)、月之暗面 (Kimi)、火山引擎 (豆包)、OpenAI、Google Gemini、智谱清言 (GLM)、MiniMax、OpenRouter 等预设，可让不同模型同台飙戏。
+  - 内置默认关闭、仅监听 `127.0.0.1` 的本地 HTTP / WebSocket 控制接口与零依赖 Node.js MCP 桥接（[mcp/terrarium_mcp.mjs](mcp/terrarium_mcp.mjs)），可接入 Claude Desktop 或 Cursor。
 
 ## 下载与支持平台
 
-当前版本：`v0.1.0`（暂未在 [GitHub Releases](https://github.com/hbdzh/ai-terrarium/releases) 发布预编译安装包，请先通过源码构建运行）。
+最新版本：**[v0.1.0](https://github.com/hbdzh/ai-terrarium/releases/tag/v0.1.0)**
 
-| 平台 | 状态 | 说明 |
+| 平台 | 获取方式 | 说明 |
 | --- | --- | --- |
-| Windows | 支持源码构建 | 已适配自定义窗口外观 |
+| Windows (x64) | [下载单文件 exe](https://github.com/hbdzh/ai-terrarium/releases/download/v0.1.0/ai-terrarium-v0.1.0-windows-x64.exe) | 免安装单文件；未代码签名，首次运行如遇 SmartScreen 提示请选择“仍要运行” |
+| Android (arm64) | [下载 APK](https://github.com/hbdzh/ai-terrarium/releases/download/v0.1.0/ai-terrarium-v0.1.0-android-arm64.apk) | 仅包含 `arm64-v8a` 架构，当前为调试签名 |
 | macOS | 支持源码构建 | 支持原生标题栏布局与窗口适配 |
-| Android | 支持源码构建 | Tauri v2 移动端构建 |
 | HarmonyOS / OpenHarmony | 支持源码构建 | 已完成适配（`ohos_compat.rs` 与 `feat/open-harmony` 分支依赖） |
 
-<a id="快速开始"></a>
+<a id="从源码构建"></a>
 
 ## 从源码构建
 
