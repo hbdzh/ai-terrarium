@@ -39,8 +39,8 @@ AI Terrarium 为多角色大模型对话提供一个可观察、可干预的沙�
 | --- | --- | --- |
 | Windows | 支持源码构建 | 已适配自定义窗口外观 |
 | macOS | 支持源码构建 | 支持原生标题栏布局与窗口适配 |
-| Linux | 支持源码构建 | 标准 Tauri v2 桌面构建 |
-| OpenHarmony | 支持源码构建 | 已完成 HarmonyOS / OpenHarmony 适配（`ohos_compat.rs` 与 `feat/open-harmony` 分支依赖） |
+| Android | 支持源码构建 | Tauri v2 移动端构建 |
+| HarmonyOS / OpenHarmony | 支持源码构建 | 已完成适配（`ohos_compat.rs` 与 `feat/open-harmony` 分支依赖） |
 
 <a id="快速开始"></a>
 

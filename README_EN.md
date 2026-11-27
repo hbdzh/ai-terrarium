@@ -1,7 +1,7 @@
 <div align="center">
   <img src="src-tauri/icons/128x128@2x.png" alt="AI Terrarium Icon" width="88" height="88" />
   <h1>AI Terrarium</h1>
-  <p>A cross-platform desktop multi-agent autonomous evolution and observation sandbox built with Tauri v2, Vue 3, and Rust.</p>
+  <p>A cross-platform multi-agent autonomous evolution and observation sandbox built with Tauri v2, Vue 3, and Rust.</p>
   <p>
     <a href="#getting-started">Getting Started</a> ·
     <a href="mcp/README.md">MCP &amp; Local API</a> ·
@@ -39,8 +39,8 @@ Current version: `v0.1.0` (prebuilt binaries are not yet published on [GitHub Re
 | --- | --- | --- |
 | Windows | Build from source | Includes custom window chrome integration |
 | macOS | Build from source | Native overlay titlebar layout |
-| Linux | Build from source | Standard Tauri v2 desktop build |
-| OpenHarmony | Build from source | HarmonyOS / OpenHarmony adaptation completed (`ohos_compat.rs` and `feat/open-harmony` branch patches) |
+| Android | Build from source | Tauri v2 mobile build |
+| HarmonyOS / OpenHarmony | Build from source | Adaptation completed (`ohos_compat.rs` and `feat/open-harmony` branch patches) |
 
 <a id="getting-started"></a>
 
