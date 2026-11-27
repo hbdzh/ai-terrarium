@@ -1,7 +1,7 @@
 <div align="center">
   <img src="src-tauri/icons/128x128@2x.png" alt="AI Terrarium Icon" width="88" height="88" />
   <h1>AI Terrarium</h1>
-  <p><strong>Drop multiple LLMs into a living digital terrarium—watch them banter, keep secrets, and evolve on their own while you observe from outside the glass.</strong></p>
+  <p><strong>Put multiple AI characters in one digital terrarium and let them talk on their own—while you play director from outside the glass.</strong></p>
   <p>
     <a href="https://github.com/hbdzh/ai-terrarium/releases/tag/v0.1.0">Download v0.1.0</a> ·
     <a href="#key-features">Key Features</a> ·
@@ -14,36 +14,40 @@
 
 ---
 
-AI Terrarium is a cross-platform multi-agent autonomous evolution and observation app built with **Tauri v2, Vue 3, and Rust**.
+Most AI apps are just you asking and the AI answering. **AI Terrarium** flips that around: you set up a scene, pick a few characters powered by different models and personas (DeepSeek, Qwen, Kimi, GPT, Gemini, and more), and let them converse with each other.
 
-Instead of a single-prompt Q&amp;A loop, every agent has its own model, persona, thinking depth, and private memory. You can sit back and watch the story unfold, or intervene at any time—drop a sudden scene event, whisper privately to one character, spin up a time-limited private room, or enable **Blind Guess Mode** to hide inner monologues and guess who is bluffing.
+You can sit back and watch the drama unfold naturally, or step in at any moment—announce a sudden blackout, slip a secret note to one character, pull two of them into a private room for a few turns, or hide their inner thoughts so you can guess who is bluffing.
 
 <a id="key-features"></a>
 
 ## Key Features
 
-- **Director Mode &amp; Real-Time Interventions**
-  - Run continuous autonomous turns or step turn-by-turn (optionally forcing the next speaker).
-  - Inject public scene events, send private whispers to individual agents, interject as a bystander/danmaku, or open time-limited private rooms.
-  - Toggle **Blind Guess Mode** to hide reasoning chains (`<think>`) and private rooms from the observer view.
-- **True Information Asymmetry &amp; Dual-Track Memory**
-  - Enforces structured visibility boundaries (`Public`, `Room`, `Private`, `DirectorOnly`) so agents never leak or read what they shouldn't see.
-  - Supports **Private Notes** per agent and a **Shared Markdown Board** guarded by automatic anti-leak review or manual approval.
-  - Compacts long histories into structured summaries separating confirmed facts, character claims, and open threads.
-- **Natural Pacing &amp; Auxiliary Model Routing**
-  - Supports smart speaker selection, optional turn passing (`[PASS]`), intuitive fast replies, random mood perturbations, and per-agent thinking depth.
-  - Offload lightweight background tasks—smart speaker selection and guardian board review—to an optional auxiliary model.
+- **Play Director in Real Time**
+  - **Auto-run or step-by-step**: Let the group chat run continuously, pause anytime, advance one turn at a time, or pick who speaks next.
+  - **Four ways to steer the story**:
+    - **Scene Events**: Drop an announcement everyone can see (e.g. *"Someone knocks on the door"*).
+    - **Private Whispers**: Send a secret message to just one character—nobody else sees it.
+    - **Bystander / Danmaku**: Jump in as a passerby and watch the characters react.
+    - **Timed Private Rooms**: Pull selected characters into a separate room for a few turns; outsiders never know what was said inside.
+  - **Blind Guess Mode**: Hide reasoning chains (`<think>`) and private rooms so you only see public lines—great for mystery, social deduction, or guessing games.
+- **Real Secrets, No Accidental Leaks**
+  - **Strict room isolation**: Public chat, private rooms, and secret whispers stay strictly separated so characters don't read what they shouldn't know.
+  - **Personal notes + shared board**: Characters can jot down private thoughts for themselves, and collaborate on a shared Markdown board—with automatic anti-leak checks or manual approval before edits go live.
+  - **Memory that lasts**: Long conversations are summarized into what actually happened, what each character claims, and unresolved mysteries, keeping long sessions coherent.
+- **More Human-Like Pacing**
+  - **No forced filler**: Characters can pass their turn (`[PASS]`) when they have nothing to add, reply in quick casual bursts, or get subtle random mood shifts.
+  - **Offload helper tasks**: Optionally assign a faster, cheaper model to handle background tasks like picking the next speaker and checking the shared board for leaks.
 
 <a id="additional-features"></a>
 
 ## Additional Features
 
-- **Multi-Provider Lineup &amp; Decoupled API Profiles**: Mix and match any OpenAI-compatible models with built-in presets for DeepSeek, Alibaba Cloud Bailian (Qwen), Moonshot (Kimi), Volcengine (Doubao), OpenAI, Google Gemini, Zhipu (GLM), MiniMax, and OpenRouter; API profiles are decoupled from character creation.
-- **Experiment Forking &amp; Timeline Snapshots**: Fork an active experiment and tweak parameters or personas to compare alternate trajectories.
-- **Observer Analysis &amp; Twist Event Cards**: Generate periodic observer reports and draw twist event cards to inject into the scene.
-- **Character Library, Tags &amp; Pure Script View**: Includes reusable character presets, experiment style/rule tags, scenario script import/export, and a clean script-reading/print view.
-- **Rich Rendering &amp; Themes**: Supports collapsible thought streams, Markdown syntax highlighting, KaTeX math rendering, and Light / Dark / System themes.
-- **Local Persistence &amp; External MCP Integration**: Stores experiments locally in SQLite; ships with an opt-in local HTTP / WebSocket API bound to `127.0.0.1` and a zero-dependency Node.js MCP bridge ([mcp/terrarium_mcp.mjs](mcp/terrarium_mcp.mjs)) for Claude Desktop or Cursor.
+- **Mix &amp; Match Models**: Works with any OpenAI-compatible API, with built-in presets for DeepSeek, Alibaba Cloud Bailian (Qwen), Moonshot (Kimi), Volcengine (Doubao), OpenAI, Google Gemini, Zhipu (GLM), MiniMax, and OpenRouter. API profiles are managed separately from character presets.
+- **Fork &amp; Compare Parallel Timelines**: Branch off from an experiment mid-way, tweak a rule or persona, and see how differently things turn out.
+- **Observer Reports &amp; Twist Cards**: Have a background observer summarize the situation periodically, or draw random twist cards to shake up the scene.
+- **Character Library, Tags &amp; Script View**: Includes reusable character presets, style/rule tags, scenario import/export, and a clean script-only reading/print view.
+- **Clean Reading Experience**: Collapsible thinking blocks, code highlighting, KaTeX math rendering, and Light / Dark / System themes.
+- **Local Storage &amp; MCP Control**: Data stays locally in SQLite; includes an opt-in local HTTP / WebSocket API (`127.0.0.1`) and a zero-dependency Node.js MCP bridge ([mcp/terrarium_mcp.mjs](mcp/terrarium_mcp.mjs)) for Claude Desktop or Cursor.
 
 ## Downloads &amp; Platform Support
 
