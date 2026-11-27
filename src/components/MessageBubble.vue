@@ -71,32 +71,57 @@ const effectiveTouchOrNarrow = computed(
 const renderedContent = ref("");
 let mdThrottleTimer: number | null = null;
 let lastMdRenderAt = 0;
+let lastFinalRaw = "";
+let lastFinalVer = -1;
+let lastFinalHtml = "";
 
 function updateRenderedContentNow() {
   if (mdThrottleTimer !== null) {
     window.clearTimeout(mdThrottleTimer);
     mdThrottleTimer = null;
   }
-  renderedContent.value = props.content
-    ? renderMarkdown(props.content, Boolean(props.isStreaming))
-    : "";
+  const content = props.content;
+  const streaming = Boolean(props.isStreaming);
+  const ver = markdownEnhancersVersion.value;
+  if (!content) {
+    renderedContent.value = "";
+    lastFinalRaw = "";
+    lastFinalVer = ver;
+    lastFinalHtml = "";
+    lastMdRenderAt = performance.now();
+    return;
+  }
+  if (!streaming) {
+    if (content === lastFinalRaw && ver === lastFinalVer) {
+      renderedContent.value = lastFinalHtml;
+      return;
+    }
+    const html = renderMarkdown(content, false);
+    lastFinalRaw = content;
+    lastFinalVer = ver;
+    lastFinalHtml = html;
+    renderedContent.value = html;
+    lastMdRenderAt = performance.now();
+    return;
+  }
+  renderedContent.value = renderMarkdown(content, true);
   lastMdRenderAt = performance.now();
 }
 
 watch(
   () => [props.content, props.isStreaming, markdownEnhancersVersion.value] as const,
   ([content, isStreaming]) => {
-    if (!content || !isStreaming || content.length < 400) {
+    if (!content || !isStreaming) {
       updateRenderedContentNow();
       return;
     }
     const elapsed = performance.now() - lastMdRenderAt;
-    if (elapsed >= 85) {
+    if (elapsed >= 50) {
       updateRenderedContentNow();
     } else if (mdThrottleTimer === null) {
       mdThrottleTimer = window.setTimeout(
         updateRenderedContentNow,
-        Math.max(16, 85 - elapsed)
+        Math.max(10, 50 - elapsed)
       );
     }
   },

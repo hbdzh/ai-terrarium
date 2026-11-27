@@ -399,6 +399,13 @@ export interface DiffLine {
 
 export type ThemePreference = "system" | "light" | "dark";
 
+export interface AuxModelConfig {
+  apiProfileId?: string | null;
+  baseUrl: string;
+  apiKey: string;
+  modelName: string;
+}
+
 export interface UiPrefs {
   leftSidebarOpen: boolean;
   inspectorOpen: boolean;
@@ -407,4 +414,5 @@ export interface UiPrefs {
   enableLocalApi?: boolean;
   localApiPort?: number;
   localApiToken?: string;
+  auxModel?: AuxModelConfig | null;
 }

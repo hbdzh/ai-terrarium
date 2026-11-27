@@ -14,7 +14,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { saveTextWithDialog, openTextWithDialog } from "../utils/fileActions";
 import { writeClipboardText } from "../utils/clipboard";
-import type { ApiProfile, ExperimentConfig, NodeConfig, ThemePreference, UiPrefs } from "../types";
+import type { ApiProfile, AuxModelConfig, ExperimentConfig, NodeConfig, ThemePreference, UiPrefs } from "../types";
 import { triggerHaptic } from "../utils/native";
 import {
   applyApiProfileToNode,
@@ -114,6 +114,7 @@ async function loadCoreEnginePrompt() {
 const enableLocalApiDraft = ref(false);
 const localApiPortDraft = ref(17890);
 const localApiTokenDraft = ref("");
+const auxModelProfileIdDraft = ref("");
 const localApiInitialSnapshot = ref("");
 const loadedUiPrefsBase = ref<UiPrefs | null>(null);
 
@@ -124,10 +125,12 @@ async function loadLocalApiPrefs() {
     enableLocalApiDraft.value = Boolean(prefs.enableLocalApi);
     localApiPortDraft.value = prefs.localApiPort || 17890;
     localApiTokenDraft.value = prefs.localApiToken ?? "";
+    auxModelProfileIdDraft.value = prefs.auxModel?.apiProfileId ?? "";
     localApiInitialSnapshot.value = JSON.stringify({
       enableLocalApi: enableLocalApiDraft.value,
       localApiPort: localApiPortDraft.value,
       localApiToken: localApiTokenDraft.value,
+      auxModelProfileId: auxModelProfileIdDraft.value,
     });
   } catch {
     // ignore
@@ -268,6 +271,7 @@ const isDirty = computed(() => {
       enableLocalApi: enableLocalApiDraft.value,
       localApiPort: localApiPortDraft.value,
       localApiToken: localApiTokenDraft.value,
+      auxModelProfileId: auxModelProfileIdDraft.value,
     }) !== localApiInitialSnapshot.value;
   return draftChanged || profilesChanged || coreChanged || localApiChanged;
 });
@@ -481,7 +485,19 @@ async function handleSave() {
     enableLocalApi: enableLocalApiDraft.value,
     localApiPort: localApiPortDraft.value,
     localApiToken: localApiTokenDraft.value,
+    auxModelProfileId: auxModelProfileIdDraft.value,
   });
+  const auxProf = auxModelProfileIdDraft.value
+    ? normalizedProfiles.find((p) => p.id === auxModelProfileIdDraft.value)
+    : undefined;
+  const resolvedAuxModel: AuxModelConfig | null = auxProf
+    ? {
+        apiProfileId: auxProf.id,
+        baseUrl: auxProf.baseUrl,
+        apiKey: auxProf.apiKey,
+        modelName: auxProf.modelName,
+      }
+    : null;
   if (currentLocalSnap !== localApiInitialSnapshot.value) {
     try {
       const latestPrefs = await invoke<UiPrefs>("get_ui_prefs").catch(
@@ -495,10 +511,11 @@ async function handleSave() {
         enableLocalApi: enableLocalApiDraft.value,
         localApiPort: Math.min(65535, Math.max(1024, Math.round(localApiPortDraft.value || 17890))),
         localApiToken: localApiTokenDraft.value.trim(),
+        auxModel: resolvedAuxModel,
       };
       await invoke("save_ui_prefs", { prefs: nextPrefs });
     } catch (err: any) {
-      emit("notify", `本地外部接口配置保存失败: ${err?.toString?.() ?? err}`);
+      emit("notify", `全局辅助配置保存失败: ${err?.toString?.() ?? err}`);
     }
   }
   confirmDiscardOpen.value = false;
@@ -1050,6 +1067,23 @@ defineExpose({
                     />
                   </div>
                 </div>
+              </div>
+
+              <div class="pt-4 border-t border-[#ECECF0] space-y-2.5">
+                <div>
+                  <div class="text-[13px] font-medium text-[#25262A]">后台辅助调度模型（可选）</div>
+                  <div class="text-[11.5px] text-[#858A95] mt-0.5">
+                    用于智能点名与守门员防泄密审核等高频轻量任务；未指定时默认沿用主配置。
+                  </div>
+                </div>
+                <CustomSelect
+                  :model-value="auxModelProfileIdDraft"
+                  :options="[
+                    { value: '', label: '默认沿用主配置（不单独分流）' },
+                    ...selectableProfiles.map((p) => ({ value: p.id, label: `${p.name} (${p.modelName})` })),
+                  ]"
+                  @update:model-value="auxModelProfileIdDraft = $event"
+                />
               </div>
 
               <div class="pt-4 border-t border-[#ECECF0] space-y-4">

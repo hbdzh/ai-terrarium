@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::compactor::select_compactor_node;
 use crate::llm::{resolve_chat_completions_url, ApiChatMessage};
-use crate::models::{ExperimentConfig, NodeConfig};
+use crate::models::{AuxModelConfig, ExperimentConfig, NodeConfig};
 use crate::sanitizer::strip_think_tags;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -168,10 +168,11 @@ pub fn parse_guardian_verdict(raw: &str) -> GuardianVerdict {
     GuardianVerdict::Approved
 }
 
-/// 守门员自动审核：快速规则初筛 + 观察员 C（或首个可用节点）轻量防泄密校验
+/// 守门员自动审核：快速规则初筛 + 轻量辅助模型 / 观察员 C 校验
 pub async fn guardian_review_board(
     client: &Client,
     config: &ExperimentConfig,
+    aux_model: Option<&AuxModelConfig>,
     agent: &NodeConfig,
     current_board: &str,
     proposed_content: &str,
@@ -183,9 +184,22 @@ pub async fn guardian_review_board(
         };
     }
 
-    let Some(reviewer) = select_compactor_node(config) else {
-        return GuardianVerdict::Approved;
-    };
+    let (reviewer_base_url, reviewer_api_key, reviewer_model_name) =
+        if let Some(aux) = aux_model.filter(|m| m.is_configured()) {
+            (
+                aux.base_url.as_str(),
+                aux.api_key.as_str(),
+                aux.model_name.as_str(),
+            )
+        } else if let Some(reviewer) = select_compactor_node(config) {
+            (
+                reviewer.base_url.as_str(),
+                reviewer.api_key.as_str(),
+                reviewer.model_name.as_str(),
+            )
+        } else {
+            return GuardianVerdict::Approved;
+        };
 
     let sys = "你是沙盒共享白板的「守门员审核器」。所有参与对话的 AI 都能实时看到共享白板。\n\
         请严格审查智能体提交的白板修改草案是否违规：\n\
@@ -214,9 +228,9 @@ pub async fn guardian_review_board(
         ApiChatMessage::text("system", sys),
         ApiChatMessage::text("user", user),
     ];
-    let url = resolve_chat_completions_url(&reviewer.base_url);
+    let url = resolve_chat_completions_url(reviewer_base_url);
     let body = GuardianChatReq {
-        model: reviewer.model_name.trim(),
+        model: reviewer_model_name.trim(),
         messages: &msgs,
         temperature: 0.1,
         stream: false,
@@ -225,7 +239,7 @@ pub async fn guardian_review_board(
     let resp = match client
         .post(&url)
         .timeout(std::time::Duration::from_secs(20))
-        .bearer_auth(reviewer.api_key.trim())
+        .bearer_auth(reviewer_api_key.trim())
         .json(&body)
         .send()
         .await

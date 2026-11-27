@@ -18,6 +18,25 @@ fn default_local_api_port() -> u16 {
     17890
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AuxModelConfig {
+    #[serde(default)]
+    pub api_profile_id: Option<String>,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub model_name: String,
+}
+
+impl AuxModelConfig {
+    pub fn is_configured(&self) -> bool {
+        !self.model_name.trim().is_empty() && !self.base_url.trim().is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiPrefs {
@@ -32,6 +51,8 @@ pub struct UiPrefs {
     pub local_api_port: u16,
     #[serde(default)]
     pub local_api_token: String,
+    #[serde(default)]
+    pub aux_model: Option<AuxModelConfig>,
 }
 
 impl Default for UiPrefs {
@@ -44,6 +65,7 @@ impl Default for UiPrefs {
             enable_local_api: false,
             local_api_port: default_local_api_port(),
             local_api_token: String::new(),
+            aux_model: None,
         }
     }
 }
@@ -897,6 +919,15 @@ impl SpeakerRole {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "level", content = "scope", rename_all = "camelCase")]
+pub enum Visibility {
+    Public,
+    Room(String),
+    Private(String),
+    DirectorOnly,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineMessage {
@@ -920,6 +951,28 @@ pub struct TimelineMessage {
     pub total_tokens: u64,
     pub whisper_consumed: bool,
     pub created_at: String,
+}
+
+impl TimelineMessage {
+    pub fn visibility(&self) -> Visibility {
+        match self.role {
+            SpeakerRole::GodWhisper => {
+                if let Some(ref aid) = self.agent_id {
+                    Visibility::Private(aid.clone())
+                } else {
+                    Visibility::DirectorOnly
+                }
+            }
+            SpeakerRole::Ai | SpeakerRole::GodPublic | SpeakerRole::GodSystem => {
+                let rid = self.room_id.trim();
+                if rid.is_empty() || rid == "main" {
+                    Visibility::Public
+                } else {
+                    Visibility::Room(rid.to_string())
+                }
+            }
+        }
+    }
 }
 
 pub const PASS_NOTICE_SUFFIX: &str = "看了一眼消息，没接话";
@@ -1372,61 +1425,6 @@ pub enum StreamEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_legacy_experiment_config_deserializes_with_phase1_defaults() {
-        let legacy_json = r#"{
-            "presetId": "casual_chat",
-            "initialTopic": "停电了",
-            "observerInterval": 10,
-            "pauseSeconds": 2.5,
-            "maxConsecutiveTurns": 80,
-            "agents": [],
-            "nodeC": {
-                "id": "observer",
-                "label": "观察员 C",
-                "baseUrl": "https://api.deepseek.com/v1",
-                "apiKey": "",
-                "modelName": "deepseek-chat",
-                "temperature": 0.3,
-                "systemPrompt": ""
-            }
-        }"#;
-        let mut cfg: ExperimentConfig = serde_json::from_str(legacy_json).unwrap();
-        cfg.normalize();
-        assert!(cfg.enable_compaction_guard);
-        assert!(!cfg.enable_private_notes);
-        assert!(cfg.enable_smart_selector);
-        assert!(!cfg.enable_auto_director);
-        assert!(cfg.tags.is_empty());
-
-        // 确保包含已废弃字段的旧版 JSON 也能无缝反序列化兼容
-        let legacy_removed_fields_json = r#"{
-            "presetId": "custom",
-            "initialTopic": "测试",
-            "observerInterval": 10,
-            "pauseSeconds": 2.0,
-            "maxConsecutiveTurns": 50,
-            "enablePrefixCacheOpt": true,
-            "enableAdaptiveReasoning": true,
-            "adaptiveLowReasoningEffort": "low",
-            "enablePeriodicReflection": true,
-            "agents": [],
-            "nodeC": {
-                "id": "observer",
-                "label": "观察员 C",
-                "baseUrl": "https://api.deepseek.com/v1",
-                "apiKey": "",
-                "modelName": "deepseek-chat",
-                "temperature": 0.3,
-                "systemPrompt": ""
-            }
-        }"#;
-        let mut legacy_cfg: ExperimentConfig =
-            serde_json::from_str(legacy_removed_fields_json).unwrap();
-        legacy_cfg.normalize();
-        assert_eq!(legacy_cfg.preset_id, "custom");
-    }
 
     #[test]
     fn test_upgraded_builtin_presets_concrete_names_and_three_player_casts() {

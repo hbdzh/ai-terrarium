@@ -5,7 +5,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{resolve_chat_completions_url, ApiChatMessage};
-use crate::models::{ExperimentConfig, NodeConfig, SpeakerRole, TimelineMessage};
+use crate::models::{ExperimentConfig, NodeConfig, SpeakerRole, TimelineMessage, Visibility};
 use crate::sanitizer::strip_think_tags;
 
 pub const KEEP_RECENT_TURNS: usize = 7;
@@ -92,8 +92,60 @@ pub struct CompactionResult {
 struct CompactionJsonPayload {
     #[serde(default)]
     summary: String,
+    #[serde(default, alias = "confirmed_facts")]
+    confirmed_facts: Vec<String>,
+    #[serde(default, alias = "character_claims")]
+    character_claims: Vec<String>,
+    #[serde(default, alias = "open_threads")]
+    open_threads: Vec<String>,
     #[serde(default, alias = "private_snapshots")]
     private_snapshots: HashMap<String, String>,
+}
+
+fn format_structured_summary(payload: &CompactionJsonPayload) -> String {
+    let facts: Vec<String> = payload
+        .confirmed_facts
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("- {s}"))
+        .collect();
+    let claims: Vec<String> = payload
+        .character_claims
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("- {s}"))
+        .collect();
+    let threads: Vec<String> = payload
+        .open_threads
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("- {s}"))
+        .collect();
+
+    if facts.is_empty() && claims.is_empty() && threads.is_empty() {
+        return payload.summary.trim().to_string();
+    }
+
+    let mut sections: Vec<String> = Vec::new();
+    if !facts.is_empty() {
+        sections.push(format!("【已确认客观事实与场景事件】\n{}", facts.join("\n")));
+    }
+    if !claims.is_empty() {
+        sections.push(format!(
+            "【角色主观陈述与猜测（未证实）】\n{}",
+            claims.join("\n")
+        ));
+    }
+    if !threads.is_empty() {
+        sections.push(format!("【未解悬念与分歧】\n{}", threads.join("\n")));
+    }
+    if !payload.summary.trim().is_empty() && sections.is_empty() {
+        sections.push(payload.summary.trim().to_string());
+    }
+    sections.join("\n\n")
 }
 
 pub fn parse_compaction_output(raw: &str, config: &ExperimentConfig) -> (String, HashMap<String, String>) {
@@ -108,7 +160,8 @@ pub fn parse_compaction_output(raw: &str, config: &ExperimentConfig) -> (String,
     if let (Some(start), Some(end)) = (no_fence.find('{'), no_fence.rfind('}')) {
         if start <= end {
             if let Ok(parsed) = serde_json::from_str::<CompactionJsonPayload>(&no_fence[start..=end]) {
-                if !parsed.summary.trim().is_empty() {
+                let formatted = format_structured_summary(&parsed);
+                if !formatted.is_empty() {
                     let mut snapshots = HashMap::new();
                     for (k, v) in parsed.private_snapshots {
                         let val: String = v.trim().chars().take(60).collect();
@@ -119,7 +172,7 @@ pub fn parse_compaction_output(raw: &str, config: &ExperimentConfig) -> (String,
                             snapshots.insert(ag.id.clone(), val);
                         }
                     }
-                    return (parsed.summary.trim().to_string(), snapshots);
+                    return (formatted, snapshots);
                 }
             }
         }
@@ -233,8 +286,8 @@ pub async fn maybe_compact_history(
 
     let mut transcript = String::new();
     for m in &to_compact {
-        // 空间隔离最高优先级仲裁铁律：全局记忆压缩器必须严格跳过非 "main" 房间的私密对话
-        if m.room_id != "main" {
+        // 空间隔离最高优先级仲裁铁律：全局记忆压缩器仅收录 Visibility::Public 消息
+        if !matches!(m.visibility(), Visibility::Public) {
             continue;
         }
         let clean = strip_think_tags(&m.content);
@@ -246,7 +299,7 @@ pub async fn maybe_compact_history(
             ),
             SpeakerRole::GodPublic => "[路人插话]".to_string(),
             SpeakerRole::GodSystem => "[环境事件]".to_string(),
-            SpeakerRole::GodWhisper => continue, // 私密低语不写入全局公开记忆纪要
+            SpeakerRole::GodWhisper => continue,
         };
         transcript.push_str(&format!("{}: {}\n\n", label, clean));
     }
@@ -265,11 +318,14 @@ pub async fn maybe_compact_history(
     let system_prompt = format!(
         "你是一个双轨制高保真记忆压缩引擎。请将早期多智能体对话（以及已有历史纪要）无损浓缩为严格合法的 JSON 对象（禁止输出多余说明）：\n\
         {{\n  \
-          \"summary\": \"350~600字以内的客观公共历史纪要正文（保留：1.已确认客观事实与白板共识；2.各参与者关键立场与分歧；3.未解决悬念与伏笔；严禁写入任何角色未公开的私人秘密）\",\n  \
+          \"confirmedFacts\": [\"仅记录全员已亲眼目睹的客观场景事件、定时线索或共享白板已确认事实；严禁把任何角色的口头声称或怀疑写成客观事实\"],\n  \
+          \"characterClaims\": [\"记录各角色的个人声称、怀疑、指控或猜测，必须显式标注归属，例如：'阿哲声称……'、'老陈怀疑……'，绝不可当成已证实真相\"],\n  \
+          \"openThreads\": [\"尚未解决的关键悬念、核心分歧与伏笔\"],\n  \
           \"privateSnapshots\": {{\n    \
             \"<agent_id>\": \"为该角色提炼一条 60 字以内的私人状态快照，严格按格式：当前最戒备/怀疑对象 + 核心执念进展 + 情绪基调\"\n  \
           }}\n\
         }}\n\
+        严格铁律：严禁剧透任何角色未公开的私人秘密；必须将「confirmedFacts（客观事实）」与「characterClaims（角色主观声称/猜测）」彻底分开归纳。\n\
         当前参演角色列表：\n{}",
         agent_roster
     );

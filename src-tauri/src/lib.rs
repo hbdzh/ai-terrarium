@@ -145,6 +145,7 @@ fn update_experiment(
         .db
         .update_experiment(&experiment_id, title.trim(), &config)
         .map_err(|e| e.to_string())?;
+    state.engine.bump_state_version();
     state
         .db
         .get_experiment_detail(&experiment_id)
@@ -537,10 +538,12 @@ fn set_board_approval_mode(
     experiment_id: String,
     mode: BoardApprovalMode,
 ) -> Result<ExperimentConfig, String> {
-    state
+    let cfg = state
         .db
         .set_board_approval_mode(&experiment_id, mode)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    state.engine.bump_state_version();
+    Ok(cfg)
 }
 
 #[tauri::command]

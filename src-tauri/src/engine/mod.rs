@@ -1,9 +1,12 @@
-use std::collections::{HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+pub mod intervene;
+pub mod prompt_builder;
+pub mod scheduler;
+
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
 use chrono::Utc;
 use reqwest::Client;
 use tauri::ipc::Channel;
@@ -12,23 +15,21 @@ use uuid::Uuid;
 
 use crate::compactor::{estimate_messages_tokens, maybe_compact_history, CompactionGuard};
 use crate::db::Database;
-use crate::llm::{
-    build_flipped_messages_with_room, stream_chat_completion, ApiChatMessage,
-    StreamCompletionResult, StreamDeltaChunk, TokenUsage,
-};
 use crate::models::{
-    is_pass_notice, ActivePrivateRoom, BoardApprovalMode, EngineState, ExperimentConfig,
-    InterventionInput, NodeConfig, ObserverNote, SpeakerRole, StreamEvent, TimelineMessage,
-    PASS_NOTICE_SUFFIX,
+    is_pass_notice, EngineState, ExperimentConfig, InterventionInput, ObserverNote, SpeakerRole,
+    StreamEvent, TimelineMessage, PASS_NOTICE_SUFFIX,
 };
 use crate::observer::run_observer_analysis;
-use crate::sandbox_tools::{
-    guardian_review_board, parse_board_tool_call, sandbox_tools_schema, truncate_private_note,
-    ApprovalDecision, GuardianVerdict, ParsedBoardTool, MAX_PRIVATE_NOTE_CHARS,
-};
+use crate::sandbox_tools::{sandbox_tools_schema, ApprovalDecision};
 use crate::sanitizer::{
-    extract_leave_marker, extract_micro_cue, strip_leading_speaker_prefix, strip_think_tags,
+    extract_leave_marker, extract_micro_cue, strip_leading_speaker_prefix,
 };
+
+use prompt_builder::build_flipped_messages_with_room;
+pub use scheduler::{
+    detect_natural_wrapup_loop, is_pass_reply, select_next_speaker, select_next_speaker_in_room,
+};
+use scheduler::{maybe_roll_mood_dice, select_next_speaker_with_aux, FAREWELL_RESCUE_MARKER};
 
 fn state_to_u8(s: EngineState) -> u8 {
     match s {
@@ -48,274 +49,12 @@ fn u8_to_state(v: u8) -> EngineState {
     }
 }
 
-/// 内置 15 条轻量生活状态微扰动池（随机微情绪骰子使用）
-const MOOD_DICE_POOL: [&str; 15] = [
-    "刚喝完冰美式有点亢奋，说话节奏偏快",
-    "有点犯困走神，想换个轻松话题",
-    "突然想起一件生活琐事，注意力有点飘",
-    "心情不错，想调侃对方两句",
-    "刚刷到一条离谱热搜，脑子里还留着槽点",
-    "有点饿了，聊着聊着容易联想到吃的",
-    "莫名有点小烦躁，不太想听长篇说教",
-    "刚伸完懒腰，整个人松弛下来，语气更随性",
-    "对刚才某个细节突然有点较真，想追问一句",
-    "窗外好像起风了，情绪稍微带点感性",
-    "手机一直在震但懒得看，只想顺嘴接两句",
-    "突然觉得这个话题有点好笑，忍着笑意接话",
-    "脑子稍微有点卡壳，更想用简短大白话回应",
-    "刚喝了口热茶，心态平和但有点爱抬杠",
-    "忽然涌起一点表达欲，想直接抛出个人直觉判断",
-];
-
-fn maybe_roll_mood_dice(config: &ExperimentConfig) -> Option<&'static str> {
-    if !config.random_mood_dice {
-        return None;
-    }
-    let bytes = *Uuid::new_v4().as_bytes();
-    if (bytes[0] % 100) < 30 {
-        Some(MOOD_DICE_POOL[(bytes[1] as usize) % MOOD_DICE_POOL.len()])
-    } else {
-        None
-    }
-}
-
-/// 去除 `<think>...</think>` 思考块及首尾空白后，判断是否为 `[PASS]` 跳过指令
-pub fn is_pass_reply(content: &str) -> bool {
-    let mut cleaned = content.to_string();
-    loop {
-        let lower = cleaned.to_ascii_lowercase();
-        let Some(start) = lower.find("<think>") else {
-            break;
-        };
-        if let Some(rel_end) = lower[start + 7..].find("</think>") {
-            let end = start + 7 + rel_end + 8;
-            cleaned.replace_range(start..end, "");
-        } else {
-            cleaned.truncate(start);
-            break;
-        }
-    }
-    cleaned.trim().eq_ignore_ascii_case("[PASS]")
-}
-
-const FAREWELL_RESCUE_MARKER: &str = "【叙事导演 · 挽留变故】";
-
-fn is_farewell_wrapup_text(content: &str) -> bool {
-    let cleaned = strip_think_tags(content);
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let continuation_markers = [
-        "等等", "慢着", "先别走", "别急着走", "话还没说完", "等一下", "先等等", "慢点走", "突然",
-    ];
-    if continuation_markers.iter().any(|k| trimmed.contains(k)) {
-        return false;
-    }
-    let farewell_keywords = [
-        "走吧",
-        "再见",
-        "散了吧",
-        "散了",
-        "各自回去",
-        "关门了",
-        "晚安",
-        "告辞",
-        "没什么可说的了",
-        "就这样吧",
-        "先走了",
-        "回见",
-        "拜拜",
-        "保重",
-        "后会有期",
-        "收工",
-        "休息吧",
-        "回去了",
-        "散会",
-        "打烊",
-        "各自散去",
-        "不必再说",
-        "到此为止",
-        "各自保重",
-        "就此别过",
-        "各自休息",
-        "明早见",
-        "明天见",
-    ];
-    farewell_keywords.iter().any(|k| trimmed.contains(k))
-}
-
-fn normalized_chars(text: &str) -> Vec<char> {
-    strip_think_tags(text)
-        .chars()
-        .filter(|c| !c.is_whitespace() && !matches!(c, '，' | '。' | '！' | '？' | '、' | '；' | '：' | '“' | '”' | '‘' | '’' | ',' | '.' | '!' | '?' | ';' | ':' | '"' | '\'' | '（' | '）' | '(' | ')' | '~' | '…' | '—' | '-'))
-        .collect()
-}
-
-fn jaccard_bigram_similarity(a: &str, b: &str) -> f64 {
-    let ca = normalized_chars(a);
-    let cb = normalized_chars(b);
-    if ca.len() < 8 || cb.len() < 8 {
-        return 0.0;
-    }
-    let sa: HashSet<(char, char)> = ca.windows(2).map(|w| (w[0], w[1])).collect();
-    let sb: HashSet<(char, char)> = cb.windows(2).map(|w| (w[0], w[1])).collect();
-    if sa.is_empty() || sb.is_empty() {
-        return 0.0;
-    }
-    let inter = sa.intersection(&sb).count() as f64;
-    let union = sa.union(&sb).count() as f64;
-    if union == 0.0 {
-        0.0
-    } else {
-        inter / union
-    }
-}
-
-/// 检测最近连续 3 条非沉默 AI 发言是否均属于道别收尾，或连续 3 轮高度语义重复。
-pub fn detect_natural_wrapup_loop(messages: &[TimelineMessage]) -> Option<&'static str> {
-    let mut recent_ai: Vec<&TimelineMessage> = Vec::with_capacity(3);
-    for msg in messages.iter().rev() {
-        if is_pass_notice(msg) {
-            continue;
-        }
-        match msg.role {
-            SpeakerRole::Ai => {
-                recent_ai.push(msg);
-                if recent_ai.len() == 3 {
-                    break;
-                }
-            }
-            SpeakerRole::GodPublic | SpeakerRole::GodSystem => {
-                break;
-            }
-            SpeakerRole::GodWhisper => continue,
-        }
-    }
-    if recent_ai.len() < 3 {
-        return None;
-    }
-    if recent_ai
-        .iter()
-        .all(|m| is_farewell_wrapup_text(&m.content))
-    {
-        return Some("farewell");
-    }
-    let s01 = jaccard_bigram_similarity(&recent_ai[0].content, &recent_ai[1].content);
-    let s12 = jaccard_bigram_similarity(&recent_ai[1].content, &recent_ai[2].content);
-    let s02 = jaccard_bigram_similarity(&recent_ai[0].content, &recent_ai[2].content);
-    if s01 >= 0.48 && s12 >= 0.48 && s02 >= 0.42 {
-        return Some("repetition");
-    }
-    None
-}
-
-/// 3 人及以上智能点名接话路由：检测上一条发言是否明确点名其他角色，且严禁同一角色连续刷屏（自动跳过已退场角色）。
-pub fn select_next_speaker(
-    config: &ExperimentConfig,
-    current_speaker_id: &str,
-    last_content: &str,
-) -> String {
-    if config.agents.is_empty() {
-        return current_speaker_id.to_string();
-    }
-    let current_idx = config
-        .agents
-        .iter()
-        .position(|a| a.id == current_speaker_id)
-        .unwrap_or(0);
-    let len = config.agents.len();
-    let fallback = (1..=len)
-        .map(|offset| &config.agents[(current_idx + offset) % len])
-        .find(|a| !a.has_left && a.id != current_speaker_id)
-        .or_else(|| config.agents.iter().find(|a| !a.has_left))
-        .unwrap_or(&config.agents[(current_idx + 1) % len])
-        .id
-        .clone();
-
-    let active_count = config.agents.iter().filter(|a| !a.has_left).count();
-    if !config.enable_smart_selector || active_count < 3 {
-        return fallback;
-    }
-
-    let cleaned = strip_think_tags(last_content);
-    let mut best_match: Option<(usize, usize, usize, String)> = None;
-    for (idx, agent) in config.agents.iter().enumerate() {
-        if agent.id == current_speaker_id || agent.has_left {
-            continue;
-        }
-        let label = agent.label.trim();
-        if label.is_empty() {
-            continue;
-        }
-        if let Some(pos) = cleaned.rfind(label) {
-            let rr_dist = (idx + len - current_idx) % len;
-            // 优先匹配文末最近一次点名，其次较长角色名，其次顺位最近
-            let score = (pos, label.len(), usize::MAX - rr_dist);
-            if best_match
-                .as_ref()
-                .map(|(bp, bl, bd, _)| score > (*bp, *bl, *bd))
-                .unwrap_or(true)
-            {
-                best_match = Some((score.0, score.1, score.2, agent.id.clone()));
-            }
-        }
-    }
-
-    best_match.map(|(_, _, _, id)| id).unwrap_or(fallback)
-}
-
-/// 空间隔离最高优先级仲裁：当存在激活的私密房间时，候选池严格锁定在 room_id 成员内部，绝不因提及大厅角色而打破隔离（自动跳过已退场角色）。
-pub fn select_next_speaker_in_room(
-    config: &ExperimentConfig,
-    current_speaker_id: &str,
-    last_content: &str,
-    active_room: Option<&ActivePrivateRoom>,
-) -> String {
-    if let Some(room) = active_room {
-        if room.remaining_turns > 0 && room.member_ids.len() >= 2 {
-            let candidates: Vec<&String> = room
-                .member_ids
-                .iter()
-                .filter(|id| {
-                    id.as_str() != current_speaker_id
-                        && config.find_agent(id.as_str()).is_some_and(|a| !a.has_left)
-                })
-                .collect();
-            if candidates.is_empty() {
-                return room
-                    .member_ids
-                    .iter()
-                    .find(|id| config.find_agent(id.as_str()).is_some_and(|a| !a.has_left))
-                    .cloned()
-                    .unwrap_or_else(|| room.member_ids[0].clone());
-            }
-            if config.enable_smart_selector && candidates.len() >= 2 {
-                let cleaned = strip_think_tags(last_content);
-                let mut best: Option<(usize, String)> = None;
-                for cid in &candidates {
-                    let label = config.agent_label(Some(cid.as_str()));
-                    if let Some(pos) = cleaned.rfind(label.trim()) {
-                        if best.as_ref().map(|(bp, _)| pos > *bp).unwrap_or(true) {
-                            best = Some((pos, (*cid).clone()));
-                        }
-                    }
-                }
-                if let Some((_, id)) = best {
-                    return id;
-                }
-            }
-            return candidates[0].clone();
-        }
-    }
-    select_next_speaker(config, current_speaker_id, last_content)
-}
-
 pub struct TerrariumEngine {
     pub db: Arc<Database>,
     pub client: Client,
     pub active_experiment_id: Arc<RwLock<String>>,
     pub state: Arc<AtomicU8>,
+    pub state_version: Arc<AtomicU64>,
     pub consecutive_turns: Arc<AtomicU32>,
     pub consecutive_passes: Arc<AtomicU32>,
     pub forced_next_speaker: Arc<Mutex<Option<String>>>,
@@ -344,6 +83,7 @@ impl TerrariumEngine {
             client,
             active_experiment_id: Arc::new(RwLock::new(initial_experiment_id)),
             state: Arc::new(AtomicU8::new(state_to_u8(EngineState::Idle))),
+            state_version: Arc::new(AtomicU64::new(0)),
             consecutive_turns: Arc::new(AtomicU32::new(0)),
             consecutive_passes: Arc::new(AtomicU32::new(0)),
             forced_next_speaker: Arc::new(Mutex::new(None)),
@@ -379,6 +119,14 @@ impl TerrariumEngine {
         u8_to_state(self.state.load(Ordering::SeqCst))
     }
 
+    pub fn current_state_version(&self) -> u64 {
+        self.state_version.load(Ordering::SeqCst)
+    }
+
+    pub fn bump_state_version(&self) -> u64 {
+        self.state_version.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
     pub async fn set_channel(&self, ch: Channel<StreamEvent>) {
         let mut guard = self.channel.write().await;
         *guard = Some(ch);
@@ -396,7 +144,7 @@ impl TerrariumEngine {
         self.blind_guess_mode.load(Ordering::SeqCst)
     }
 
-    async fn emit(&self, event: StreamEvent) {
+    pub(super) async fn emit(&self, event: StreamEvent) {
         if !matches!(
             event,
             StreamEvent::StreamDelta { .. }
@@ -413,23 +161,6 @@ impl TerrariumEngine {
 
     pub async fn emit_event(&self, event: StreamEvent) {
         self.emit(event).await;
-    }
-
-    pub async fn resolve_board_approval(
-        &self,
-        request_id: &str,
-        decision: ApprovalDecision,
-    ) -> bool {
-        let mut guard = self.pending_approval.lock().await;
-        if let Some((pending_id, _)) = guard.as_ref() {
-            if pending_id == request_id {
-                if let Some((_, tx)) = guard.take() {
-                    let _ = tx.send(decision);
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     fn bump_cancel(&self) {
@@ -499,6 +230,7 @@ impl TerrariumEngine {
 
     pub async fn switch_experiment(&self, experiment_id: String) {
         self.pause(None).await;
+        self.bump_state_version();
         {
             let mut guard = self.pending_approval.lock().await;
             *guard = None;
@@ -523,228 +255,6 @@ impl TerrariumEngine {
             consecutive_turns: 0,
         })
         .await;
-    }
-
-    pub async fn enqueue_intervention(
-        &self,
-        experiment_id: String,
-        input: InterventionInput,
-    ) -> usize {
-        let len = {
-            let mut q = self.intervention_queue.lock().await;
-            q.push_back((experiment_id.clone(), input));
-            q.len()
-        };
-        let cur = self.current_state();
-        if cur == EngineState::Idle || cur == EngineState::Paused {
-            self.drain_interventions(&experiment_id).await;
-            return 0;
-        }
-        self.emit(StreamEvent::InterventionQueued {
-            experiment_id,
-            queue_len: len,
-        })
-        .await;
-        len
-    }
-
-    async fn drain_interventions(&self, exp_id: &str) {
-        let items: Vec<InterventionInput> = {
-            let mut q = self.intervention_queue.lock().await;
-            let mut matched = Vec::new();
-            let mut remaining = VecDeque::new();
-            while let Some((id, item)) = q.pop_front() {
-                if id == exp_id {
-                    matched.push(item);
-                } else {
-                    remaining.push_back((id, item));
-                }
-            }
-            *q = remaining;
-            matched
-        };
-
-        if items.is_empty() {
-            return;
-        }
-
-        let current_turn = self.db.get_total_turns(exp_id).unwrap_or(0);
-
-        for item in items {
-            let content = item.content.trim().to_string();
-            if content.is_empty() {
-                continue;
-            }
-            let seq = self.db.next_seq(exp_id).unwrap_or(1);
-            let msg = TimelineMessage {
-                id: Uuid::new_v4().to_string(),
-                experiment_id: exp_id.to_string(),
-                seq,
-                turn_number: current_turn,
-                role: item.kind,
-                agent_id: item.agent_id,
-                room_id: "main".to_string(),
-                reasoning_content: String::new(),
-                content,
-                micro_cue: None,
-                model_name: String::new(),
-                duration_ms: 0,
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
-                whisper_consumed: false,
-                created_at: Utc::now().to_rfc3339(),
-            };
-            if self.db.append_message(&msg).is_ok() {
-                self.emit(StreamEvent::MessageAdded {
-                    experiment_id: exp_id.to_string(),
-                    message: msg,
-                })
-                .await;
-            }
-        }
-
-        self.emit(StreamEvent::InterventionQueued {
-            experiment_id: exp_id.to_string(),
-            queue_len: 0,
-        })
-        .await;
-    }
-
-    pub async fn start_private_room(
-        &self,
-        exp_id: &str,
-        member_ids: Vec<String>,
-        turns: Option<u32>,
-    ) -> Result<ActivePrivateRoom> {
-        let mut detail = self.db.get_experiment_detail(exp_id)?;
-        if detail.config.agents.len() < 3 {
-            return Err(anyhow!("临时私密房间需要至少 3 位 AI 参与者"));
-        }
-        if member_ids.len() != 2 || member_ids[0] == member_ids[1] {
-            return Err(anyhow!("请指定 2 位不同的角色进入临时私密房间"));
-        }
-        for mid in &member_ids {
-            if detail.config.find_agent(mid).is_none() {
-                return Err(anyhow!("未找到角色 ID: {mid}"));
-            }
-        }
-
-        let duration_turns = turns.unwrap_or(2).clamp(1, 5);
-        let label1 = detail.config.agent_label(Some(&member_ids[0]));
-        let label2 = detail.config.agent_label(Some(&member_ids[1]));
-        let room = ActivePrivateRoom {
-            room_id: format!("room-{}", &Uuid::new_v4().simple().to_string()[..8]),
-            member_ids: member_ids.clone(),
-            remaining_turns: duration_turns,
-            title: format!("{} × {} 的里屋", label1, label2),
-        };
-        detail
-            .room_members
-            .insert(room.room_id.clone(), room.member_ids.clone());
-        self.db
-            .update_active_room(exp_id, &Some(room.clone()), &detail.room_members)?;
-        let _ = self.db.update_experiment_progress(
-            exp_id,
-            detail.total_turns,
-            detail.total_tokens,
-            &member_ids[0],
-        );
-
-        let seq = self.db.next_seq(exp_id).unwrap_or(1);
-        let notice_msg = TimelineMessage {
-            id: Uuid::new_v4().to_string(),
-            experiment_id: exp_id.to_string(),
-            seq,
-            turn_number: detail.total_turns,
-            role: SpeakerRole::GodSystem,
-            agent_id: None,
-            room_id: "main".to_string(),
-            reasoning_content: String::new(),
-            content: format!(
-                "【空间变动】{} 与 {} 低声走入里屋私聊（大厅其余角色无法听见里屋对话）。",
-                label1, label2
-            ),
-            micro_cue: None,
-            model_name: String::new(),
-            duration_ms: 0,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            whisper_consumed: false,
-            created_at: Utc::now().to_rfc3339(),
-        };
-        if self.db.append_message(&notice_msg).is_ok() {
-            self.emit(StreamEvent::MessageAdded {
-                experiment_id: exp_id.to_string(),
-                message: notice_msg,
-            })
-            .await;
-        }
-        self.emit(StreamEvent::PrivateRoomUpdated {
-            experiment_id: exp_id.to_string(),
-            active_room: Some(room.clone()),
-            room_members: detail.room_members,
-        })
-        .await;
-        Ok(room)
-    }
-
-    pub async fn close_private_room(&self, exp_id: &str) -> Result<()> {
-        let detail = self.db.get_experiment_detail(exp_id)?;
-        let Some(prev_room) = detail.active_private_room else {
-            return Ok(());
-        };
-        self.db
-            .update_active_room(exp_id, &None, &detail.room_members)?;
-        let label1 = prev_room
-            .member_ids
-            .first()
-            .map(|id| detail.config.agent_label(Some(id)))
-            .unwrap_or_default();
-        let label2 = prev_room
-            .member_ids
-            .get(1)
-            .map(|id| detail.config.agent_label(Some(id)))
-            .unwrap_or_default();
-
-        let seq = self.db.next_seq(exp_id).unwrap_or(1);
-        let notice_msg = TimelineMessage {
-            id: Uuid::new_v4().to_string(),
-            experiment_id: exp_id.to_string(),
-            seq,
-            turn_number: detail.total_turns,
-            role: SpeakerRole::GodSystem,
-            agent_id: None,
-            room_id: "main".to_string(),
-            reasoning_content: String::new(),
-            content: format!(
-                "【空间变动】{} 与 {} 结束了私聊，各自回到大厅。",
-                label1, label2
-            ),
-            micro_cue: None,
-            model_name: String::new(),
-            duration_ms: 0,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            whisper_consumed: false,
-            created_at: Utc::now().to_rfc3339(),
-        };
-        if self.db.append_message(&notice_msg).is_ok() {
-            self.emit(StreamEvent::MessageAdded {
-                experiment_id: exp_id.to_string(),
-                message: notice_msg,
-            })
-            .await;
-        }
-        self.emit(StreamEvent::PrivateRoomUpdated {
-            experiment_id: exp_id.to_string(),
-            active_room: None,
-            room_members: detail.room_members,
-        })
-        .await;
-        Ok(())
     }
 
     pub async fn trigger_observer_now(&self, exp_id: String) {
@@ -788,6 +298,8 @@ impl TerrariumEngine {
             return;
         }
 
+        let captured_version = self.current_state_version();
+
         self.emit(StreamEvent::ObserverStarted {
             experiment_id: exp_id.clone(),
             trigger_turn,
@@ -799,19 +311,29 @@ impl TerrariumEngine {
         let channel = Arc::clone(&self.channel);
         let queue = Arc::clone(&self.intervention_queue);
         let state = Arc::clone(&self.state);
+        let active_exp_ref = Arc::clone(&self.active_experiment_id);
+        let state_version_ref = Arc::clone(&self.state_version);
 
         tauri::async_runtime::spawn(async move {
             let slice_start = messages.len().saturating_sub(24);
             let recent = &messages[slice_start..];
-            match run_observer_analysis(
+            let res = run_observer_analysis(
                 &client,
                 &config,
                 recent,
                 &board_content,
                 &compacted_summary,
             )
-            .await
-            {
+            .await;
+
+            // 异步任务状态版本校验：若期间切换了实验、分叉世界线或修改了配置，静默丢弃过期结果
+            let is_stale = *active_exp_ref.read().await != exp_id
+                || state_version_ref.load(Ordering::SeqCst) != captured_version;
+            if is_stale {
+                return;
+            }
+
+            match res {
                 Ok(parsed) => {
                     let stagnation = parsed.stagnation_index.clamp(0, 100) as u8;
                     let director_event_content = if config.enable_auto_director {
@@ -824,7 +346,9 @@ impl TerrariumEngine {
                                     parsed
                                         .crisis_cards
                                         .iter()
-                                        .find(|c| c.kind == "GodSystem" && !c.content.trim().is_empty())
+                                        .find(|c| {
+                                            c.kind == "GodSystem" && !c.content.trim().is_empty()
+                                        })
                                         .or_else(|| {
                                             parsed
                                                 .crisis_cards
@@ -905,7 +429,11 @@ impl TerrariumEngine {
                             }
                             if !newly_achieved.is_empty()
                                 && db
-                                    .update_experiment(&exp_id, &latest_detail.title, &latest_detail.config)
+                                    .update_experiment(
+                                        &exp_id,
+                                        &latest_detail.title,
+                                        &latest_detail.config,
+                                    )
                                     .is_ok()
                             {
                                 let guard = channel.read().await;
@@ -1008,6 +536,7 @@ impl TerrariumEngine {
             }
 
             let exp_id = self.active_experiment_id.read().await.clone();
+            let turn_state_version = self.current_state_version();
 
             // 1. Drain Creator intervention queue before starting the turn
             self.drain_interventions(&exp_id).await;
@@ -1339,6 +868,11 @@ impl TerrariumEngine {
             };
 
             if let Ok(Some(comp)) = compact_res {
+                if *self.active_experiment_id.read().await != exp_id
+                    || self.current_state_version() != turn_state_version
+                {
+                    continue;
+                }
                 compacted_summary = comp.new_summary.clone();
                 compacted_until_seq = comp.new_until_seq;
                 let _ = self.db.update_compacted_memory(
@@ -1416,19 +950,6 @@ impl TerrariumEngine {
 
             let thinking_params = crate::llm::resolve_thinking_params(&detail.config, node_cfg);
 
-            let raw_prompt_json = serde_json::json!({
-                "model": node_cfg.model_name,
-                "temperature": node_cfg.temperature,
-                "reasoning_effort": &thinking_params.reasoning_effort,
-                "enable_thinking": thinking_params.enable_thinking,
-                "thinking_budget": thinking_params.thinking_budget,
-                "thinking": &thinking_params.thinking,
-                "private_note": if enable_private_notes { Some(agent_private_note) } else { None },
-                "messages": &payload.messages,
-                "tools": if !tools_schema.is_empty() { Some(&tools_schema) } else { None },
-            })
-            .to_string();
-
             self.emit(StreamEvent::StreamStart {
                 experiment_id: exp_id.clone(),
                 message_id: msg_id.clone(),
@@ -1442,6 +963,7 @@ impl TerrariumEngine {
             })
             .await;
 
+            let prompt_messages_for_debug = payload.messages.clone();
             let stream_res = self
                 .execute_turn_with_tools(
                     &exp_id,
@@ -1453,6 +975,15 @@ impl TerrariumEngine {
                     &thinking_params,
                 )
                 .await;
+
+            // 状态版本校验：若推演期间实验被切换、分叉或修改，静默丢弃过期返回
+            if *self.active_experiment_id.read().await != exp_id
+                || self.current_state_version() != turn_state_version
+            {
+                continue;
+            }
+
+            let aux_model = self.db.get_ui_prefs().ok().and_then(|p| p.aux_model);
 
             match stream_res {
                 Ok(res) => {
@@ -1577,6 +1108,20 @@ impl TerrariumEngine {
                     }
 
                     self.consecutive_passes.store(0, Ordering::SeqCst);
+
+                    let raw_prompt_json = serde_json::json!({
+                        "model": node_cfg.model_name,
+                        "temperature": node_cfg.temperature,
+                        "reasoning_effort": &thinking_params.reasoning_effort,
+                        "enable_thinking": thinking_params.enable_thinking,
+                        "thinking_budget": thinking_params.thinking_budget,
+                        "thinking": &thinking_params.thinking,
+                        "downgraded_params": if res.downgraded_params.is_empty() { None } else { Some(&res.downgraded_params) },
+                        "private_note": if enable_private_notes { Some(agent_private_note) } else { None },
+                        "messages": &prompt_messages_for_debug,
+                        "tools": if !tools_schema.is_empty() { Some(&tools_schema) } else { None },
+                    })
+                    .to_string();
 
                     let current_room_id = active_room
                         .as_ref()
@@ -1737,7 +1282,15 @@ impl TerrariumEngine {
                             sp
                         }
                     } else {
-                        select_next_speaker(&detail.config, &speaker_id_owned, &final_msg.content)
+                        select_next_speaker_with_aux(
+                            &self.client,
+                            aux_model.as_ref(),
+                            &detail.config,
+                            &speaker_id_owned,
+                            &final_msg.content,
+                            None,
+                        )
+                        .await
                     };
 
                     let _ = self.db.update_experiment_progress(
@@ -1975,593 +1528,5 @@ impl TerrariumEngine {
                 }
             }
         }
-    }
-
-    /// 执行单个智能体发言回合（单回合最多 2 次工具调用且同一工具最多 1 次；守门员驳回可重试；异步审批防死锁）
-    async fn execute_turn_with_tools(
-        &self,
-        exp_id: &str,
-        msg_id: &str,
-        node_cfg: &NodeConfig,
-        mut turn_messages: Vec<ApiChatMessage>,
-        enable_board_tools: bool,
-        enable_private_notes: bool,
-        thinking_params: &crate::llm::ResolvedThinkingParams,
-    ) -> Result<StreamCompletionResult> {
-        let all_tools_schema = sandbox_tools_schema(enable_board_tools, enable_private_notes);
-
-        let mut total_reasoning = String::new();
-        let mut total_usage = TokenUsage::default();
-        let mut total_duration_ms = 0u64;
-        let mut total_calls_used = 0usize;
-        let mut used_tools: HashSet<String> = HashSet::new();
-        let mut guardian_retries_used = 0usize;
-        let mut nudged_for_nonempty = false;
-
-        loop {
-            let remaining_quota = 2usize.saturating_sub(total_calls_used);
-            let available_tools: Vec<serde_json::Value> =
-                if remaining_quota > 0 && !nudged_for_nonempty {
-                    all_tools_schema
-                        .iter()
-                        .filter(|t| {
-                            let name = t["function"]["name"].as_str().unwrap_or("");
-                            !used_tools.contains(name)
-                        })
-                        .cloned()
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-            let allow_tools_this_call = !available_tools.is_empty();
-            let active_tools = if allow_tools_this_call {
-                Some(available_tools.as_slice())
-            } else {
-                None
-            };
-
-            let cancel_rx = self.cancel_tx.subscribe();
-            let channel_ref = Arc::clone(&self.channel);
-            let exp_id_clone = exp_id.to_string();
-            let msg_id_clone = msg_id.to_string();
-
-            struct DeltaBatch {
-                reasoning: String,
-                content: String,
-                last_flush: std::time::Instant,
-            }
-            let delta_batch = Arc::new(std::sync::Mutex::new(DeltaBatch {
-                reasoning: String::new(),
-                content: String::new(),
-                last_flush: std::time::Instant::now(),
-            }));
-            let emit_event = |ch_arc: &Arc<RwLock<Option<Channel<StreamEvent>>>>, ev: StreamEvent| {
-                if let Ok(guard) = ch_arc.try_read() {
-                    if let Some(ch) = guard.as_ref() {
-                        let _ = ch.send(ev);
-                        return;
-                    }
-                }
-                let ch_clone = Arc::clone(ch_arc);
-                tauri::async_runtime::spawn(async move {
-                    let guard = ch_clone.read().await;
-                    if let Some(ch) = guard.as_ref() {
-                        let _ = ch.send(ev);
-                    }
-                });
-            };
-            let flush_batch = |batch_arc: &Arc<std::sync::Mutex<DeltaBatch>>,
-                               ch_arc: &Arc<RwLock<Option<Channel<StreamEvent>>>>,
-                               e_id: &str,
-                               m_id: &str,
-                               force: bool| {
-                let (r_out, c_out) = {
-                    let mut b = batch_arc.lock().unwrap();
-                    if !force
-                        && b.last_flush.elapsed() < Duration::from_millis(24)
-                        && (b.reasoning.len() + b.content.len()) < 256
-                    {
-                        return;
-                    }
-                    b.last_flush = std::time::Instant::now();
-                    (
-                        std::mem::take(&mut b.reasoning),
-                        std::mem::take(&mut b.content),
-                    )
-                };
-                if !r_out.is_empty() {
-                    emit_event(
-                        ch_arc,
-                        StreamEvent::StreamReasoningDelta {
-                            experiment_id: e_id.to_string(),
-                            message_id: m_id.to_string(),
-                            delta: r_out,
-                        },
-                    );
-                }
-                if !c_out.is_empty() {
-                    emit_event(
-                        ch_arc,
-                        StreamEvent::StreamDelta {
-                            experiment_id: e_id.to_string(),
-                            message_id: m_id.to_string(),
-                            delta: c_out,
-                        },
-                    );
-                }
-            };
-
-            let batch_for_cb = Arc::clone(&delta_batch);
-            let ch_for_cb = Arc::clone(&channel_ref);
-            let e_for_cb = exp_id_clone.clone();
-            let m_for_cb = msg_id_clone.clone();
-
-            let res = stream_chat_completion(
-                &self.client,
-                node_cfg,
-                &turn_messages,
-                active_tools,
-                thinking_params,
-                cancel_rx,
-                move |chunk| match chunk {
-                    StreamDeltaChunk::Content(delta) => {
-                        {
-                            let mut b = batch_for_cb.lock().unwrap();
-                            b.content.push_str(delta);
-                        }
-                        flush_batch(&batch_for_cb, &ch_for_cb, &e_for_cb, &m_for_cb, false);
-                    }
-                    StreamDeltaChunk::Reasoning(delta) => {
-                        {
-                            let mut b = batch_for_cb.lock().unwrap();
-                            b.reasoning.push_str(delta);
-                        }
-                        flush_batch(&batch_for_cb, &ch_for_cb, &e_for_cb, &m_for_cb, false);
-                    }
-                    StreamDeltaChunk::RetryNotice(msg) => {
-                        flush_batch(&batch_for_cb, &ch_for_cb, &e_for_cb, &m_for_cb, true);
-                        emit_event(
-                            &ch_for_cb,
-                            StreamEvent::EngineNotice {
-                                experiment_id: e_for_cb.clone(),
-                                message: msg,
-                            },
-                        );
-                    }
-                },
-            )
-            .await;
-            flush_batch(&delta_batch, &channel_ref, &exp_id_clone, &msg_id_clone, true);
-            let res = res?;
-
-            if !res.reasoning_content.is_empty() {
-                if !total_reasoning.is_empty() {
-                    total_reasoning.push('\n');
-                }
-                total_reasoning.push_str(&res.reasoning_content);
-            }
-            total_usage.prompt_tokens += res.usage.prompt_tokens;
-            total_usage.completion_tokens += res.usage.completion_tokens;
-            total_usage.total_tokens += res.usage.total_tokens;
-            total_duration_ms += res.duration_ms;
-
-            if !res.tool_calls.is_empty() && allow_tools_this_call {
-                let calls_to_run: Vec<_> = res.tool_calls.into_iter().take(2).collect();
-                turn_messages.push(ApiChatMessage {
-                    role: "assistant".to_string(),
-                    content: if res.content.trim().is_empty() {
-                        None
-                    } else {
-                        Some(res.content)
-                    },
-                    tool_calls: Some(calls_to_run.clone()),
-                    tool_call_id: None,
-                });
-
-                let mut guardian_rejected = false;
-                for tc in calls_to_run {
-                    let tool_name = tc.function.name.trim().to_string();
-                    if total_calls_used >= 2 || used_tools.contains(&tool_name) {
-                        let reject_msg = serde_json::json!({
-                            "ok": false,
-                            "error": format!("工具「{}」本回合已调用过或已达单回合最多 2 次工具调用上限，请直接继续正式对话。", tool_name),
-                        })
-                        .to_string();
-                        turn_messages.push(ApiChatMessage::tool_result(&tc.id, reject_msg));
-                        continue;
-                    }
-
-                    self.emit(StreamEvent::ToolCallStarted {
-                        experiment_id: exp_id.to_string(),
-                        message_id: msg_id.to_string(),
-                        agent_label: node_cfg.label.clone(),
-                        tool_name: tool_name.clone(),
-                    })
-                    .await;
-
-                    let tool_result = self
-                        .execute_board_tool(exp_id, node_cfg, &tool_name, &tc)
-                        .await?;
-                    if tool_result.contains("\"rejected_by_guardian\"") {
-                        guardian_rejected = true;
-                        guardian_retries_used += 1;
-                        if guardian_retries_used > 1 {
-                            used_tools.insert(tool_name);
-                        }
-                    } else {
-                        total_calls_used += 1;
-                        used_tools.insert(tool_name);
-                    }
-                    turn_messages.push(ApiChatMessage::tool_result(&tc.id, tool_result));
-                }
-
-                if guardian_rejected && guardian_retries_used <= 1 {
-                    let nudge = if enable_private_notes {
-                        "守门员审核未通过（涉及主观推断或私密设定）。请改写入 update_private_note，并用客观第三人称重写一次 update_board，或放弃更新直接发表正式对话内容。"
-                    } else {
-                        "守门员审核未通过，请立即用客观第三人称（不含私密身份或第一人称）重写一次 update_board，或放弃更新并直接发表你的正式对话内容。"
-                    };
-                    turn_messages.push(ApiChatMessage::text("user", nudge));
-                } else if total_calls_used >= 2 || used_tools.len() >= all_tools_schema.len() {
-                    turn_messages.push(ApiChatMessage::text(
-                        "user",
-                        "工具调用已达本回合上限，请立即结合当前状态发表你的正式对话内容。",
-                    ));
-                } else {
-                    turn_messages.push(ApiChatMessage::text(
-                        "user",
-                        "工具已执行完毕，请继续调用另一可用工具或直接发表你的正式对话内容。",
-                    ));
-                }
-                continue;
-            }
-
-            let final_content = res.content.trim().to_string();
-            if final_content.is_empty() && !nudged_for_nonempty {
-                nudged_for_nonempty = true;
-                turn_messages.push(ApiChatMessage::text(
-                    "user",
-                    "请不要只返回空内容，请结合你的角色与当前白板状态直接输出正式对话。",
-                ));
-                continue;
-            }
-
-            let non_empty_content = if final_content.is_empty() {
-                "（已完成状态同步，请各位继续推进讨论。）".to_string()
-            } else {
-                res.content
-            };
-
-            return Ok(StreamCompletionResult {
-                content: non_empty_content,
-                reasoning_content: total_reasoning,
-                tool_calls: Vec::new(),
-                usage: total_usage,
-                duration_ms: total_duration_ms,
-            });
-        }
-    }
-
-    async fn execute_board_tool(
-        &self,
-        exp_id: &str,
-        node_cfg: &NodeConfig,
-        _tool_name: &str,
-        call: &crate::sandbox_tools::ApiToolCall,
-    ) -> Result<String> {
-        match parse_board_tool_call(call) {
-            ParsedBoardTool::ReadBoard => {
-                let board = self.db.get_board_content(exp_id).unwrap_or_default();
-                let resp = serde_json::json!({
-                    "ok": true,
-                    "board_content": if board.trim().is_empty() { "（当前白板为空）".to_string() } else { board }
-                });
-                Ok(resp.to_string())
-            }
-            ParsedBoardTool::UpdateBoard {
-                new_content,
-                reason,
-            } => {
-                let (cfg, current_board) = self.db.get_experiment_header(exp_id)?;
-                let mode = cfg.board_approval_mode;
-
-                let approved_content: Option<String> = match mode {
-                    BoardApprovalMode::Auto => Some(new_content),
-                    BoardApprovalMode::Guardian => {
-                        match guardian_review_board(
-                            &self.client,
-                            &cfg,
-                            node_cfg,
-                            &current_board,
-                            &new_content,
-                            &reason,
-                        )
-                        .await
-                        {
-                            GuardianVerdict::Approved => Some(new_content),
-                            GuardianVerdict::Rejected { reason: rej_reason } => {
-                                self.emit(StreamEvent::EngineNotice {
-                                    experiment_id: exp_id.to_string(),
-                                    message: format!(
-                                        "守门员已拦截「{}」的白板写入：{}",
-                                        node_cfg.label, rej_reason
-                                    ),
-                                })
-                                .await;
-                                let reject_hint = if cfg.enable_private_notes {
-                                    format!(
-                                        "守门员审核驳回：{}。涉及主观推断或私密设定，请改写入 update_private_note 并重写客观白板。",
-                                        rej_reason
-                                    )
-                                } else {
-                                    format!(
-                                        "守门员审核驳回：{}。涉及主观推断或私密设定，请严格使用客观第三人称重写客观白板（绝不泄露隐藏人设）。",
-                                        rej_reason
-                                    )
-                                };
-                                return Ok(serde_json::json!({
-                                    "ok": false,
-                                    "status": "rejected_by_guardian",
-                                    "message": reject_hint,
-                                    "current_board": current_board,
-                                })
-                                .to_string());
-                            }
-                        }
-                    }
-                    BoardApprovalMode::Approval => {
-                        let request_id = Uuid::new_v4().to_string();
-                        let (tx, mut rx) = oneshot::channel::<ApprovalDecision>();
-                        {
-                            let mut guard = self.pending_approval.lock().await;
-                            *guard = Some((request_id.clone(), tx));
-                        }
-
-                        self.emit(StreamEvent::BoardApprovalRequested {
-                            experiment_id: exp_id.to_string(),
-                            request_id: request_id.clone(),
-                            agent_id: node_cfg.id.clone(),
-                            agent_label: node_cfg.label.clone(),
-                            current_content: current_board.clone(),
-                            proposed_content: new_content.clone(),
-                            reason: reason.clone(),
-                        })
-                        .await;
-
-                        let mut cancel_rx = self.cancel_tx.subscribe();
-                        let initial_gen = *cancel_rx.borrow();
-
-                        let decision = loop {
-                            tokio::select! {
-                                res = &mut rx => {
-                                    break match res {
-                                        Ok(d) => d,
-                                        Err(_) => ApprovalDecision::Reject {
-                                            reason: Some("审批请求已取消".to_string()),
-                                        },
-                                    };
-                                }
-                                _ = cancel_rx.changed() => {
-                                    if *cancel_rx.borrow() != initial_gen {
-                                        let mut guard = self.pending_approval.lock().await;
-                                        if guard.as_ref().map(|(id, _)| id == &request_id).unwrap_or(false) {
-                                            *guard = None;
-                                        }
-                                        drop(guard);
-                                        self.emit(StreamEvent::BoardApprovalResolved {
-                                            experiment_id: exp_id.to_string(),
-                                            request_id: request_id.clone(),
-                                            approved: false,
-                                        })
-                                        .await;
-                                        return Err(anyhow!("__CANCELLED__"));
-                                    }
-                                }
-                            }
-                        };
-
-                        let is_approved = !matches!(decision, ApprovalDecision::Reject { .. });
-                        self.emit(StreamEvent::BoardApprovalResolved {
-                            experiment_id: exp_id.to_string(),
-                            request_id,
-                            approved: is_approved,
-                        })
-                        .await;
-
-                        match decision {
-                            ApprovalDecision::Approve => Some(new_content),
-                            ApprovalDecision::ModifyAndApprove {
-                                new_content: edited,
-                            } => Some(edited),
-                            ApprovalDecision::Reject { reason: rej } => {
-                                return Ok(serde_json::json!({
-                                    "ok": false,
-                                    "status": "rejected_by_creator",
-                                    "message": rej.unwrap_or_else(|| "主持人驳回了本次白板修改，请按当前白板继续发言。".to_string()),
-                                    "current_board": current_board,
-                                })
-                                .to_string());
-                            }
-                        }
-                    }
-                };
-
-                if let Some(content_to_save) = approved_content {
-                    let (prev, saved) = self.db.update_shared_board(exp_id, &content_to_save)?;
-                    self.emit(StreamEvent::BoardUpdated {
-                        experiment_id: exp_id.to_string(),
-                        board_content: saved.clone(),
-                        board_prev_content: prev,
-                        reason,
-                        actor_label: node_cfg.label.clone(),
-                    })
-                    .await;
-                    Ok(serde_json::json!({
-                        "ok": true,
-                        "status": "updated",
-                        "board_content": saved,
-                    })
-                    .to_string())
-                } else {
-                    Ok(serde_json::json!({ "ok": false }).to_string())
-                }
-            }
-            ParsedBoardTool::UpdatePrivateNote { note } => {
-                let (cfg, _) = self.db.get_experiment_header(exp_id)?;
-                if !cfg.enable_private_notes {
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "error": "当前实验未启用角色私有便签功能"
-                    })
-                    .to_string());
-                }
-                let (clamped, truncated) = truncate_private_note(&note, MAX_PRIVATE_NOTE_CHARS);
-                let (saved, _) =
-                    self.db
-                        .update_agent_private_note(exp_id, &node_cfg.id, &clamped)?;
-                self.emit(StreamEvent::PrivateNoteUpdated {
-                    experiment_id: exp_id.to_string(),
-                    agent_id: node_cfg.id.clone(),
-                    agent_label: node_cfg.label.clone(),
-                    note: saved.clone(),
-                })
-                .await;
-                Ok(serde_json::json!({
-                    "ok": true,
-                    "status": "updated",
-                    "note": saved,
-                    "truncated": truncated,
-                })
-                .to_string())
-            }
-            ParsedBoardTool::Unknown { name } => Ok(serde_json::json!({
-                "ok": false,
-                "error": format!("未知工具: {name}")
-            })
-            .to_string()),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_smart_selector_three_agents_and_no_consecutive_post() {
-        let mut cfg = ExperimentConfig::default();
-        cfg.enable_smart_selector = true;
-        cfg.agents[0].label = "阿哲".to_string();
-        cfg.agents[1].label = "老陈".to_string();
-        let mut third = cfg.agents[0].clone();
-        third.id = "AiC".to_string();
-        third.label = "林医生".to_string();
-        cfg.agents.push(third);
-
-        // Explicit callout picks林医生 even though round-robin from AiA would be AiB
-        assert_eq!(
-            select_next_speaker(&cfg, "AiA", "我觉得老陈刚才的说法不对，林医生你怎么看？"),
-            "AiC"
-        );
-        // Calling oneself never causes consecutive posting; falls back to round-robin
-        assert_eq!(
-            select_next_speaker(&cfg, "AiA", "阿哲我自己其实一直很犹豫……"),
-            "AiB"
-        );
-        // No mention falls back to round-robin
-        assert_eq!(
-            select_next_speaker(&cfg, "AiB", "外面的雨越下越大了。"),
-            "AiC"
-        );
-        // Disabled falls back to round-robin
-        cfg.enable_smart_selector = false;
-        assert_eq!(select_next_speaker(&cfg, "AiA", "林医生你来说"), "AiB");
-    }
-
-    #[test]
-    fn test_spatial_isolation_smart_selector_locked_inside_private_room() {
-        let mut cfg = ExperimentConfig::default();
-        cfg.enable_smart_selector = true;
-        cfg.agents[0].label = "阿哲".to_string();
-        cfg.agents[1].label = "老陈".to_string();
-        let mut third = cfg.agents[0].clone();
-        third.id = "AiC".to_string();
-        third.label = "林医生".to_string();
-        cfg.agents.push(third);
-
-        let room = ActivePrivateRoom {
-            room_id: "room-secret".to_string(),
-            member_ids: vec!["AiA".to_string(), "AiB".to_string()],
-            remaining_turns: 2,
-            title: "里屋".to_string(),
-        };
-        // 即使私聊中明确点名大厅角色“林医生”，候选池也必须严格锁定在 room_id 内部（返回 AiB）
-        assert_eq!(
-            select_next_speaker_in_room(
-                &cfg,
-                "AiA",
-                "待会我们出去问问林医生到底知不知道黑箱子的事。",
-                Some(&room),
-            ),
-            "AiB"
-        );
-    }
-
-    #[test]
-    fn test_social_enhancements_pass_mood_and_fast_reply() {
-        assert_eq!(MOOD_DICE_POOL.len(), 15);
-        assert!(is_pass_reply("[PASS]"));
-        assert!(is_pass_reply("  [pass] \n"));
-        assert!(is_pass_reply("<think>没啥好说的</think>\n  [PASS] "));
-        assert!(!is_pass_reply("<think>思考</think> 我觉得还行 [PASS]"));
-    }
-
-    #[test]
-    fn test_skip_left_agent_and_detect_farewell_or_repetition() {
-        let mut cfg = ExperimentConfig::default();
-        cfg.agents[0].has_left = true;
-        // 智能点名与轮转均应跳过已离场的 AiA
-        assert_eq!(select_next_speaker(&cfg, "AiB", "AiA 你怎么看？"), "AiB");
-
-        let mk_ai = |seq: i64, agent: &str, text: &str| TimelineMessage {
-            id: format!("m{seq}"),
-            experiment_id: "e1".to_string(),
-            seq,
-            turn_number: seq as u32,
-            role: SpeakerRole::Ai,
-            agent_id: Some(agent.to_string()),
-            room_id: "main".to_string(),
-            reasoning_content: String::new(),
-            content: text.to_string(),
-            micro_cue: None,
-            model_name: "m".to_string(),
-            duration_ms: 10,
-            prompt_tokens: 1,
-            completion_tokens: 1,
-            total_tokens: 2,
-            whisper_consumed: false,
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-        };
-
-        let farewell_msgs = vec![
-            mk_ai(1, "AiA", "时候不早了，我先走了，大家晚安。"),
-            mk_ai(2, "AiB", "好，店里也关门了，各自回去吧。"),
-            mk_ai(3, "AiC", "嗯，没什么可说的了，散了吧，再见。"),
-        ];
-        assert_eq!(detect_natural_wrapup_loop(&farewell_msgs), Some("farewell"));
-
-        let interrupted_msgs = vec![
-            mk_ai(1, "AiA", "时候不早了，我先走了，大家晚安。"),
-            mk_ai(2, "AiB", "等等！先别走，门外有脚步声！"),
-            mk_ai(3, "AiC", "好，各自回去吧。"),
-        ];
-        assert_eq!(detect_natural_wrapup_loop(&interrupted_msgs), None);
-
-        let repeat_msgs = vec![
-            mk_ai(1, "AiA", "这件事确实很蹊跷，我们必须把监控录像彻底查清楚。"),
-            mk_ai(2, "AiB", "没错，这件事确实很蹊跷，必须把监控录像彻底查清楚。"),
-            mk_ai(3, "AiC", "对，这件事确实很蹊跷，得把监控录像彻底查清楚才行。"),
-        ];
-        assert_eq!(detect_natural_wrapup_loop(&repeat_msgs), Some("repetition"));
     }
 }
