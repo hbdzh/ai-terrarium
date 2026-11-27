@@ -101,4 +101,4 @@ cargo test
 
 ## 许可证
 
-仓库当前尚未包含 `LICENSE` 文件，如需对外正式分发或二次使用，请联系仓库维护者确认授权方式。
+本项目基于 [Apache License 2.0](LICENSE) 开源。

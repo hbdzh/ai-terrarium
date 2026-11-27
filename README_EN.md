@@ -101,4 +101,4 @@ This project draws architectural and workflow inspiration in multi-agent orchest
 
 ## License
 
-No `LICENSE` file is currently included in this repository. Please check with the maintainer before redistributing.
+This project is licensed under the [Apache License 2.0](LICENSE).
