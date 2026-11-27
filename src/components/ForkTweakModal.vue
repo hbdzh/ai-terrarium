@@ -39,7 +39,7 @@ const emit = defineEmits<{
 
 const draftTitle = ref("");
 const draftConfig = ref<ExperimentConfig | null>(null);
-const inheritCardMemory = ref(true);
+const inheritCardMemory = ref(false);
 const errorText = ref<string | null>(null);
 
 watch(

@@ -21,12 +21,14 @@ use crate::models::{
     InterventionInput, NodeConfig, ObserverNote, SpeakerRole, StreamEvent, TimelineMessage,
     PASS_NOTICE_SUFFIX,
 };
-use crate::observer::{parse_director_command, run_observer_analysis};
+use crate::observer::run_observer_analysis;
 use crate::sandbox_tools::{
     guardian_review_board, parse_board_tool_call, sandbox_tools_schema, truncate_private_note,
     ApprovalDecision, GuardianVerdict, ParsedBoardTool, MAX_PRIVATE_NOTE_CHARS,
 };
-use crate::sanitizer::{extract_micro_cue, strip_leading_speaker_prefix, strip_think_tags};
+use crate::sanitizer::{
+    extract_leave_marker, extract_micro_cue, strip_leading_speaker_prefix, strip_think_tags,
+};
 
 fn state_to_u8(s: EngineState) -> u8 {
     match s {
@@ -43,50 +45,6 @@ fn u8_to_state(v: u8) -> EngineState {
         2 => EngineState::Paused,
         3 => EngineState::Stepping,
         _ => EngineState::Idle,
-    }
-}
-
-/// 张力自适应思考降档（带突发覆盖）：
-/// 低张力 (<50) 降档节省过场 Token；若存在未消费低语、近一轮环境事件或处于末 20% 阶段，强制恢复满血推理（None）。
-pub fn resolve_reasoning_effort(
-    config: &ExperimentConfig,
-    latest_tension: Option<u8>,
-    has_unconsumed_whisper: bool,
-    has_recent_god_system: bool,
-    progress_turn: u32,
-) -> Option<String> {
-    if config.intuitive_fast_reply {
-        return Some("minimal".to_string());
-    }
-    if !config.enable_adaptive_reasoning {
-        return None;
-    }
-    if has_unconsumed_whisper || has_recent_god_system {
-        return None;
-    }
-    if config.max_consecutive_turns > 0
-        && (progress_turn as u64) * 100 > (config.max_consecutive_turns as u64) * 80
-    {
-        return None;
-    }
-    if config.enable_narrative_arc
-        && config.target_total_turns > 0
-        && (progress_turn as u64) * 100 > (config.target_total_turns as u64) * 80
-    {
-        return None;
-    }
-    let Some(tension) = latest_tension else {
-        return None;
-    };
-    if tension < 50 {
-        let tier = match config.adaptive_low_reasoning_effort.as_str() {
-            "minimal" => "minimal",
-            "medium" => "medium",
-            _ => "low",
-        };
-        Some(tier.to_string())
-    } else {
-        None
     }
 }
 
@@ -140,11 +98,119 @@ pub fn is_pass_reply(content: &str) -> bool {
     cleaned.trim().eq_ignore_ascii_case("[PASS]")
 }
 
-fn was_previous_message_pass(messages: &[TimelineMessage]) -> bool {
-    messages.last().is_some_and(is_pass_notice)
+const FAREWELL_RESCUE_MARKER: &str = "【叙事导演 · 挽留变故】";
+
+fn is_farewell_wrapup_text(content: &str) -> bool {
+    let cleaned = strip_think_tags(content);
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let continuation_markers = [
+        "等等", "慢着", "先别走", "别急着走", "话还没说完", "等一下", "先等等", "慢点走", "突然",
+    ];
+    if continuation_markers.iter().any(|k| trimmed.contains(k)) {
+        return false;
+    }
+    let farewell_keywords = [
+        "走吧",
+        "再见",
+        "散了吧",
+        "散了",
+        "各自回去",
+        "关门了",
+        "晚安",
+        "告辞",
+        "没什么可说的了",
+        "就这样吧",
+        "先走了",
+        "回见",
+        "拜拜",
+        "保重",
+        "后会有期",
+        "收工",
+        "休息吧",
+        "回去了",
+        "散会",
+        "打烊",
+        "各自散去",
+        "不必再说",
+        "到此为止",
+        "各自保重",
+        "就此别过",
+        "各自休息",
+        "明早见",
+        "明天见",
+    ];
+    farewell_keywords.iter().any(|k| trimmed.contains(k))
 }
 
-/// 3 人及以上智能点名接话路由：检测上一条发言是否明确点名其他角色，且严禁同一角色连续刷屏。
+fn normalized_chars(text: &str) -> Vec<char> {
+    strip_think_tags(text)
+        .chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '，' | '。' | '！' | '？' | '、' | '；' | '：' | '“' | '”' | '‘' | '’' | ',' | '.' | '!' | '?' | ';' | ':' | '"' | '\'' | '（' | '）' | '(' | ')' | '~' | '…' | '—' | '-'))
+        .collect()
+}
+
+fn jaccard_bigram_similarity(a: &str, b: &str) -> f64 {
+    let ca = normalized_chars(a);
+    let cb = normalized_chars(b);
+    if ca.len() < 8 || cb.len() < 8 {
+        return 0.0;
+    }
+    let sa: HashSet<(char, char)> = ca.windows(2).map(|w| (w[0], w[1])).collect();
+    let sb: HashSet<(char, char)> = cb.windows(2).map(|w| (w[0], w[1])).collect();
+    if sa.is_empty() || sb.is_empty() {
+        return 0.0;
+    }
+    let inter = sa.intersection(&sb).count() as f64;
+    let union = sa.union(&sb).count() as f64;
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+/// 检测最近连续 3 条非沉默 AI 发言是否均属于道别收尾，或连续 3 轮高度语义重复。
+pub fn detect_natural_wrapup_loop(messages: &[TimelineMessage]) -> Option<&'static str> {
+    let mut recent_ai: Vec<&TimelineMessage> = Vec::with_capacity(3);
+    for msg in messages.iter().rev() {
+        if is_pass_notice(msg) {
+            continue;
+        }
+        match msg.role {
+            SpeakerRole::Ai => {
+                recent_ai.push(msg);
+                if recent_ai.len() == 3 {
+                    break;
+                }
+            }
+            SpeakerRole::GodPublic | SpeakerRole::GodSystem => {
+                break;
+            }
+            SpeakerRole::GodWhisper => continue,
+        }
+    }
+    if recent_ai.len() < 3 {
+        return None;
+    }
+    if recent_ai
+        .iter()
+        .all(|m| is_farewell_wrapup_text(&m.content))
+    {
+        return Some("farewell");
+    }
+    let s01 = jaccard_bigram_similarity(&recent_ai[0].content, &recent_ai[1].content);
+    let s12 = jaccard_bigram_similarity(&recent_ai[1].content, &recent_ai[2].content);
+    let s02 = jaccard_bigram_similarity(&recent_ai[0].content, &recent_ai[2].content);
+    if s01 >= 0.48 && s12 >= 0.48 && s02 >= 0.42 {
+        return Some("repetition");
+    }
+    None
+}
+
+/// 3 人及以上智能点名接话路由：检测上一条发言是否明确点名其他角色，且严禁同一角色连续刷屏（自动跳过已退场角色）。
 pub fn select_next_speaker(
     config: &ExperimentConfig,
     current_speaker_id: &str,
@@ -158,18 +224,24 @@ pub fn select_next_speaker(
         .iter()
         .position(|a| a.id == current_speaker_id)
         .unwrap_or(0);
-    let fallback = config.agents[(current_idx + 1) % config.agents.len()]
+    let len = config.agents.len();
+    let fallback = (1..=len)
+        .map(|offset| &config.agents[(current_idx + offset) % len])
+        .find(|a| !a.has_left && a.id != current_speaker_id)
+        .or_else(|| config.agents.iter().find(|a| !a.has_left))
+        .unwrap_or(&config.agents[(current_idx + 1) % len])
         .id
         .clone();
 
-    if !config.enable_smart_selector || config.agents.len() < 3 {
+    let active_count = config.agents.iter().filter(|a| !a.has_left).count();
+    if !config.enable_smart_selector || active_count < 3 {
         return fallback;
     }
 
     let cleaned = strip_think_tags(last_content);
     let mut best_match: Option<(usize, usize, usize, String)> = None;
     for (idx, agent) in config.agents.iter().enumerate() {
-        if agent.id == current_speaker_id {
+        if agent.id == current_speaker_id || agent.has_left {
             continue;
         }
         let label = agent.label.trim();
@@ -177,7 +249,7 @@ pub fn select_next_speaker(
             continue;
         }
         if let Some(pos) = cleaned.rfind(label) {
-            let rr_dist = (idx + config.agents.len() - current_idx) % config.agents.len();
+            let rr_dist = (idx + len - current_idx) % len;
             // 优先匹配文末最近一次点名，其次较长角色名，其次顺位最近
             let score = (pos, label.len(), usize::MAX - rr_dist);
             if best_match
@@ -193,7 +265,7 @@ pub fn select_next_speaker(
     best_match.map(|(_, _, _, id)| id).unwrap_or(fallback)
 }
 
-/// 空间隔离最高优先级仲裁：当存在激活的私密房间时，候选池严格锁定在 room_id 成员内部，绝不因提及大厅角色而打破隔离。
+/// 空间隔离最高优先级仲裁：当存在激活的私密房间时，候选池严格锁定在 room_id 成员内部，绝不因提及大厅角色而打破隔离（自动跳过已退场角色）。
 pub fn select_next_speaker_in_room(
     config: &ExperimentConfig,
     current_speaker_id: &str,
@@ -205,10 +277,18 @@ pub fn select_next_speaker_in_room(
             let candidates: Vec<&String> = room
                 .member_ids
                 .iter()
-                .filter(|id| id.as_str() != current_speaker_id)
+                .filter(|id| {
+                    id.as_str() != current_speaker_id
+                        && config.find_agent(id.as_str()).is_some_and(|a| !a.has_left)
+                })
                 .collect();
             if candidates.is_empty() {
-                return room.member_ids[0].clone();
+                return room
+                    .member_ids
+                    .iter()
+                    .find(|id| config.find_agent(id.as_str()).is_some_and(|a| !a.has_left))
+                    .cloned()
+                    .unwrap_or_else(|| room.member_ids[0].clone());
             }
             if config.enable_smart_selector && candidates.len() >= 2 {
                 let cleaned = strip_think_tags(last_content);
@@ -237,6 +317,7 @@ pub struct TerrariumEngine {
     pub active_experiment_id: Arc<RwLock<String>>,
     pub state: Arc<AtomicU8>,
     pub consecutive_turns: Arc<AtomicU32>,
+    pub consecutive_passes: Arc<AtomicU32>,
     pub forced_next_speaker: Arc<Mutex<Option<String>>>,
     pub intervention_queue: Arc<Mutex<VecDeque<(String, InterventionInput)>>>,
     pub pending_approval: Arc<Mutex<Option<(String, oneshot::Sender<ApprovalDecision>)>>>,
@@ -264,6 +345,7 @@ impl TerrariumEngine {
             active_experiment_id: Arc::new(RwLock::new(initial_experiment_id)),
             state: Arc::new(AtomicU8::new(state_to_u8(EngineState::Idle))),
             consecutive_turns: Arc::new(AtomicU32::new(0)),
+            consecutive_passes: Arc::new(AtomicU32::new(0)),
             forced_next_speaker: Arc::new(Mutex::new(None)),
             intervention_queue: Arc::new(Mutex::new(VecDeque::new())),
             pending_approval: Arc::new(Mutex::new(None)),
@@ -358,6 +440,7 @@ impl TerrariumEngine {
     pub async fn start(&self) {
         *self.forced_next_speaker.lock().await = None;
         self.consecutive_turns.store(0, Ordering::SeqCst);
+        self.consecutive_passes.store(0, Ordering::SeqCst);
         self.compaction_guard.lock().await.reset();
         self.state
             .store(state_to_u8(EngineState::Running), Ordering::SeqCst);
@@ -430,6 +513,7 @@ impl TerrariumEngine {
             *active = experiment_id.clone();
         }
         self.consecutive_turns.store(0, Ordering::SeqCst);
+        self.consecutive_passes.store(0, Ordering::SeqCst);
         self.state
             .store(state_to_u8(EngineState::Idle), Ordering::SeqCst);
         self.emit(StreamEvent::StateChanged {
@@ -661,100 +745,6 @@ impl TerrariumEngine {
         })
         .await;
         Ok(())
-    }
-
-    pub async fn execute_director_command(
-        &self,
-        exp_id: &str,
-        instruction: &str,
-    ) -> Result<String> {
-        let mut detail = self.db.get_experiment_detail(exp_id)?;
-        let parsed = parse_director_command(&self.client, &detail.config, instruction).await?;
-
-        let mut config_changed = false;
-        if let Some(iv) = parsed.observer_interval {
-            detail.config.observer_interval = iv;
-            config_changed = true;
-        }
-        if let Some(ps) = parsed.pause_seconds {
-            detail.config.pause_seconds = ps;
-            config_changed = true;
-        }
-        if let Some(tt) = parsed.target_total_turns {
-            detail.config.target_total_turns = tt;
-            config_changed = true;
-        }
-        if let Some(arc) = parsed.enable_narrative_arc {
-            detail.config.enable_narrative_arc = arc;
-            config_changed = true;
-        }
-        if let Some(ref append) = parsed.global_system_prompt_append {
-            if !detail.config.global_system_prompt.trim().is_empty() {
-                detail.config.global_system_prompt.push('\n');
-            }
-            detail.config.global_system_prompt.push_str(append);
-            config_changed = true;
-        }
-
-        if config_changed {
-            self.db
-                .update_experiment(exp_id, &detail.title, &detail.config)?;
-            self.emit(StreamEvent::ConfigHotUpdated {
-                experiment_id: exp_id.to_string(),
-                config: detail.config.clone(),
-            })
-            .await;
-        }
-
-        for w in parsed.whispers {
-            let matched = detail
-                .config
-                .agents
-                .iter()
-                .find(|a| !w.agent_id.is_empty() && a.id == w.agent_id)
-                .or_else(|| {
-                    detail
-                        .config
-                        .agents
-                        .iter()
-                        .find(|a| !w.agent_label.is_empty() && a.label.trim() == w.agent_label)
-                });
-            if let Some(agent) = matched {
-                self.enqueue_intervention(
-                    exp_id.to_string(),
-                    InterventionInput {
-                        kind: SpeakerRole::GodWhisper,
-                        agent_id: Some(agent.id.clone()),
-                        content: w.whisper,
-                    },
-                )
-                .await;
-            }
-        }
-
-        if let Some(ev) = parsed.system_event {
-            self.enqueue_intervention(
-                exp_id.to_string(),
-                InterventionInput {
-                    kind: SpeakerRole::GodSystem,
-                    agent_id: None,
-                    content: ev,
-                },
-            )
-            .await;
-        }
-
-        let summary = if parsed.summary.is_empty() {
-            "导演指令已热更新生效".to_string()
-        } else {
-            parsed.summary
-        };
-        self.emit(StreamEvent::EngineNotice {
-            experiment_id: exp_id.to_string(),
-            message: format!("🎬 导演遥控：{}", summary),
-        })
-        .await;
-        Ok(summary)
     }
 
     pub async fn trigger_observer_now(&self, exp_id: String) {
@@ -994,81 +984,6 @@ impl TerrariumEngine {
                             }
                         }
                     }
-
-                    // 周期直觉反思：将 reflection_whispers 作为一次性 GodWhisper 注入对应角色的下一轮
-                    if config.enable_periodic_reflection && !parsed.reflection_whispers.is_empty() {
-                        let mut injected_agents: HashSet<String> = HashSet::new();
-                        for rw in parsed.reflection_whispers {
-                            let matched_agent = config
-                                .agents
-                                .iter()
-                                .find(|a| !rw.agent_id.is_empty() && a.id == rw.agent_id)
-                                .or_else(|| {
-                                    config.agents.iter().find(|a| {
-                                        !rw.agent_label.is_empty()
-                                            && a.label.trim() == rw.agent_label
-                                    })
-                                });
-                            let Some(agent) = matched_agent else {
-                                continue;
-                            };
-                            if !injected_agents.insert(agent.id.clone()) {
-                                continue;
-                            }
-                            let whisper_input = InterventionInput {
-                                kind: SpeakerRole::GodWhisper,
-                                agent_id: Some(agent.id.clone()),
-                                content: rw.whisper,
-                            };
-                            let cur_state = u8_to_state(state.load(Ordering::SeqCst));
-                            if cur_state == EngineState::Running
-                                || cur_state == EngineState::Stepping
-                            {
-                                let len = {
-                                    let mut q = queue.lock().await;
-                                    q.push_back((exp_id.clone(), whisper_input));
-                                    q.len()
-                                };
-                                let guard = channel.read().await;
-                                if let Some(ch) = guard.as_ref() {
-                                    let _ = ch.send(StreamEvent::InterventionQueued {
-                                        experiment_id: exp_id.clone(),
-                                        queue_len: len,
-                                    });
-                                }
-                            } else {
-                                let seq = db.next_seq(&exp_id).unwrap_or(1);
-                                let msg = TimelineMessage {
-                                    id: Uuid::new_v4().to_string(),
-                                    experiment_id: exp_id.clone(),
-                                    seq,
-                                    turn_number: trigger_turn,
-                                    role: SpeakerRole::GodWhisper,
-                                    agent_id: Some(agent.id.clone()),
-                                    room_id: "main".to_string(),
-                                    reasoning_content: String::new(),
-                                    content: whisper_input.content,
-                                    micro_cue: None,
-                                    model_name: String::new(),
-                                    duration_ms: 0,
-                                    prompt_tokens: 0,
-                                    completion_tokens: 0,
-                                    total_tokens: 0,
-                                    whisper_consumed: false,
-                                    created_at: Utc::now().to_rfc3339(),
-                                };
-                                if db.append_message(&msg).is_ok() {
-                                    let guard = channel.read().await;
-                                    if let Some(ch) = guard.as_ref() {
-                                        let _ = ch.send(StreamEvent::MessageAdded {
-                                            experiment_id: exp_id.clone(),
-                                            message: msg,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
                 Err(_e) => {
                     // 铁律 4：解析或观察员阶段失败时静默跳过本轮分析，绝不中断主对话流
@@ -1114,6 +1029,48 @@ impl TerrariumEngine {
             if detail.config.agents.is_empty() {
                 self.pause(Some("请至少配置 1 个角色".to_string()))
                     .await;
+                continue;
+            }
+
+            let active_agent_count = detail.config.agents.iter().filter(|a| !a.has_left).count();
+            if (detail.config.agents.len() >= 2 && active_agent_count < 2)
+                || active_agent_count == 0
+            {
+                let msg = "🎬 角色已悉数离场，本场推演自然落幕".to_string();
+                let already_ended = detail
+                    .messages
+                    .last()
+                    .is_some_and(|m| m.role == SpeakerRole::GodSystem && m.content == msg);
+                if !already_ended {
+                    let seq = self.db.next_seq(&exp_id).unwrap_or(1);
+                    let end_msg = TimelineMessage {
+                        id: Uuid::new_v4().to_string(),
+                        experiment_id: exp_id.clone(),
+                        seq,
+                        turn_number: detail.total_turns,
+                        role: SpeakerRole::GodSystem,
+                        agent_id: None,
+                        room_id: "main".to_string(),
+                        reasoning_content: String::new(),
+                        content: msg.clone(),
+                        micro_cue: None,
+                        model_name: String::new(),
+                        duration_ms: 0,
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        total_tokens: 0,
+                        whisper_consumed: false,
+                        created_at: Utc::now().to_rfc3339(),
+                    };
+                    if self.db.append_message(&end_msg).is_ok() {
+                        self.emit(StreamEvent::MessageAdded {
+                            experiment_id: exp_id.clone(),
+                            message: end_msg,
+                        })
+                        .await;
+                    }
+                }
+                self.pause(Some(msg)).await;
                 continue;
             }
 
@@ -1248,8 +1205,21 @@ impl TerrariumEngine {
                 }
             }
             if let Some(forced_id) = self.forced_next_speaker.lock().await.take() {
-                if detail.config.find_agent(&forced_id).is_some() {
+                if detail
+                    .config
+                    .find_agent(&forced_id)
+                    .is_some_and(|a| !a.has_left)
+                {
                     desired_speaker_id = forced_id;
+                }
+            }
+            if detail
+                .config
+                .find_agent(&desired_speaker_id)
+                .is_none_or(|a| a.has_left)
+            {
+                if let Some(first_active) = detail.config.agents.iter().find(|a| !a.has_left) {
+                    desired_speaker_id = first_active.id.clone();
                 }
             }
 
@@ -1444,24 +1414,7 @@ impl TerrariumEngine {
             let enable_private_notes = detail.config.enable_private_notes;
             let tools_schema = sandbox_tools_schema(enable_board_tools, enable_private_notes);
 
-            let latest_tension = detail.observer_notes.first().map(|n| n.tension_score);
-            let progress_turn = if cur == EngineState::Running {
-                self.consecutive_turns.load(Ordering::SeqCst) + 1
-            } else {
-                next_turn
-            };
-            let adaptive_reasoning_effort = resolve_reasoning_effort(
-                &detail.config,
-                latest_tension,
-                !payload.consumed_whisper_ids.is_empty(),
-                payload.has_recent_god_system,
-                progress_turn,
-            );
-            let thinking_params = crate::llm::resolve_thinking_params(
-                &detail.config,
-                node_cfg,
-                adaptive_reasoning_effort.as_deref(),
-            );
+            let thinking_params = crate::llm::resolve_thinking_params(&detail.config, node_cfg);
 
             let raw_prompt_json = serde_json::json!({
                 "model": node_cfg.model_name,
@@ -1507,10 +1460,27 @@ impl TerrariumEngine {
                         .db
                         .mark_whispers_consumed(&payload.consumed_whisper_ids);
 
-                    if detail.config.allow_pass_turn
+                    if active_room.is_none()
+                        && detail.config.allow_pass_turn
                         && is_pass_reply(&res.content)
-                        && !was_previous_message_pass(&detail.messages)
                     {
+                        let consec_passes =
+                            self.consecutive_passes.fetch_add(1, Ordering::SeqCst) + 1;
+                        let active_in_scope = if let Some(ref room) = active_room {
+                            room.member_ids
+                                .iter()
+                                .filter(|id| {
+                                    detail
+                                        .config
+                                        .find_agent(id.as_str())
+                                        .is_some_and(|a| !a.has_left)
+                                })
+                                .count()
+                        } else {
+                            detail.config.agents.iter().filter(|a| !a.has_left).count()
+                        }
+                        .max(1) as u32;
+
                         let seq = self.db.next_seq(&exp_id).unwrap_or(1);
                         let pass_msg = TimelineMessage {
                             id: msg_id,
@@ -1556,6 +1526,41 @@ impl TerrariumEngine {
                             total_tokens: new_total_tokens,
                         })
                         .await;
+
+                        if consec_passes >= active_in_scope {
+                            self.consecutive_passes.store(0, Ordering::SeqCst);
+                            let end_text = "💬 全员已无补充，对话自然结束".to_string();
+                            let end_seq = self.db.next_seq(&exp_id).unwrap_or(seq + 1);
+                            let end_msg = TimelineMessage {
+                                id: Uuid::new_v4().to_string(),
+                                experiment_id: exp_id.clone(),
+                                seq: end_seq,
+                                turn_number: detail.total_turns,
+                                role: SpeakerRole::GodSystem,
+                                agent_id: None,
+                                room_id: "main".to_string(),
+                                reasoning_content: String::new(),
+                                content: end_text.clone(),
+                                micro_cue: None,
+                                model_name: String::new(),
+                                duration_ms: 0,
+                                prompt_tokens: 0,
+                                completion_tokens: 0,
+                                total_tokens: 0,
+                                whisper_consumed: false,
+                                created_at: Utc::now().to_rfc3339(),
+                            };
+                            if self.db.append_message(&end_msg).is_ok() {
+                                self.emit(StreamEvent::MessageAdded {
+                                    experiment_id: exp_id.clone(),
+                                    message: end_msg,
+                                })
+                                .await;
+                            }
+                            self.pause(Some(end_text)).await;
+                            continue;
+                        }
+
                         if self.current_state() == EngineState::Stepping {
                             self.state
                                 .store(state_to_u8(EngineState::Paused), Ordering::SeqCst);
@@ -1570,6 +1575,8 @@ impl TerrariumEngine {
                         }
                         continue;
                     }
+
+                    self.consecutive_passes.store(0, Ordering::SeqCst);
 
                     let current_room_id = active_room
                         .as_ref()
@@ -1588,7 +1595,12 @@ impl TerrariumEngine {
                         &node_cfg.label,
                         &all_agent_labels,
                     );
-                    let (sanitized_content, micro_cue) = extract_micro_cue(&prefix_stripped);
+                    let (leave_stripped, agent_has_left) = extract_leave_marker(&prefix_stripped);
+                    let (mut sanitized_content, micro_cue) = extract_micro_cue(&leave_stripped);
+                    if agent_has_left && sanitized_content.trim().is_empty() {
+                        sanitized_content = "（转身离开）".to_string();
+                    }
+                    let speaker_id_owned = node_cfg.id.clone();
 
                     let seq = self.db.next_seq(&exp_id).unwrap_or(1);
                     let final_msg = TimelineMessage {
@@ -1625,21 +1637,36 @@ impl TerrariumEngine {
                             .save_message_raw_prompt(&final_msg.id, &raw_prompt_json);
                     }
 
+                    if agent_has_left {
+                        detail.config.agents[speaker_idx].has_left = true;
+                        let _ = self
+                            .db
+                            .update_experiment(&exp_id, &detail.title, &detail.config);
+                        self.emit(StreamEvent::ConfigHotUpdated {
+                            experiment_id: exp_id.clone(),
+                            config: detail.config.clone(),
+                        })
+                        .await;
+                    }
+
                     // 空间隔离与私密房间轮次递减
                     let mut closed_room_notice: Option<TimelineMessage> = None;
                     let next_speaker_id = if let Some(mut room) = active_room {
+                        if agent_has_left {
+                            room.member_ids.retain(|id| id != &speaker_id_owned);
+                        }
                         room.remaining_turns = room.remaining_turns.saturating_sub(1);
-                        if room.remaining_turns == 0 {
+                        if room.remaining_turns == 0 || room.member_ids.len() < 2 {
                             let lobby_speaker = detail
                                 .config
                                 .agents
                                 .iter()
-                                .find(|a| !room.member_ids.iter().any(|id| id == &a.id))
+                                .find(|a| !a.has_left && !room.member_ids.iter().any(|id| id == &a.id))
                                 .map(|a| a.id.clone())
                                 .unwrap_or_else(|| {
                                     select_next_speaker(
                                         &detail.config,
-                                        &node_cfg.id,
+                                        &speaker_id_owned,
                                         &final_msg.content,
                                     )
                                 });
@@ -1692,7 +1719,7 @@ impl TerrariumEngine {
                         } else {
                             let sp = select_next_speaker_in_room(
                                 &detail.config,
-                                &node_cfg.id,
+                                &speaker_id_owned,
                                 &final_msg.content,
                                 Some(&room),
                             );
@@ -1710,7 +1737,7 @@ impl TerrariumEngine {
                             sp
                         }
                     } else {
-                        select_next_speaker(&detail.config, &node_cfg.id, &final_msg.content)
+                        select_next_speaker(&detail.config, &speaker_id_owned, &final_msg.content)
                     };
 
                     let _ = self.db.update_experiment_progress(
@@ -1749,7 +1776,7 @@ impl TerrariumEngine {
                             (detail.messages.len() - tail_start) + 1,
                         );
                         updated_msgs.extend_from_slice(&detail.messages[tail_start..]);
-                        updated_msgs.push(final_msg);
+                        updated_msgs.push(final_msg.clone());
                         let latest_board = self
                             .db
                             .get_board_content(&exp_id)
@@ -1763,6 +1790,131 @@ impl TerrariumEngine {
                             compacted_summary,
                         )
                         .await;
+                    }
+
+                    detail.messages.push(final_msg);
+
+                    // 第二层终局检查：退场后在场活跃角色少于 2 人
+                    let remaining_active =
+                        detail.config.agents.iter().filter(|a| !a.has_left).count();
+                    if (detail.config.agents.len() >= 2 && remaining_active < 2)
+                        || remaining_active == 0
+                    {
+                        let end_text = "🎬 角色已悉数离场，本场推演自然落幕".to_string();
+                        let end_seq = self.db.next_seq(&exp_id).unwrap_or(seq + 1);
+                        let end_msg = TimelineMessage {
+                            id: Uuid::new_v4().to_string(),
+                            experiment_id: exp_id.clone(),
+                            seq: end_seq,
+                            turn_number: next_turn,
+                            role: SpeakerRole::GodSystem,
+                            agent_id: None,
+                            room_id: "main".to_string(),
+                            reasoning_content: String::new(),
+                            content: end_text.clone(),
+                            micro_cue: None,
+                            model_name: String::new(),
+                            duration_ms: 0,
+                            prompt_tokens: 0,
+                            completion_tokens: 0,
+                            total_tokens: 0,
+                            whisper_consumed: false,
+                            created_at: Utc::now().to_rfc3339(),
+                        };
+                        if self.db.append_message(&end_msg).is_ok() {
+                            self.emit(StreamEvent::MessageAdded {
+                                experiment_id: exp_id.clone(),
+                                message: end_msg,
+                            })
+                            .await;
+                        }
+                        self.pause(Some(end_text)).await;
+                        continue;
+                    }
+
+                    // 第三层终局检查：连续 3 条非沉默发言属于道别收尾语义，或连续 3 轮高度语义重复
+                    if detect_natural_wrapup_loop(&detail.messages).is_some() {
+                        let progress_lt_50 = if detail.config.enable_narrative_arc
+                            && detail.config.target_total_turns > 0
+                        {
+                            (next_turn as u64) * 100
+                                < (detail.config.target_total_turns as u64) * 50
+                        } else if detail.config.max_consecutive_turns > 0 {
+                            (consec as u64) * 100
+                                < (detail.config.max_consecutive_turns as u64) * 50
+                        } else {
+                            next_turn < 10
+                        };
+                        let already_rescued = detail.messages.iter().any(|m| {
+                            m.role == SpeakerRole::GodSystem
+                                && m.content.contains(FAREWELL_RESCUE_MARKER)
+                        });
+                        if detail.config.enable_auto_director
+                            && progress_lt_50
+                            && !already_rescued
+                        {
+                            let rescue_seq = self.db.next_seq(&exp_id).unwrap_or(seq + 1);
+                            let rescue_msg = TimelineMessage {
+                                id: Uuid::new_v4().to_string(),
+                                experiment_id: exp_id.clone(),
+                                seq: rescue_seq,
+                                turn_number: next_turn,
+                                role: SpeakerRole::GodSystem,
+                                agent_id: None,
+                                room_id: "main".to_string(),
+                                reasoning_content: String::new(),
+                                content: format!(
+                                    "{} 众人正准备散场之际，现场忽然发生意外变故——原本以为已经尘埃落定的线索突然出现异常回响，迫使所有人重新停下脚步。",
+                                    FAREWELL_RESCUE_MARKER
+                                ),
+                                micro_cue: None,
+                                model_name: String::new(),
+                                duration_ms: 0,
+                                prompt_tokens: 0,
+                                completion_tokens: 0,
+                                total_tokens: 0,
+                                whisper_consumed: false,
+                                created_at: Utc::now().to_rfc3339(),
+                            };
+                            if self.db.append_message(&rescue_msg).is_ok() {
+                                self.emit(StreamEvent::MessageAdded {
+                                    experiment_id: exp_id.clone(),
+                                    message: rescue_msg,
+                                })
+                                .await;
+                            }
+                        } else {
+                            let end_text = "🎬 角色已互相道别，本场推演自然落幕".to_string();
+                            let end_seq = self.db.next_seq(&exp_id).unwrap_or(seq + 1);
+                            let end_msg = TimelineMessage {
+                                id: Uuid::new_v4().to_string(),
+                                experiment_id: exp_id.clone(),
+                                seq: end_seq,
+                                turn_number: next_turn,
+                                role: SpeakerRole::GodSystem,
+                                agent_id: None,
+                                room_id: "main".to_string(),
+                                reasoning_content: String::new(),
+                                content: end_text.clone(),
+                                micro_cue: None,
+                                model_name: String::new(),
+                                duration_ms: 0,
+                                prompt_tokens: 0,
+                                completion_tokens: 0,
+                                total_tokens: 0,
+                                whisper_consumed: false,
+                                created_at: Utc::now().to_rfc3339(),
+                            };
+                            if self.db.append_message(&end_msg).is_ok() {
+                                self.emit(StreamEvent::MessageAdded {
+                                    experiment_id: exp_id.clone(),
+                                    message: end_msg,
+                                })
+                                .await;
+                            }
+                            self.pause(Some(end_text)).await;
+                            continue;
+                        }
                     }
 
                     if detail.config.enable_narrative_arc
@@ -2296,51 +2448,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_resolve_reasoning_effort_arbitration_rules() {
-        let mut cfg = ExperimentConfig::default();
-        cfg.max_consecutive_turns = 100;
-        cfg.enable_adaptive_reasoning = false;
-        assert_eq!(
-            resolve_reasoning_effort(&cfg, Some(20), false, false, 10),
-            None
-        );
-
-        cfg.enable_adaptive_reasoning = true;
-        cfg.adaptive_low_reasoning_effort = "low".to_string();
-        // No observer tension score yet -> keep full
-        assert_eq!(resolve_reasoning_effort(&cfg, None, false, false, 10), None);
-        // Tension < 50 without override -> downgrade
-        assert_eq!(
-            resolve_reasoning_effort(&cfg, Some(35), false, false, 10),
-            Some("low".to_string())
-        );
-        // Tension >= 50 -> full
-        assert_eq!(
-            resolve_reasoning_effort(&cfg, Some(50), false, false, 10),
-            None
-        );
-        // Unconsumed GodWhisper overrides downgrade
-        assert_eq!(
-            resolve_reasoning_effort(&cfg, Some(20), true, false, 10),
-            None
-        );
-        // Recent GodSystem overrides downgrade
-        assert_eq!(
-            resolve_reasoning_effort(&cfg, Some(20), false, true, 10),
-            None
-        );
-        // Final 20% turns (> 80 of 100) overrides downgrade
-        assert_eq!(
-            resolve_reasoning_effort(&cfg, Some(20), false, false, 80),
-            Some("low".to_string())
-        );
-        assert_eq!(
-            resolve_reasoning_effort(&cfg, Some(20), false, false, 81),
-            None
-        );
-    }
-
-    #[test]
     fn test_smart_selector_three_agents_and_no_consecutive_post() {
         let mut cfg = ExperimentConfig::default();
         cfg.enable_smart_selector = true;
@@ -2407,33 +2514,54 @@ mod tests {
         assert!(is_pass_reply("  [pass] \n"));
         assert!(is_pass_reply("<think>没啥好说的</think>\n  [PASS] "));
         assert!(!is_pass_reply("<think>思考</think> 我觉得还行 [PASS]"));
+    }
 
+    #[test]
+    fn test_skip_left_agent_and_detect_farewell_or_repetition() {
         let mut cfg = ExperimentConfig::default();
-        cfg.intuitive_fast_reply = true;
-        assert_eq!(
-            resolve_reasoning_effort(&cfg, Some(90), true, true, 99),
-            Some("minimal".to_string())
-        );
+        cfg.agents[0].has_left = true;
+        // 智能点名与轮转均应跳过已离场的 AiA
+        assert_eq!(select_next_speaker(&cfg, "AiB", "AiA 你怎么看？"), "AiB");
 
-        let prev_pass = TimelineMessage {
-            id: "p1".to_string(),
+        let mk_ai = |seq: i64, agent: &str, text: &str| TimelineMessage {
+            id: format!("m{seq}"),
             experiment_id: "e1".to_string(),
-            seq: 1,
-            turn_number: 1,
-            role: SpeakerRole::GodSystem,
-            agent_id: None,
+            seq,
+            turn_number: seq as u32,
+            role: SpeakerRole::Ai,
+            agent_id: Some(agent.to_string()),
             room_id: "main".to_string(),
             reasoning_content: String::new(),
-            content: "阿哲 看了一眼消息，没接话".to_string(),
+            content: text.to_string(),
             micro_cue: None,
-            model_name: String::new(),
-            duration_ms: 0,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
+            model_name: "m".to_string(),
+            duration_ms: 10,
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            total_tokens: 2,
             whisper_consumed: false,
             created_at: "2026-01-01T00:00:00Z".to_string(),
         };
-        assert!(was_previous_message_pass(&[prev_pass]));
+
+        let farewell_msgs = vec![
+            mk_ai(1, "AiA", "时候不早了，我先走了，大家晚安。"),
+            mk_ai(2, "AiB", "好，店里也关门了，各自回去吧。"),
+            mk_ai(3, "AiC", "嗯，没什么可说的了，散了吧，再见。"),
+        ];
+        assert_eq!(detect_natural_wrapup_loop(&farewell_msgs), Some("farewell"));
+
+        let interrupted_msgs = vec![
+            mk_ai(1, "AiA", "时候不早了，我先走了，大家晚安。"),
+            mk_ai(2, "AiB", "等等！先别走，门外有脚步声！"),
+            mk_ai(3, "AiC", "好，各自回去吧。"),
+        ];
+        assert_eq!(detect_natural_wrapup_loop(&interrupted_msgs), None);
+
+        let repeat_msgs = vec![
+            mk_ai(1, "AiA", "这件事确实很蹊跷，我们必须把监控录像彻底查清楚。"),
+            mk_ai(2, "AiB", "没错，这件事确实很蹊跷，必须把监控录像彻底查清楚。"),
+            mk_ai(3, "AiC", "对，这件事确实很蹊跷，得把监控录像彻底查清楚才行。"),
+        ];
+        assert_eq!(detect_natural_wrapup_loop(&repeat_msgs), Some("repetition"));
     }
 }

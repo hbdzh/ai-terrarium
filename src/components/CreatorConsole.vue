@@ -10,7 +10,6 @@ import {
   X,
   Pencil,
   Dices,
-  Wand2,
   DoorClosed,
   ChevronRight,
   RefreshCw,
@@ -37,12 +36,10 @@ const props = defineProps<{
   crisisCards?: CrisisCard[];
   observerRunning?: boolean;
   activePrivateRoom?: ActivePrivateRoom | null;
-  directorBusy?: boolean;
 }>();
 
 const emit = defineEmits<{
   submit: [kind: SpeakerRole, agentId: string | null, content: string];
-  directorCommand: [instruction: string];
   startPrivateRoom: [memberIds: string[], turns: number];
   closePrivateRoom: [];
   resolveApproval: [
@@ -98,7 +95,7 @@ watch(
   { immediate: true }
 );
 
-type ConsoleMode = SpeakerRole | "DirectorRemote" | "PrivateRoom";
+type ConsoleMode = SpeakerRole | "PrivateRoom";
 const mode = ref<ConsoleMode>("GodSystem");
 const modeMenuOpen = ref(false);
 const targetAgentId = ref<string>("");
@@ -172,15 +169,6 @@ const modes: {
     activeClass: "bg-emerald-600 text-white shadow-xs",
   },
   {
-    kind: "DirectorRemote",
-    label: "导演指令",
-    shortLabel: "指令",
-    hint: "用自然语言调整运行参数或角色状态（如：分析周期改为 3 轮）",
-    shortHint: "输入导演指令（如：分析周期改为 3 轮）",
-    icon: Wand2,
-    activeClass: "bg-amber-600 text-white shadow-xs",
-  },
-  {
     kind: "PrivateRoom",
     label: "私密房间",
     shortLabel: "私聊",
@@ -212,12 +200,6 @@ function handleSend() {
   const val = text.value.trim();
   if (!val) return;
   triggerHaptic("medium");
-  if (mode.value === "DirectorRemote") {
-    if (props.directorBusy) return;
-    emit("directorCommand", val);
-    text.value = "";
-    return;
-  }
   const agentId = mode.value === "GodWhisper" ? targetAgentId.value || null : null;
   emit("submit", mode.value, agentId, val);
   text.value = "";

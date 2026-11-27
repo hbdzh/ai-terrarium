@@ -17,18 +17,6 @@ pub fn capture_turn_snapshot(
     Ok(snap)
 }
 
-/// 从指定历史轮次克隆全新平行宇宙实验分支。
-/// 支持可选的 `edit_override = Some((message_id, new_content))` 实现“修改内容并重演”。
-#[allow(dead_code)]
-pub fn fork_experiment_at_turn(
-    db: &Database,
-    source_exp_id: &str,
-    target_turn: u32,
-    edit_override: Option<(String, String)>,
-) -> Result<ExperimentDetail> {
-    fork_experiment_at_turn_or_message(db, source_exp_id, target_turn, None, edit_override)
-}
-
 /// 从指定历史轮次或具体某条消息为止克隆全新平行宇宙实验分支，记录同源谱系 (`parent_experiment_id`, `fork_turn`)。
 pub fn fork_experiment_at_turn_or_message(
     db: &Database,
@@ -307,10 +295,11 @@ mod tests {
             capture_turn_snapshot(&db, &exp.id, i as u32).unwrap();
         }
 
-        let forked = fork_experiment_at_turn(
+        let forked = fork_experiment_at_turn_or_message(
             &db,
             &exp.id,
             2,
+            None,
             Some(("msg-2".to_string(), "改写后的第2轮发言".to_string())),
         )
         .unwrap();
@@ -370,7 +359,7 @@ mod tests {
         )
         .unwrap();
 
-        let forked = fork_experiment_at_turn(&db, &exp.id, 1, None).unwrap();
+        let forked = fork_experiment_at_turn_or_message(&db, &exp.id, 1, None, None).unwrap();
         assert!(forked.private_notes.is_empty());
         assert!(forked.active_private_room.is_none());
         assert_eq!(forked.parent_experiment_id.as_deref(), Some(exp.id.as_str()));

@@ -14,8 +14,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
@@ -27,8 +25,16 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 anyhow = "1"
-tauri-plugin-os = "2.4.0"
+tauri-plugin-os = "2"
+
+[target.'cfg(not(target_env = "ohos"))'.dependencies]
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
 tauri-plugin-clipboard-manager = "2"
+
+[target.'cfg(target_env = "ohos")'.dependencies]
+napi-ohos = "1"
+napi-derive-ohos = "1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 webview2-com = "0.39"
@@ -48,3 +54,19 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+[patch.crates-io]
+tauri = { git = "https://github.com/tauri-apps/tauri", branch = "feat/open-harmony" }
+tauri-build = { git = "https://github.com/tauri-apps/tauri", branch = "feat/open-harmony" }
+tauri-plugin = { git = "https://github.com/tauri-apps/tauri", branch = "feat/open-harmony" }
+tauri-utils = { git = "https://github.com/tauri-apps/tauri", branch = "feat/open-harmony" }
+tauri-runtime = { git = "https://github.com/tauri-apps/tauri", branch = "feat/open-harmony" }
+tauri-runtime-wry = { git = "https://github.com/tauri-apps/tauri", branch = "feat/open-harmony" }
+tauri-macros = { git = "https://github.com/tauri-apps/tauri", branch = "feat/open-harmony" }
+tauri-codegen = { git = "https://github.com/tauri-apps/tauri", branch = "feat/open-harmony" }
+wry = { git = "https://github.com/tauri-apps/wry", branch = "feat/open-harmony" }
+tao = { git = "https://github.com/tauri-apps/tao", branch = "feat/open-harmony" }
+tauri-plugin-dialog = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "feat/open-harmony" }
+tauri-plugin-fs = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "feat/open-harmony" }
+tauri-plugin-os = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "feat/open-harmony" }
+tauri-plugin-clipboard-manager = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "feat/open-harmony" }

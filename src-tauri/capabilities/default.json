@@ -11,9 +11,6 @@
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
-    "core:window:allow-is-maximized",
-    "dialog:default",
-    "os:default",
-    "clipboard-manager:default"
+    "core:window:allow-is-maximized"
   ]
 }

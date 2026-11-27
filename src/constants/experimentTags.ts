@@ -22,6 +22,7 @@ export const MAIN_TONE_TAGS: ExperimentTagSpec[] = [
     label: "悬疑推理",
     desc: "信息差试探，各自保留底牌",
     autoOn: ["enablePrivateNotes", "enableBoardTools"],
+    autoOff: ["intuitiveFastReply"],
     lockOff: ["randomMoodDice"],
   },
   {

@@ -2,7 +2,7 @@ import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { ThemePreference } from "../types";
 import { isDesktopOS, isMobileOS } from "./platform";
-import { setAndroidStatusBarLightIcons } from "./native";
+import { setNativeStatusBarLightIcons } from "./native";
 
 const THEME_STORAGE_KEY = "ai-terrarium-theme";
 
@@ -45,7 +45,7 @@ export function syncThemeVisuals(syncNativeWindow = true): void {
     root.style.colorScheme = isDark ? "dark" : "light";
   }
   if (isMobileOS) {
-    setAndroidStatusBarLightIcons(!isDark);
+    setNativeStatusBarLightIcons(!isDark);
   }
   if (isDesktopOS && syncNativeWindow) {
     invoke("set_window_theme", { theme: themePreference.value }).catch(() => {});

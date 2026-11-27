@@ -483,7 +483,7 @@ function formatPresetCast(p: PresetTemplate): string {
     .join(" vs ");
 }
 
-const inheritCardMemory = ref(true);
+const inheritCardMemory = ref(false);
 
 function selectPreset(p: PresetTemplate) {
   selectedPresetId.value = p.id;
@@ -560,13 +560,9 @@ function handleCreate() {
         boardApprovalMode: "auto",
         enableBoardTools: true,
         initialBoard: "",
-        enablePrefixCacheOpt: true,
         enableCompactionGuard: true,
         enablePrivateNotes: false,
         enableSmartSelector: true,
-        enableAdaptiveReasoning: false,
-        adaptiveLowReasoningEffort: "low",
-        enablePeriodicReflection: false,
         enableNarrativeArc: enableNarrativeArc.value,
         targetTotalTurns: Math.max(5, Math.round(targetTotalTurns.value || 30)),
         agents: makeDefaultAgents(),

@@ -90,6 +90,8 @@ pub struct NodeConfig {
     pub goal_achieved: bool,
     #[serde(default)]
     pub private_state_snapshot: String,
+    #[serde(default)]
+    pub has_left: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -191,8 +193,6 @@ impl PresetTemplate {
         }
     }
 }
-
-pub const LEGACY_CORE_ENGINE_PROMPT: &str = "你正在参与一场沉浸式多角色互动推演。请严格遵守以下底层法则：1. 彻底沉浸在你的角色中，绝不承认自己是 AI、模型或正在参与测试，严禁打破第四面墙；2. 严禁长篇大论说教、喊口号或做总结性陈词；3. 像真实人物一样自然接话，不机械复述对方原话，根据当前局势与性格做出真实反应。";
 
 pub const DEFAULT_CORE_ENGINE_PROMPT: &str = "你正在参与一场持续的多方自然对谈。无论你当前的身份是人类角色还是坦诚自己身份的 AI，请严格遵守以下表达铁律：\n1. 彻底丢掉“AI 客服腔”与“播音腔”：严禁使用“首先/其次/最后”、“综上所述”、“值得注意的是”、“作为人工智能”等模板化连接词，禁止每句话结尾都做正确但无聊的哲学升华或礼貌总结；\n2. 像真实微信聊天或深夜长谈一样说话：允许口语化、短句、停顿、反问、调侃甚至片刻跑题，把复杂的想法拆成自然流露的几句话，绝不写成结构工整的小作文；\n3. 拒绝无脑吹捧与机械复读：不要每次开头都夸对方“说得太对了”、“你的视角很深刻”，也不要把对方刚说过的话换个词复述一遍，直接顺着对方话里的某个具体点往下接、追问、补充细节或提出不同看法；\n4. 保持独立思考与真实性格：你有自己的观察角度和偏好，遇到不认同或觉得无聊的话题可以直接表达怀疑、换个切入点，让对话像两条真实的思维在碰撞，而不是互相配合演戏。";
 
@@ -643,10 +643,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_low_reasoning_effort() -> String {
-    "low".to_string()
-}
-
 fn default_target_total_turns() -> u32 {
     30
 }
@@ -690,19 +686,11 @@ pub struct ExperimentConfig {
     #[serde(default)]
     pub initial_board: String,
     #[serde(default = "default_true")]
-    pub enable_prefix_cache_opt: bool,
-    #[serde(default = "default_true")]
     pub enable_compaction_guard: bool,
     #[serde(default)]
     pub enable_private_notes: bool,
     #[serde(default = "default_true")]
     pub enable_smart_selector: bool,
-    #[serde(default)]
-    pub enable_adaptive_reasoning: bool,
-    #[serde(default = "default_low_reasoning_effort")]
-    pub adaptive_low_reasoning_effort: String,
-    #[serde(default)]
-    pub enable_periodic_reflection: bool,
     #[serde(default)]
     pub enable_auto_director: bool,
     #[serde(default)]
@@ -719,38 +707,13 @@ pub struct ExperimentConfig {
     pub timed_clues: Vec<TimedClue>,
     #[serde(default)]
     pub agents: Vec<NodeConfig>,
-    // Legacy compatibility fields for reading older saved configs
-    #[serde(default, skip_serializing)]
-    pub node_a: Option<NodeConfig>,
-    #[serde(default, skip_serializing)]
-    pub node_b: Option<NodeConfig>,
     pub node_c: NodeConfig,
 }
 
 impl ExperimentConfig {
     pub fn normalize(&mut self) {
-        if !matches!(
-            self.adaptive_low_reasoning_effort.as_str(),
-            "minimal" | "low" | "medium"
-        ) {
-            self.adaptive_low_reasoning_effort = default_low_reasoning_effort();
-        }
         if self.target_total_turns < 5 {
             self.target_total_turns = 5;
-        }
-        if self.agents.is_empty() {
-            if let Some(mut a) = self.node_a.take() {
-                if a.id.trim().is_empty() {
-                    a.id = "AiA".to_string();
-                }
-                self.agents.push(a);
-            }
-            if let Some(mut b) = self.node_b.take() {
-                if b.id.trim().is_empty() {
-                    b.id = "AiB".to_string();
-                }
-                self.agents.push(b);
-            }
         }
         if self.agents.is_empty() {
             let def = Self::default();
@@ -819,13 +782,9 @@ impl Default for ExperimentConfig {
             board_approval_mode: BoardApprovalMode::Auto,
             enable_board_tools: false,
             initial_board: String::new(),
-            enable_prefix_cache_opt: true,
             enable_compaction_guard: true,
             enable_private_notes: false,
             enable_smart_selector: true,
-            enable_adaptive_reasoning: false,
-            adaptive_low_reasoning_effort: default_low_reasoning_effort(),
-            enable_periodic_reflection: false,
             enable_auto_director: false,
             enable_narrative_arc: false,
             target_total_turns: default_target_total_turns(),
@@ -847,6 +806,7 @@ impl Default for ExperimentConfig {
                     secret_goal: String::new(),
                     goal_achieved: false,
                     private_state_snapshot: String::new(),
+                    has_left: false,
                 },
                 NodeConfig {
                     id: "AiB".to_string(),
@@ -861,10 +821,9 @@ impl Default for ExperimentConfig {
                     secret_goal: String::new(),
                     goal_achieved: false,
                     private_state_snapshot: String::new(),
+                    has_left: false,
                 },
             ],
-            node_a: None,
-            node_b: None,
             node_c: NodeConfig {
                 id: "observer".to_string(),
                 label: "局势分析".to_string(),
@@ -878,6 +837,7 @@ impl Default for ExperimentConfig {
                 secret_goal: String::new(),
                 goal_achieved: false,
                 private_state_snapshot: String::new(),
+                has_left: false,
             },
         }
     }
@@ -1434,15 +1394,38 @@ mod tests {
         }"#;
         let mut cfg: ExperimentConfig = serde_json::from_str(legacy_json).unwrap();
         cfg.normalize();
-        assert!(cfg.enable_prefix_cache_opt);
         assert!(cfg.enable_compaction_guard);
         assert!(!cfg.enable_private_notes);
         assert!(cfg.enable_smart_selector);
-        assert!(!cfg.enable_adaptive_reasoning);
-        assert_eq!(cfg.adaptive_low_reasoning_effort, "low");
-        assert!(!cfg.enable_periodic_reflection);
         assert!(!cfg.enable_auto_director);
         assert!(cfg.tags.is_empty());
+
+        // 确保包含已废弃字段的旧版 JSON 也能无缝反序列化兼容
+        let legacy_removed_fields_json = r#"{
+            "presetId": "custom",
+            "initialTopic": "测试",
+            "observerInterval": 10,
+            "pauseSeconds": 2.0,
+            "maxConsecutiveTurns": 50,
+            "enablePrefixCacheOpt": true,
+            "enableAdaptiveReasoning": true,
+            "adaptiveLowReasoningEffort": "low",
+            "enablePeriodicReflection": true,
+            "agents": [],
+            "nodeC": {
+                "id": "observer",
+                "label": "观察员 C",
+                "baseUrl": "https://api.deepseek.com/v1",
+                "apiKey": "",
+                "modelName": "deepseek-chat",
+                "temperature": 0.3,
+                "systemPrompt": ""
+            }
+        }"#;
+        let mut legacy_cfg: ExperimentConfig =
+            serde_json::from_str(legacy_removed_fields_json).unwrap();
+        legacy_cfg.normalize();
+        assert_eq!(legacy_cfg.preset_id, "custom");
     }
 
     #[test]

@@ -18,13 +18,9 @@ export function cloneNormalizedConfig(src: ExperimentConfig): ExperimentConfig {
   cloned.boardApprovalMode = cloned.boardApprovalMode ?? "auto";
   cloned.enableBoardTools = cloned.enableBoardTools ?? true;
   cloned.initialBoard = cloned.initialBoard ?? "";
-  cloned.enablePrefixCacheOpt = cloned.enablePrefixCacheOpt ?? true;
   cloned.enableCompactionGuard = cloned.enableCompactionGuard ?? true;
   cloned.enablePrivateNotes = cloned.enablePrivateNotes ?? false;
   cloned.enableSmartSelector = cloned.enableSmartSelector ?? true;
-  cloned.enableAdaptiveReasoning = cloned.enableAdaptiveReasoning ?? false;
-  cloned.adaptiveLowReasoningEffort = cloned.adaptiveLowReasoningEffort ?? "low";
-  cloned.enablePeriodicReflection = cloned.enablePeriodicReflection ?? false;
   cloned.enableAutoDirector = cloned.enableAutoDirector ?? false;
   cloned.enableNarrativeArc = cloned.enableNarrativeArc ?? false;
   cloned.tags = Array.isArray(cloned.tags) ? [...cloned.tags] : [];

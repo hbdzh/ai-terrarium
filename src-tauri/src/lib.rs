@@ -8,6 +8,8 @@ mod observer;
 mod sandbox_tools;
 mod sanitizer;
 mod snapshot;
+#[cfg(target_env = "ohos")]
+mod ohos_compat;
 #[cfg(target_os = "windows")]
 mod win_chrome;
 
@@ -24,7 +26,7 @@ use crate::local_api::LocalApiManager;
 use crate::models::{
     ActivePrivateRoom, BoardApprovalMode, CharacterCard, DiffLine, EngineState, ExperimentConfig,
     ExperimentDetail, ExperimentSummary, InterventionInput, PresetTemplate, ScenarioPackage,
-    StreamEvent, TurnSnapshot, UiPrefs,
+    StreamEvent, UiPrefs,
 };
 use crate::observer::GeneratedScenario;
 use crate::sandbox_tools::ApprovalDecision;
@@ -67,17 +69,6 @@ fn save_preset(
     preset: PresetTemplate,
 ) -> Result<Vec<PresetTemplate>, String> {
     state.db.save_preset(&preset).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn reset_builtin_preset(
-    state: State<'_, AppState>,
-    preset_id: String,
-) -> Result<Vec<PresetTemplate>, String> {
-    state
-        .db
-        .reset_builtin_preset(&preset_id)
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -270,29 +261,38 @@ fn save_binary_to_file(
     path: String,
     data: Vec<u8>,
 ) -> Result<(), String> {
-    use std::io::Write;
-    use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
+    #[cfg(target_env = "ohos")]
+    {
+        let _ = app;
+        let normalized = path.strip_prefix("file://").unwrap_or(&path);
+        return std::fs::write(normalized, &data).map_err(|e| e.to_string());
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        use std::io::Write;
+        use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
 
-    let file_path = path
-        .parse::<FilePath>()
-        .unwrap_or_else(|_| FilePath::Path(std::path::PathBuf::from(&path)));
+        let file_path = path
+            .parse::<FilePath>()
+            .unwrap_or_else(|_| FilePath::Path(std::path::PathBuf::from(&path)));
 
-    let mut opts = OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+        let mut opts = OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
 
-    let mut file = match app.fs().open(file_path.clone(), opts) {
-        Ok(f) => f,
-        Err(_) => {
-            let mut fallback_opts = OpenOptions::new();
-            fallback_opts.write(true).create(true);
-            app.fs()
-                .open(file_path, fallback_opts)
-                .map_err(|e| e.to_string())?
-        }
-    };
+        let mut file = match app.fs().open(file_path.clone(), opts) {
+            Ok(f) => f,
+            Err(_) => {
+                let mut fallback_opts = OpenOptions::new();
+                fallback_opts.write(true).create(true);
+                app.fs()
+                    .open(file_path, fallback_opts)
+                    .map_err(|e| e.to_string())?
+            }
+        };
 
-    file.write_all(&data).map_err(|e| e.to_string())?;
-    file.flush().map_err(|e| e.to_string())
+        file.write_all(&data).map_err(|e| e.to_string())?;
+        file.flush().map_err(|e| e.to_string())
+    }
 }
 
 #[tauri::command]
@@ -301,48 +301,66 @@ fn save_markdown_to_file(
     path: String,
     content: String,
 ) -> Result<(), String> {
-    use std::io::Write;
-    use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
+    #[cfg(target_env = "ohos")]
+    {
+        let _ = app;
+        let normalized = path.strip_prefix("file://").unwrap_or(&path);
+        return std::fs::write(normalized, content.as_bytes()).map_err(|e| e.to_string());
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        use std::io::Write;
+        use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
 
-    let file_path = path
-        .parse::<FilePath>()
-        .unwrap_or_else(|_| FilePath::Path(std::path::PathBuf::from(&path)));
+        let file_path = path
+            .parse::<FilePath>()
+            .unwrap_or_else(|_| FilePath::Path(std::path::PathBuf::from(&path)));
 
-    let mut opts = OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+        let mut opts = OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
 
-    let mut file = match app.fs().open(file_path.clone(), opts) {
-        Ok(f) => f,
-        Err(_) => {
-            // Some Android ContentProviders reject "wt" mode; retry with "w"
-            let mut fallback_opts = OpenOptions::new();
-            fallback_opts.write(true).create(true);
-            app.fs()
-                .open(file_path, fallback_opts)
-                .map_err(|e| e.to_string())?
-        }
-    };
+        let mut file = match app.fs().open(file_path.clone(), opts) {
+            Ok(f) => f,
+            Err(_) => {
+                // Some Android ContentProviders reject "wt" mode; retry with "w"
+                let mut fallback_opts = OpenOptions::new();
+                fallback_opts.write(true).create(true);
+                app.fs()
+                    .open(file_path, fallback_opts)
+                    .map_err(|e| e.to_string())?
+            }
+        };
 
-    file.write_all(content.as_bytes())
-        .map_err(|e| e.to_string())?;
-    file.flush().map_err(|e| e.to_string())
+        file.write_all(content.as_bytes())
+            .map_err(|e| e.to_string())?;
+        file.flush().map_err(|e| e.to_string())
+    }
 }
 
 #[tauri::command]
 fn read_text_file(app: tauri::AppHandle, path: String) -> Result<String, String> {
-    use std::io::Read;
-    use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
+    #[cfg(target_env = "ohos")]
+    {
+        let _ = app;
+        let normalized = path.strip_prefix("file://").unwrap_or(&path);
+        return std::fs::read_to_string(normalized).map_err(|e| e.to_string());
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        use std::io::Read;
+        use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
 
-    let file_path = path
-        .parse::<FilePath>()
-        .unwrap_or_else(|_| FilePath::Path(std::path::PathBuf::from(&path)));
+        let file_path = path
+            .parse::<FilePath>()
+            .unwrap_or_else(|_| FilePath::Path(std::path::PathBuf::from(&path)));
 
-    let mut opts = OpenOptions::new();
-    opts.read(true);
-    let mut file = app.fs().open(file_path, opts).map_err(|e| e.to_string())?;
-    let mut text = String::new();
-    file.read_to_string(&mut text).map_err(|e| e.to_string())?;
-    Ok(text)
+        let mut opts = OpenOptions::new();
+        opts.read(true);
+        let mut file = app.fs().open(file_path, opts).map_err(|e| e.to_string())?;
+        let mut text = String::new();
+        file.read_to_string(&mut text).map_err(|e| e.to_string())?;
+        Ok(text)
+    }
 }
 
 #[tauri::command]
@@ -488,17 +506,6 @@ async fn fork_experiment(
     .map_err(|e| e.to_string())?;
     state.engine.switch_experiment(forked.id.clone()).await;
     Ok(forked)
-}
-
-#[tauri::command]
-fn get_experiment_snapshots(
-    state: State<'_, AppState>,
-    experiment_id: String,
-) -> Result<Vec<TurnSnapshot>, String> {
-    state
-        .db
-        .get_turn_snapshots(&experiment_id)
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -696,22 +703,6 @@ async fn generate_scenario_from_idea(
             .map_err(|e| e.to_string())?
     };
     crate::observer::generate_scenario_from_idea(&state.engine.client, &cfg, &idea)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn execute_director_command(
-    state: State<'_, AppState>,
-    experiment_id: String,
-    instruction: String,
-) -> Result<String, String> {
-    if instruction.trim().is_empty() {
-        return Err("请输入导演遥控指令".to_string());
-    }
-    state
-        .engine
-        .execute_director_command(&experiment_id, &instruction)
         .await
         .map_err(|e| e.to_string())
 }
@@ -943,6 +934,181 @@ async fn fetch_provider_models(
 }
 
 #[tauri::command]
+fn get_ohos_device_type() -> Option<String> {
+    #[cfg(target_env = "ohos")]
+    {
+        return Some(ohos_compat::get_device_type());
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        None
+    }
+}
+
+#[tauri::command]
+async fn ohos_pick_and_save_text(
+    default_name: String,
+    extensions: Vec<String>,
+    content: String,
+) -> Result<bool, String> {
+    #[cfg(target_env = "ohos")]
+    {
+        let temp_dir = ohos_compat::sandbox_files_dir();
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let temp_path = temp_dir.join(format!(".export_{}.tmp", Uuid::new_v4()));
+        std::fs::write(&temp_path, content.as_bytes()).map_err(|e| e.to_string())?;
+        let res = ohos_compat::call_file_bridge(serde_json::json!({
+            "action": "saveFromTemp",
+            "defaultName": default_name,
+            "extensions": extensions,
+            "tempPath": temp_path.to_string_lossy().to_string(),
+        }))
+        .await;
+        let _ = std::fs::remove_file(&temp_path);
+        let raw = res?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+        return Ok(!parsed.get("cancelled").and_then(|v| v.as_bool()).unwrap_or(false));
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        let _ = (default_name, extensions, content);
+        Err("ohos_pick_and_save_text is only available on HarmonyOS".to_string())
+    }
+}
+
+#[tauri::command]
+async fn ohos_pick_and_save_binary(
+    default_name: String,
+    extensions: Vec<String>,
+    data: Vec<u8>,
+) -> Result<bool, String> {
+    #[cfg(target_env = "ohos")]
+    {
+        let temp_dir = ohos_compat::sandbox_files_dir();
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let temp_path = temp_dir.join(format!(".export_{}.tmp", Uuid::new_v4()));
+        std::fs::write(&temp_path, &data).map_err(|e| e.to_string())?;
+        let res = ohos_compat::call_file_bridge(serde_json::json!({
+            "action": "saveFromTemp",
+            "defaultName": default_name,
+            "extensions": extensions,
+            "tempPath": temp_path.to_string_lossy().to_string(),
+        }))
+        .await;
+        let _ = std::fs::remove_file(&temp_path);
+        let raw = res?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+        return Ok(!parsed.get("cancelled").and_then(|v| v.as_bool()).unwrap_or(false));
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        let _ = (default_name, extensions, data);
+        Err("ohos_pick_and_save_binary is only available on HarmonyOS".to_string())
+    }
+}
+
+#[tauri::command]
+async fn ohos_pick_and_open_text(extensions: Vec<String>) -> Result<Option<String>, String> {
+    #[cfg(target_env = "ohos")]
+    {
+        let raw = ohos_compat::call_file_bridge(serde_json::json!({
+            "action": "openText",
+            "extensions": extensions,
+        }))
+        .await?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+        if parsed.get("cancelled").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Ok(None);
+        }
+        return Ok(Some(raw));
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        let _ = extensions;
+        Err("ohos_pick_and_open_text is only available on HarmonyOS".to_string())
+    }
+}
+
+#[tauri::command]
+fn ohos_write_clipboard(text: String) -> Result<(), String> {
+    #[cfg(target_env = "ohos")]
+    {
+        return ohos_compat::write_clipboard_text(&text);
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        let _ = text;
+        Err("ohos_write_clipboard is only available on HarmonyOS".to_string())
+    }
+}
+
+#[tauri::command]
+fn ohos_read_clipboard() -> Result<String, String> {
+    #[cfg(target_env = "ohos")]
+    {
+        return ohos_compat::read_clipboard_text();
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        Err("ohos_read_clipboard is only available on HarmonyOS".to_string())
+    }
+}
+
+#[tauri::command]
+fn ohos_set_back_intercept(active: bool) {
+    #[cfg(target_env = "ohos")]
+    {
+        ohos_compat::set_back_intercept_active(active);
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        let _ = active;
+    }
+}
+
+#[tauri::command]
+fn ohos_get_insets() -> Option<String> {
+    #[cfg(target_env = "ohos")]
+    {
+        return ohos_compat::get_ohos_insets();
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        None
+    }
+}
+
+#[tauri::command]
+fn ohos_set_status_bar_light_icons(light_icons: bool) {
+    #[cfg(target_env = "ohos")]
+    {
+        ohos_compat::call_ui_bridge(serde_json::json!({
+            "action": "setStatusBar",
+            "lightIcons": light_icons,
+        }));
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        let _ = light_icons;
+    }
+}
+
+#[tauri::command]
+fn ohos_trigger_haptic(kind: String) {
+    #[cfg(target_env = "ohos")]
+    {
+        ohos_compat::call_ui_bridge(serde_json::json!({
+            "action": "haptic",
+            "kind": kind,
+        }));
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        let _ = kind;
+    }
+}
+
+#[tauri::command]
 fn show_main_window(window: tauri::Window) {
     if !window.is_visible().unwrap_or(false) {
         let _ = window.show();
@@ -971,16 +1137,29 @@ fn set_window_theme(app: tauri::AppHandle, theme: String) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_os::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_os::init());
+    #[cfg(not(target_env = "ohos"))]
+    {
+        builder = builder
+            .plugin(tauri_plugin_clipboard_manager::init())
+            .plugin(tauri_plugin_dialog::init())
+            .plugin(tauri_plugin_fs::init());
+    }
+    builder
         .setup(|app| {
+            #[cfg(target_env = "ohos")]
+            ohos_compat::set_app_handle(app.handle().clone());
+
+            #[cfg(target_env = "ohos")]
+            let app_dir = ohos_compat::sandbox_files_dir();
+            #[cfg(not(target_env = "ohos"))]
             let app_dir = app
                 .path()
                 .app_data_dir()
                 .expect("failed to resolve app data dir");
+            let _ = std::fs::create_dir_all(&app_dir);
             let db_path = app_dir.join("ai_terrarium.db");
             let db = Arc::new(Database::open(&db_path).expect("failed to init sqlite db"));
             let default_exp = db
@@ -1014,7 +1193,24 @@ pub fn run() {
             if let Some(win) = app.get_webview_window("main") {
                 win_chrome::setup_windows_chrome(&win, &initial_theme);
             }
-            #[cfg(not(target_os = "windows"))]
+            // On macOS, apply flat matte UnderWindowBackground vibrancy (avoids macOS 26 Liquid Glass glossy rim on Effect::Sidebar)
+            #[cfg(target_os = "macos")]
+            if let Some(win) = app.get_webview_window("main") {
+                use tauri::window::{Effect, EffectState, EffectsBuilder};
+                let t = match initial_theme.as_str() {
+                    "dark" => Some(tauri::Theme::Dark),
+                    "light" => Some(tauri::Theme::Light),
+                    _ => None,
+                };
+                let _ = win.set_theme(t);
+                let _ = win.set_effects(
+                    EffectsBuilder::new()
+                        .effect(Effect::UnderWindowBackground)
+                        .state(EffectState::FollowsWindowActiveState)
+                        .build(),
+                );
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             let _ = initial_theme;
 
             // Safety fallback: ensure main window becomes visible even if frontend fails to invoke show_main_window
@@ -1030,6 +1226,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_ohos_device_type,
+            ohos_pick_and_save_text,
+            ohos_pick_and_save_binary,
+            ohos_pick_and_open_text,
+            ohos_write_clipboard,
+            ohos_read_clipboard,
+            ohos_set_back_intercept,
+            ohos_get_insets,
+            ohos_set_status_bar_light_icons,
+            ohos_trigger_haptic,
             show_main_window,
             set_window_theme,
             get_core_engine_prompt,
@@ -1037,7 +1243,6 @@ pub fn run() {
             reset_core_engine_prompt,
             get_presets,
             save_preset,
-            reset_builtin_preset,
             delete_preset,
             register_stream_channel,
             list_experiments,
@@ -1065,7 +1270,6 @@ pub fn run() {
             get_api_profiles,
             save_api_profiles,
             fork_experiment,
-            get_experiment_snapshots,
             update_shared_board,
             set_board_approval_mode,
             resolve_board_approval,
@@ -1074,7 +1278,6 @@ pub fn run() {
             export_scenario_package,
             import_scenario_package,
             generate_scenario_from_idea,
-            execute_director_command,
             start_private_room,
             close_private_room,
             list_character_cards,

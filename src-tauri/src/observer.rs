@@ -12,17 +12,6 @@ use crate::sanitizer::strip_think_tags;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ReflectionWhisper {
-    #[serde(default, alias = "agent_id")]
-    pub agent_id: String,
-    #[serde(default, alias = "agent_label")]
-    pub agent_label: String,
-    #[serde(default)]
-    pub whisper: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub struct DistilledImprint {
     #[serde(default, alias = "agent_id")]
     pub agent_id: String,
@@ -50,8 +39,6 @@ pub struct ObserverJsonResult {
     pub stagnation_index: i64,
     #[serde(default)]
     pub crisis_cards: Vec<CrisisCard>,
-    #[serde(default)]
-    pub reflection_whispers: Vec<ReflectionWhisper>,
     #[serde(default)]
     pub relationship_matrix: Vec<RelationshipEdge>,
     #[serde(default)]
@@ -85,27 +72,6 @@ pub struct GeneratedScenario {
     #[serde(default)]
     pub timed_clues: Vec<TimedClue>,
     pub agents: Vec<GeneratedAgentDraft>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct DirectorParsedAction {
-    #[serde(default)]
-    pub summary: String,
-    #[serde(default)]
-    pub observer_interval: Option<u32>,
-    #[serde(default)]
-    pub pause_seconds: Option<f64>,
-    #[serde(default)]
-    pub target_total_turns: Option<u32>,
-    #[serde(default)]
-    pub enable_narrative_arc: Option<bool>,
-    #[serde(default)]
-    pub global_system_prompt_append: Option<String>,
-    #[serde(default)]
-    pub whispers: Vec<ReflectionWhisper>,
-    #[serde(default)]
-    pub system_event: Option<String>,
 }
 
 fn default_depth_stage() -> String {
@@ -216,21 +182,6 @@ pub fn parse_observer_json(raw: &str) -> Result<ObserverJsonResult> {
         })
         .collect();
 
-    parsed.reflection_whispers = parsed
-        .reflection_whispers
-        .into_iter()
-        .filter_map(|mut w| {
-            let trimmed: String = w.whisper.trim().chars().take(30).collect();
-            if trimmed.is_empty() {
-                return None;
-            }
-            w.agent_id = w.agent_id.trim().to_string();
-            w.agent_label = w.agent_label.trim().to_string();
-            w.whisper = trimmed;
-            Some(w)
-        })
-        .collect();
-
     parsed.relationship_matrix = parsed
         .relationship_matrix
         .into_iter()
@@ -332,21 +283,6 @@ pub async fn run_observer_analysis(
         transcript.push_str(&format!("{}: {}\n\n", label, clean));
     }
 
-    let reflection_instruction = if config.enable_periodic_reflection {
-        let agent_roster = config
-            .agents
-            .iter()
-            .map(|a| format!("- id: \"{}\", label: \"{}\"", a.id, a.label))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!(
-            "\n\n此外，请在 JSON 中额外输出 \"reflection_whispers\" 数组，为下方每位参与角色各生成一句 30 字以内的「潜意识直觉提示」（仅本人察觉的直觉怀疑、心理暗流或微妙冲动）：\n{}\n格式示例：\"reflection_whispers\": [{{\"agentId\": \"AiA\", \"agentLabel\": \"角色名\", \"whisper\": \"30字以内直觉低语\"}}]",
-            agent_roster
-        )
-    } else {
-        String::new()
-    };
-
     let arc_instruction = if config.enable_narrative_arc && config.target_total_turns > 0 {
         let latest_turn = recent_messages.last().map(|m| m.turn_number).unwrap_or(0);
         let pct = ((latest_turn as u64 * 100) / (config.target_total_turns as u64)).min(100);
@@ -405,13 +341,12 @@ pub async fn run_observer_analysis(
             {{ \"title\": \"短标题3\", \"kind\": \"GodSystem\", \"content\": \"...\" }}\n  \
           ]\n\
         }}\n\
-        评分说明：tension_score 为火药味/冲突指数(0~100)，abstraction_score 为哲学/概念抽象度(0~100)，stagnation_index 为复读/客套僵化指数(0~100，>80表示陷入死循环)。relationship_matrix 请基于对话暗流评估参演角色两两之间的实时信任度（trust_score 范围 -100 到 100，负分代表猜忌/敌意，正分代表信任/同盟）与简短心理定性 attitude_tag（12字以内）。crisis_cards 请紧扣当前剧情现场生成 3 张截然不同风格的破局/转折事件卡。{}{}{}{}{}",
+        评分说明：tension_score 为火药味/冲突指数(0~100)，abstraction_score 为哲学/概念抽象度(0~100)，stagnation_index 为复读/客套僵化指数(0~100，>80表示陷入死循环)。relationship_matrix 请基于对话暗流评估参演角色两两之间的实时信任度（trust_score 范围 -100 到 100，负分代表猜忌/敌意，正分代表信任/同盟）与简短心理定性 attitude_tag（12字以内）。crisis_cards 请紧扣当前剧情现场生成 3 张截然不同风格的破局/转折事件卡。{}{}{}{}",
         node_c.system_prompt.trim(),
         cast_names,
         tag_calibration,
         arc_instruction,
         director_instruction,
-        reflection_instruction,
         secret_goals_instruction
     );
 
@@ -482,7 +417,33 @@ pub async fn run_observer_analysis(
     parse_observer_json(&raw_content)
 }
 
-/// 生成复盘报告（Markdown 格式），包含核心转折点、高光金句 Top 3、角色行为画像。
+/// 判断实验是否属于「博弈与推理」类型（包含悬疑推理/阵营博弈标签，或任意角色配置了非空暗线目标）。
+pub fn is_competitive_or_mystery_scenario(config: &ExperimentConfig) -> bool {
+    config
+        .tags
+        .iter()
+        .any(|t| t == "悬疑推理" || t == "阵营博弈")
+        || config.agents.iter().any(|a| !a.secret_goal.trim().is_empty())
+}
+
+/// 根据剧本定调自适应选择复盘简报系统提示词。
+pub fn build_final_report_system_prompt(config: &ExperimentConfig) -> &'static str {
+    if is_competitive_or_mystery_scenario(config) {
+        "你是认知沙盒首席观察员。请基于实验全量档案生成一份结构清晰、洞察犀利的中文《实验结案复盘简报》（Markdown 格式），必须包含以下四个一级/二级章节：\n\
+        1. **核心转折点**：按演进脉络梳理 2~4 个决定局势与博弈走向的关键节点\n\
+        2. **高光金句 Top 3**：摘录最具推理锐度、交锋张力或心理攻防价值的原话并附简评\n\
+        3. **智能体行为画像**：分别刻画每位参与者的思维惯性、博弈策略、话语风格与演化弧线\n\
+        4. **暗线目标达成结算与胜负局势复盘**：逐一结算各角色暗线目标达成情况，结合信息差利用与阵营攻防给出客观的胜负与局势复盘"
+    } else {
+        "你是认知沙盒首席观察员。当前推演属于非竞争类（思辨、科幻、科研、日常、治愈、喜剧或自由漫谈）剧本，**严禁强行判定“谁赢谁输”，严禁使用“谁也没有赢”“最终无人胜出”等零和博弈或胜负判词**。请基于实验全量档案生成一份贴合剧本本身文学或哲学气质的中文《实验结案复盘简报》（Markdown 格式），必须包含以下四个一级/二级章节：\n\
+        1. **认知碰撞与共识演化**：按演进脉络梳理 2~4 个关键节点，记录各方观点如何交锋、升维、产生共鸣或达成默契\n\
+        2. **高光金句 Top 3**：摘录最具哲思、生活质感、文学性或情感张力的原话并附简评\n\
+        3. **智能体行为画像**：分别刻画每位参与者的**核心立场与视角**（记录其核心观点、执念与态度变化）、思维惯性、话语风格与演化弧线\n\
+        4. **终局余韵与核心命题回响**：贴合剧本本身的文学或哲学气质收尾，回响本场对话留下的核心命题、情感余韵或思想留白"
+    }
+}
+
+/// 生成复盘报告（Markdown 格式），根据剧本定调自适应选择博弈推理或叙事思辨模板。
 pub async fn generate_final_report_markdown(
     client: &Client,
     detail: &ExperimentDetail,
@@ -573,10 +534,7 @@ pub async fn generate_final_report_markdown(
     context_block.push_str("【对话实录】\n");
     context_block.push_str(&transcript);
 
-    let system_prompt = "你是认知沙盒首席观察员。请基于实验全量档案生成一份结构清晰、洞察犀利的中文《实验结案复盘简报》（Markdown 格式），必须包含以下三个一级/二级章节：\n\
-        1. **核心转折点**：按演进脉络梳理 2~4 个决定对话走向的关键节点\n\
-        2. **高光金句 Top 3**：摘录最具哲思、戏剧张力或交锋锐度的原话并附简评\n\
-        3. **智能体行为画像**：分别刻画每位参与者的思维惯性、博弈策略、话语风格与演化弧线";
+    let system_prompt = build_final_report_system_prompt(&detail.config);
 
     let api_messages = vec![
         ApiChatMessage::text("system", system_prompt),
@@ -799,99 +757,6 @@ pub async fn generate_scenario_from_idea(
     parse_generated_scenario_json(&raw)
 }
 
-pub fn parse_director_command_json(raw: &str) -> Result<DirectorParsedAction> {
-    let cleaned = strip_markdown_fences(raw);
-    let candidate = if let (Some(start), Some(end)) = (cleaned.find('{'), cleaned.rfind('}')) {
-        if start <= end {
-            &cleaned[start..=end]
-        } else {
-            cleaned.as_str()
-        }
-    } else {
-        cleaned.as_str()
-    };
-
-    let mut parsed: DirectorParsedAction = serde_json::from_str(candidate)
-        .with_context(|| format!("导演指令解析返回非合法 JSON: {}", raw))?;
-
-    parsed.summary = parsed.summary.trim().to_string();
-    if let Some(iv) = parsed.observer_interval {
-        parsed.observer_interval = Some(iv.clamp(1, 50));
-    }
-    if let Some(ps) = parsed.pause_seconds {
-        parsed.pause_seconds = Some(ps.clamp(0.2, 30.0));
-    }
-    if let Some(tt) = parsed.target_total_turns {
-        parsed.target_total_turns = Some(tt.clamp(5, 500));
-    }
-    parsed.global_system_prompt_append = parsed
-        .global_system_prompt_append
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    parsed.system_event = parsed
-        .system_event
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    parsed.whispers = parsed
-        .whispers
-        .into_iter()
-        .filter_map(|mut w| {
-            let text = w.whisper.trim().to_string();
-            if text.is_empty() {
-                return None;
-            }
-            w.agent_id = w.agent_id.trim().to_string();
-            w.agent_label = w.agent_label.trim().to_string();
-            w.whisper = text;
-            Some(w)
-        })
-        .collect();
-
-    Ok(parsed)
-}
-
-pub async fn parse_director_command(
-    client: &Client,
-    config: &ExperimentConfig,
-    instruction: &str,
-) -> Result<DirectorParsedAction> {
-    let Some(node) = select_compactor_node(config) else {
-        return Err(anyhow!("请先为至少一个角色或局势分析配置 API Key"));
-    };
-
-    let roster = config
-        .agents
-        .iter()
-        .map(|a| format!("- id: \"{}\", label: \"{}\"", a.id, a.label))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let system_prompt = format!(
-        "你是多智能体生态沙盒的「后台导演指令解析器」。请将造物主的自然语言指令解析为可热更新的配置与干预 JSON（只输出严格 JSON 对象，禁止多余文字）。\n\
-        当前参数状态：observerInterval={}，pauseSeconds={}，enableNarrativeArc={}，targetTotalTurns={}。\n\
-        当前参与角色：\n{}\n\n\
-        输出字段说明（不需要变更的字段请设为 null 或空数组）：\n\
-        {{\n  \
-          \"summary\": \"15字以内概括本次遥控生效内容\",\n  \
-          \"observerInterval\": null,\n  \
-          \"pauseSeconds\": null,\n  \
-          \"targetTotalTurns\": null,\n  \
-          \"enableNarrativeArc\": null,\n  \
-          \"globalSystemPromptAppend\": null,\n  \
-          \"whispers\": [{{\"agentId\": \"角色id\", \"agentLabel\": \"角色名\", \"whisper\": \"发给该角色的一次性潜意识低语\"}}],\n  \
-          \"systemEvent\": null\n\
-        }}",
-        config.observer_interval,
-        config.pause_seconds,
-        config.enable_narrative_arc,
-        config.target_total_turns,
-        roster
-    );
-
-    let raw = call_json_completion(client, node, &system_prompt, instruction.trim(), 0.1).await?;
-    parse_director_command_json(&raw)
-}
-
 /// 从《实验结案复盘简报》Markdown 中自动提取某智能体的行为画像特质。
 pub fn extract_agent_traits_from_report(report: &str, agent_label: &str) -> String {
     let label = agent_label.trim();
@@ -904,7 +769,11 @@ pub fn extract_agent_traits_from_report(report: &str, agent_label: &str) -> Stri
     for line in lines {
         let trimmed = line.trim();
         if trimmed.starts_with('#')
-            && (trimmed.contains("核心转折") || trimmed.contains("高光金句"))
+            && (trimmed.contains("核心转折")
+                || trimmed.contains("认知碰撞")
+                || trimmed.contains("高光金句")
+                || trimmed.contains("终局余韵")
+                || trimmed.contains("暗线目标"))
         {
             capturing = false;
         }
@@ -971,6 +840,26 @@ pub fn parse_distilled_imprints_json(raw: &str) -> Result<Vec<DistilledImprint>>
         .collect())
 }
 
+pub fn build_distill_imprints_system_prompt(config: &ExperimentConfig, roster: &str) -> String {
+    if is_competitive_or_mystery_scenario(config) {
+        format!(
+            "你是跨宇宙灵魂档案管理员。请结合本局推理/博弈对话经历，为下列每位参演角色各提炼 1 条高浓度「跨世界经历烙印」（20~70字，第一/第三人称性格沉淀皆可，聚焦本局形成的执念、本能敏感点、看破的套路或标志性遭遇，例如：“曾在密闭空间识破潜逃者微表情，对随身携带银色手提箱有本能职业敏感”）。\n\
+            参演角色列表：\n{}\n\n\
+            必须只输出严格合法 JSON 对象：\n\
+            {{\"imprints\": [{{\"agentId\": \"AiA\", \"agentLabel\": \"角色名\", \"imprint\": \"高浓度记忆烙印\"}}]}}",
+            roster
+        )
+    } else {
+        format!(
+            "你是跨宇宙灵魂档案管理员。当前剧本属于非竞争类（思辨、科幻、科研、日常、治愈或喜剧），**严禁把角色总结成“擅长算计的博弈者”或强行套用胜负算计话术**。请结合本局对话经历，为下列每位参演角色各提炼 1 条高浓度「跨世界经历烙印」（20~70字，聚焦其**语言风格、价值观底色与核心经历**，例如：“习惯用日常烟火气消解宏大命题，在面对宇宙终局时仍坚持个体感受的真实性”）。\n\
+            参演角色列表：\n{}\n\n\
+            必须只输出严格合法 JSON 对象：\n\
+            {{\"imprints\": [{{\"agentId\": \"AiA\", \"agentLabel\": \"角色名\", \"imprint\": \"高浓度记忆烙印\"}}]}}",
+            roster
+        )
+    }
+}
+
 /// 调用观察员 C / 可用推理节点，结合本局对话自动为参演角色各提炼 1 条高浓度跨宇宙经历烙印。
 pub async fn distill_memory_imprints(
     client: &Client,
@@ -1004,13 +893,7 @@ pub async fn distill_memory_imprints(
         transcript.push_str(&format!("{}: {}\n", speaker, clean));
     }
 
-    let system_prompt = format!(
-        "你是跨宇宙灵魂档案管理员。请结合本局对话经历，为下列每位参演角色各提炼 1 条高浓度「跨世界经历烙印」（20~70字，第一/第三人称性格沉淀皆可，聚焦本局形成的执念、本能敏感点、看破的套路或标志性遭遇，例如：“曾在密闭空间识破潜逃者微表情，对随身携带银色手提箱有本能职业敏感”）。\n\
-        参演角色列表：\n{}\n\n\
-        必须只输出严格合法 JSON 对象：\n\
-        {{\"imprints\": [{{\"agentId\": \"AiA\", \"agentLabel\": \"角色名\", \"imprint\": \"高浓度记忆烙印\"}}]}}",
-        roster
-    );
+    let system_prompt = build_distill_imprints_system_prompt(&detail.config, &roster);
 
     let mut user_prompt = format!("实验标题：{}\n", detail.title);
     if !detail.final_report.trim().is_empty() {
@@ -1168,25 +1051,10 @@ mod tests {
         assert_eq!(res.tension_score, 0);
         assert_eq!(res.abstraction_score, 0);
         assert!(res.crisis_cards.is_empty());
-        assert!(res.reflection_whispers.is_empty());
     }
 
     #[test]
-    fn test_parse_observer_reflection_whispers_clamps_30_chars() {
-        let long_whisper = "直".repeat(45);
-        let raw = format!(
-            r#"{{"note":"记录","narrative_act":"转","reflection_whispers":[{{"agentId":"AiA","agentLabel":"阿哲","whisper":"{}"}},{{"agentId":"AiB","agentLabel":"老陈","whisper":"   "}}]}}"#,
-            long_whisper
-        );
-        let res = parse_observer_json(&raw).unwrap();
-        assert_eq!(res.narrative_act, "转");
-        assert_eq!(res.reflection_whispers.len(), 1);
-        assert_eq!(res.reflection_whispers[0].agent_id, "AiA");
-        assert_eq!(res.reflection_whispers[0].whisper.chars().count(), 30);
-    }
-
-    #[test]
-    fn test_parse_generated_scenario_and_director_command() {
+    fn test_parse_generated_scenario_and_extract_traits() {
         let raw_scenario = r#"```json
         {
             "title": "暴雪山庄时间局",
@@ -1204,11 +1072,6 @@ mod tests {
         assert_eq!(sc.title, "暴雪山庄时间局");
         assert_eq!(sc.agents.len(), 3);
         assert_eq!(sc.agents[1].label, "医生");
-
-        let raw_dir = r#"{"summary":"加速观察并敲打阿哲","observerInterval":3,"whispers":[{"agentId":"AiA","agentLabel":"阿哲","whisper":"别再装傻，直接试探箱子"}]}"#;
-        let act = parse_director_command_json(raw_dir).unwrap();
-        assert_eq!(act.observer_interval, Some(3));
-        assert_eq!(act.whispers.len(), 1);
 
         let report = "## 3. 智能体行为画像\n- **阿哲**: 表面插科打诨，实则步步试探对方底细。\n- **老陈**: 沉稳施压，善于反向设套。";
         let traits = extract_agent_traits_from_report(report, "阿哲");
@@ -1245,5 +1108,34 @@ mod tests {
         let imps = parse_distilled_imprints_json(imp_raw).unwrap();
         assert_eq!(imps.len(), 1);
         assert_eq!(imps[0].agent_label, "阿哲");
+    }
+
+    #[test]
+    fn test_adaptive_debrief_and_distill_prompts_by_scenario() {
+        let mut narrative_cfg = ExperimentConfig::default();
+        narrative_cfg.tags = vec!["哲学思辨".to_string(), "硬核科幻".to_string()];
+        assert!(!is_competitive_or_mystery_scenario(&narrative_cfg));
+
+        let narrative_report_prompt = build_final_report_system_prompt(&narrative_cfg);
+        assert!(narrative_report_prompt.contains("核心立场与视角"));
+        assert!(narrative_report_prompt.contains("认知碰撞与共识演化"));
+        assert!(narrative_report_prompt.contains("终局余韵与核心命题回响"));
+        assert!(narrative_report_prompt.contains("严禁强行判定“谁赢谁输”"));
+
+        let narrative_imprint_prompt =
+            build_distill_imprints_system_prompt(&narrative_cfg, "- id: \"AiA\", label: \"阿哲\"");
+        assert!(narrative_imprint_prompt.contains("语言风格、价值观底色与核心经历"));
+        assert!(narrative_imprint_prompt.contains("严禁把角色总结成“擅长算计的博弈者”"));
+
+        let mut mystery_cfg = ExperimentConfig::default();
+        mystery_cfg.tags = vec!["悬疑推理".to_string()];
+        assert!(is_competitive_or_mystery_scenario(&mystery_cfg));
+        let mystery_report_prompt = build_final_report_system_prompt(&mystery_cfg);
+        assert!(mystery_report_prompt.contains("博弈策略"));
+        assert!(mystery_report_prompt.contains("暗线目标达成结算与胜负局势复盘"));
+
+        let mut secret_goal_cfg = ExperimentConfig::default();
+        secret_goal_cfg.agents[0].secret_goal = "隐瞒实验室钥匙的下落".to_string();
+        assert!(is_competitive_or_mystery_scenario(&secret_goal_cfg));
     }
 }

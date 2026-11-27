@@ -12,7 +12,8 @@ import {
   Check,
 } from "lucide-vue-next";
 import { invoke } from "@tauri-apps/api/core";
-import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
+import { saveTextWithDialog, openTextWithDialog } from "../utils/fileActions";
+import { writeClipboardText } from "../utils/clipboard";
 import type { ApiProfile, ExperimentConfig, NodeConfig, ThemePreference, UiPrefs } from "../types";
 import { triggerHaptic } from "../utils/native";
 import {
@@ -147,7 +148,7 @@ function generateRandomLocalApiToken() {
 async function copyLocalApiToken() {
   if (!localApiTokenDraft.value) return;
   try {
-    await navigator.clipboard.writeText(localApiTokenDraft.value);
+    await writeClipboardText(localApiTokenDraft.value);
     emit("notify", "访问密钥已复制到剪贴板");
   } catch {
     emit("notify", "复制失败，请手动复制");
@@ -298,12 +299,12 @@ async function exportConfigJson() {
   if (!draft.value) return;
   const jsonText = JSON.stringify(draft.value, null, 2);
   try {
-    const filePath = await save({
+    const saved = await saveTextWithDialog({
       defaultPath: "ai-terrarium-config.json",
       filters: [{ name: "JSON", extensions: ["json"] }],
+      content: jsonText,
     });
-    if (filePath) {
-      await invoke("save_markdown_to_file", { path: filePath, content: jsonText });
+    if (saved) {
       emit("notify", "模型配置与设置已导出为 JSON");
     }
   } catch (err: any) {
@@ -313,13 +314,11 @@ async function exportConfigJson() {
 
 async function triggerImportJson() {
   try {
-    const selected = await openDialog({
-      multiple: false,
+    const picked = await openTextWithDialog({
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
-    if (!selected || Array.isArray(selected)) return;
-    const text = await invoke<string>("read_text_file", { path: selected });
-    const parsed = JSON.parse(text);
+    if (!picked) return;
+    const parsed = JSON.parse(picked.content);
     if (!parsed || typeof parsed !== "object") {
       throw new Error("无效的 JSON 对象");
     }
@@ -351,9 +350,6 @@ function normalizeImportedConfig(raw: any): ExperimentConfig {
     agents = raw.agents.map((a: any, i: number) =>
       normalizeNode(a, `ai-${i + 1}`, `角色 ${i + 1}`)
     );
-  } else if (raw?.nodeA || raw?.nodeB) {
-    if (raw.nodeA) agents.push(normalizeNode(raw.nodeA, "AiA", "角色 1"));
-    if (raw.nodeB) agents.push(normalizeNode(raw.nodeB, "AiB", "角色 2"));
   }
   if (agents.length === 0) {
     agents = JSON.parse(JSON.stringify(fallback.agents));
@@ -404,10 +400,6 @@ function normalizeImportedConfig(raw: any): ExperimentConfig {
       typeof raw?.initialBoard === "string"
         ? raw.initialBoard
         : (fallback.initialBoard ?? ""),
-    enablePrefixCacheOpt:
-      typeof raw?.enablePrefixCacheOpt === "boolean"
-        ? raw.enablePrefixCacheOpt
-        : (fallback.enablePrefixCacheOpt ?? true),
     enableCompactionGuard:
       typeof raw?.enableCompactionGuard === "boolean"
         ? raw.enableCompactionGuard
@@ -420,20 +412,6 @@ function normalizeImportedConfig(raw: any): ExperimentConfig {
       typeof raw?.enableSmartSelector === "boolean"
         ? raw.enableSmartSelector
         : (fallback.enableSmartSelector ?? true),
-    enableAdaptiveReasoning:
-      typeof raw?.enableAdaptiveReasoning === "boolean"
-        ? raw.enableAdaptiveReasoning
-        : (fallback.enableAdaptiveReasoning ?? false),
-    adaptiveLowReasoningEffort:
-      raw?.adaptiveLowReasoningEffort === "minimal" ||
-      raw?.adaptiveLowReasoningEffort === "low" ||
-      raw?.adaptiveLowReasoningEffort === "medium"
-        ? raw.adaptiveLowReasoningEffort
-        : (fallback.adaptiveLowReasoningEffort ?? "low"),
-    enablePeriodicReflection:
-      typeof raw?.enablePeriodicReflection === "boolean"
-        ? raw.enablePeriodicReflection
-        : (fallback.enablePeriodicReflection ?? false),
     enableAutoDirector:
       typeof raw?.enableAutoDirector === "boolean"
         ? raw.enableAutoDirector
@@ -889,14 +867,6 @@ defineExpose({
                 <ToggleSwitch v-model="draft.enableSmartSelector" />
               </div>
 
-              <div class="flex items-center justify-between gap-3">
-                <div class="min-w-0">
-                  <div class="text-[13px] font-medium text-[#25262A]">后台直觉提示</div>
-                  <div class="text-[11.5px] text-[#858A95] mt-0.5">分析局势时为角色生成简短直觉提示。</div>
-                </div>
-                <ToggleSwitch v-model="draft.enablePeriodicReflection" />
-              </div>
-
               <div class="space-y-2.5">
                 <div class="flex items-center justify-between gap-3">
                   <div class="min-w-0">
@@ -1012,54 +982,10 @@ defineExpose({
             <div class="space-y-4">
               <div class="flex items-center justify-between gap-3">
                 <div class="min-w-0">
-                  <div class="text-[13px] font-medium text-[#25262A]">提示词缓存优化</div>
-                  <div class="text-[11.5px] text-[#858A95] mt-0.5">固定角色设定顺序以复用平台缓存折扣。</div>
-                </div>
-                <ToggleSwitch v-model="draft.enablePrefixCacheOpt" />
-              </div>
-
-              <div class="flex items-center justify-between gap-3">
-                <div class="min-w-0">
                   <div class="text-[13px] font-medium text-[#25262A]">防循环自动暂停</div>
                   <div class="text-[11.5px] text-[#858A95] mt-0.5">上下文过小导致频繁压缩时自动暂停。</div>
                 </div>
                 <ToggleSwitch v-model="draft.enableCompactionGuard" />
-              </div>
-
-              <div class="space-y-2">
-                <div class="flex items-center justify-between gap-3">
-                  <div class="min-w-0">
-                    <div class="text-[13px] font-medium text-[#25262A]">动态推理深度</div>
-                    <div class="text-[11.5px] text-[#858A95] mt-0.5">平淡对话降低开销，冲突或收尾恢复完整推理。</div>
-                  </div>
-                  <ToggleSwitch v-model="draft.enableAdaptiveReasoning" />
-                </div>
-                <div
-                  v-if="draft.enableAdaptiveReasoning"
-                  class="flex flex-wrap items-center justify-between gap-2 pl-3 py-1.5 border-l-2 border-[#E5E5EA]"
-                >
-                  <span class="text-[12px] text-[#666B76]">低冲突档位</span>
-                  <div class="flex p-0.5 rounded-[8px] bg-[#F2F2F5]">
-                    <button
-                      v-for="tier in [
-                        { id: 'minimal', label: 'minimal' },
-                        { id: 'low', label: 'low' },
-                        { id: 'medium', label: 'medium' },
-                      ]"
-                      :key="tier.id"
-                      type="button"
-                      @click="draft.adaptiveLowReasoningEffort = tier.id"
-                      class="px-2.5 py-1 rounded-[6px] text-[11px] font-mono font-medium transition"
-                      :class="
-                        (draft.adaptiveLowReasoningEffort ?? 'low') === tier.id
-                          ? 'bg-white text-[#25262A] shadow-2xs'
-                          : 'text-[#666B76] hover:text-[#25262A]'
-                      "
-                    >
-                      {{ tier.label }}
-                    </button>
-                  </div>
-                </div>
               </div>
 
               <div class="pt-4 border-t border-[#ECECF0] space-y-4">

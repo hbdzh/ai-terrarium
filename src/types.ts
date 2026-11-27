@@ -25,6 +25,7 @@ export interface NodeConfig {
   secretGoal?: string;
   goalAchieved?: boolean;
   privateStateSnapshot?: string;
+  hasLeft?: boolean;
 }
 
 export interface TimedClue {
@@ -79,13 +80,9 @@ export interface ExperimentConfig {
   boardApprovalMode?: BoardApprovalMode;
   enableBoardTools?: boolean;
   initialBoard?: string;
-  enablePrefixCacheOpt?: boolean;
   enableCompactionGuard?: boolean;
   enablePrivateNotes?: boolean;
   enableSmartSelector?: boolean;
-  enableAdaptiveReasoning?: boolean;
-  adaptiveLowReasoningEffort?: "minimal" | "low" | "medium" | string;
-  enablePeriodicReflection?: boolean;
   enableAutoDirector?: boolean;
   enableNarrativeArc?: boolean;
   targetTotalTurns?: number;
@@ -242,12 +239,6 @@ export interface ExperimentDetail {
   observerNotes: ObserverNote[];
   createdAt: string;
   updatedAt: string;
-}
-
-export interface InterventionInput {
-  kind: SpeakerRole;
-  agentId?: string | null;
-  content: string;
 }
 
 export type StreamEvent =

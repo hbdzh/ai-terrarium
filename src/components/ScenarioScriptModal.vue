@@ -58,7 +58,7 @@ const emit = defineEmits<{
 
 const draft = ref<ExperimentConfig | null>(null);
 const initialSnapshot = ref("");
-const inheritCardMemory = ref(true);
+const inheritCardMemory = ref(false);
 const timedCluesOpen = ref(false);
 const saveAsPresetOpen = ref(false);
 const newPresetName = ref("");

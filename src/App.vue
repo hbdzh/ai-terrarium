@@ -2,8 +2,10 @@
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useWindowSize } from "@vueuse/core";
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Telescope, ClipboardList, X, Copy, Check, Code2, Scissors, ClipboardPaste, TextSelect, PanelLeft, PanelRight } from "lucide-vue-next";
-import { isMacOS, isWindows, isDesktopOS, isMobileOS } from "./utils/platform";
+import { isMacOS, isWindows, isDesktopOS, isMobileOS, isHarmonyOS } from "./utils/platform";
+import { saveTextWithDialog, saveBinaryWithDialog, openTextWithDialog } from "./utils/fileActions";
 import { writeClipboardText, readClipboardText } from "./utils/clipboard";
 import { warmupMarkdownParser } from "./utils/markdown";
 import { triggerHaptic } from "./utils/native";
@@ -67,7 +69,6 @@ watch(blindGuessMode, (enabled) => {
   invoke("set_blind_guess_mode", { enabled }).catch(() => {});
 });
 const forkTweakOpen = ref(false);
-const directorBusy = ref(false);
 const finalePromptVisible = ref(false);
 const queueLen = ref(0);
 const toastMessage = ref<string | null>(null);
@@ -102,14 +103,24 @@ const newExpOpen = ref(false);
 
 const { width: windowWidth, height: windowHeight } = useWindowSize();
 
+const isImeOpen = ref(false);
+let lastLandscapeBeforeIme = false;
+
 // 折叠屏 / 平板横屏触发双侧边栏桌面态；所有设备竖屏及直板/阔直板手机保持移动端视图
+// 软键盘弹出时冻结横屏分栏判定，避免视口高度变矮后卸载输入框导致键盘秒关
 const isFoldableOrTabletLandscape = computed(() => {
   if (!isMobileOS) return false;
+  if (isImeOpen.value) return lastLandscapeBeforeIme;
   const w = windowWidth.value;
   const h = windowHeight.value;
-  if (w <= h || w < 680) return false;
+  if (w <= h || w < 680) {
+    lastLandscapeBeforeIme = false;
+    return false;
+  }
   const ratio = w / Math.max(1, h);
-  return h >= 500 || (h >= 420 && ratio <= 1.78);
+  const result = h >= 500 || (h >= 420 && ratio <= 1.78);
+  lastLandscapeBeforeIme = result;
+  return result;
 });
 const isCompactAndroidDesktop = computed(
   () => isMobileOS && isFoldableOrTabletLandscape.value && windowWidth.value < 1060
@@ -158,6 +169,7 @@ const inspectorAnimating = ref(false);
 let inspectorAnimTimer: number | null = null;
 
 function triggerInspectorAnim() {
+  if (isMobileOS) return;
   inspectorAnimating.value = true;
   if (inspectorAnimTimer) window.clearTimeout(inspectorAnimTimer);
   inspectorAnimTimer = window.setTimeout(() => {
@@ -852,12 +864,33 @@ onMounted(async () => {
   if (isWindows) {
     document.documentElement.classList.add("win-acrylic");
   }
+  if (isMacOS) {
+    document.documentElement.classList.add("mac-vibrancy");
+  }
   if (isMobileOS) {
     document.documentElement.classList.add("mobile-os");
   }
   window.addEventListener("keydown", handleGlobalKeydown);
   window.addEventListener("contextmenu", handleDesktopContextMenu);
   window.addEventListener("mousedown", handleContextMenuPointerDown, true);
+  if (isMobileOS) {
+    window.addEventListener("focusin", (e) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "TEXTAREA" || target.tagName === "INPUT" || target.isContentEditable)) {
+        isImeOpen.value = true;
+      }
+    });
+    window.addEventListener("focusout", () => {
+      window.setTimeout(() => {
+        const active = document.activeElement as HTMLElement | null;
+        if (!active || (active.tagName !== "TEXTAREA" && active.tagName !== "INPUT" && !active.isContentEditable)) {
+          if (!document.documentElement.classList.contains("ime-open")) {
+            isImeOpen.value = false;
+          }
+        }
+      }, 150);
+    });
+  }
   const win = window as unknown as { __handleAndroidBack?: () => boolean };
   win.__handleAndroidBack = () => {
     if (promptModalOpen.value) {
@@ -902,13 +935,45 @@ onMounted(async () => {
     }
     return false;
   };
+  if (isHarmonyOS) {
+    const hasBackTarget = computed(
+      () =>
+        promptModalOpen.value ||
+        settingsOpen.value ||
+        scriptModalOpen.value ||
+        newExpOpen.value ||
+        forkTweakOpen.value ||
+        sheetLeftSidebarOpen.value ||
+        sheetInspectorOpen.value ||
+        (isMobile.value && mobileTab.value !== "stream")
+    );
+    watch(
+      hasBackTarget,
+      (active) => {
+        invoke("ohos_set_back_intercept", { active }).catch(() => {});
+      },
+      { immediate: true }
+    );
+    void listen("terrarium://native-back", () => {
+      win.__handleAndroidBack?.();
+    });
+  }
   const winIdle = window as unknown as {
     requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
   };
+  const warmAsyncPanels = () => {
+    warmupMarkdownParser();
+    void import("./components/ui/Sheet.vue");
+    void import("./components/ui/AdaptiveModal.vue");
+    void import("./components/SharedBoardDrawer.vue");
+    void import("./components/SettingsDrawer.vue");
+    void import("./components/NewExperimentModal.vue");
+    void import("./components/ScenarioScriptModal.vue");
+  };
   if (typeof winIdle.requestIdleCallback === "function") {
-    winIdle.requestIdleCallback(() => warmupMarkdownParser(), { timeout: 600 });
+    winIdle.requestIdleCallback(warmAsyncPanels, { timeout: 600 });
   } else {
-    window.setTimeout(() => warmupMarkdownParser(), isMobileOS ? 450 : 120);
+    window.setTimeout(warmAsyncPanels, isMobileOS ? 450 : 120);
   }
 
   const ch = new Channel<StreamEvent>();
@@ -1208,22 +1273,6 @@ async function enqueueIntervention(
   queueLen.value = len;
 }
 
-async function handleDirectorCommand(instruction: string) {
-  if (!experiment.value || directorBusy.value) return;
-  directorBusy.value = true;
-  try {
-    const summary = await invoke<string>("execute_director_command", {
-      experimentId: experiment.value.id,
-      instruction,
-    });
-    showToast(`🎬 ${summary}`);
-  } catch (err: any) {
-    showToast(`导演指令解析失败: ${err?.toString?.() ?? err}`);
-  } finally {
-    directorBusy.value = false;
-  }
-}
-
 async function handleStartPrivateRoom(memberIds: string[], turns: number) {
   if (!experiment.value) return;
   try {
@@ -1367,13 +1416,12 @@ async function handleExportScenario() {
   const jsonText = JSON.stringify(pkg, null, 2);
   const safeName = experiment.value.title.replace(/[\\/:*?"<>|]/g, "_");
   try {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const filePath = await save({
+    const saved = await saveTextWithDialog({
       defaultPath: `${safeName}.scenario.json`,
       filters: [{ name: "JSON", extensions: ["json"] }],
+      content: jsonText,
     });
-    if (filePath) {
-      await invoke("save_markdown_to_file", { path: filePath, content: jsonText });
+    if (saved) {
       showToast("剧本模板已导出（已自动脱敏 API Key）");
     }
   } catch (err: any) {
@@ -1388,15 +1436,12 @@ async function handleExportScenario() {
 
 async function handleImportScenario() {
   try {
-    const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
-    const selected = await openDialog({
-      multiple: false,
+    const picked = await openTextWithDialog({
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
-    if (!selected || Array.isArray(selected)) return;
-    const text = await invoke<string>("read_text_file", { path: selected });
-    const raw = JSON.parse(text);
-    const fallbackName = selected.split(/[\\/]/).pop()?.replace(/\.json$/i, "") || "导入剧本";
+    if (!picked) return;
+    const raw = JSON.parse(picked.content);
+    const fallbackName = picked.name.replace(/\.json$/i, "") || "导入剧本";
     const pkg: ScenarioPackage =
       raw && typeof raw === "object" && "config" in raw
         ? {
@@ -1439,13 +1484,12 @@ async function exportMarkdown() {
   });
   const safeName = experiment.value.title.replace(/[\\/:*?"<>|]/g, "_");
   try {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const filePath = await save({
+    const saved = await saveTextWithDialog({
       defaultPath: `${safeName}.md`,
       filters: [{ name: "Markdown", extensions: ["md"] }],
+      content: md,
     });
-    if (filePath) {
-      await invoke("save_markdown_to_file", { path: filePath, content: md });
+    if (saved) {
       showToast("Markdown 实验档案已导出");
     }
   } catch (err: any) {
@@ -1465,13 +1509,12 @@ async function exportPureMarkdown() {
   });
   const safeName = experiment.value.title.replace(/[\\/:*?"<>|]/g, "_");
   try {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const filePath = await save({
+    const saved = await saveTextWithDialog({
       defaultPath: `${safeName}_纯享剧本.md`,
       filters: [{ name: "Markdown", extensions: ["md"] }],
+      content: md,
     });
-    if (filePath) {
-      await invoke("save_markdown_to_file", { path: filePath, content: md });
+    if (saved) {
       showToast("纯享剧本 Markdown (.md) 已导出");
     }
   } catch (err: any) {
@@ -1490,16 +1533,12 @@ async function exportPurePng() {
     showToast("正在渲染 Apple 书卷风纯享剧本长图...");
     const bytes = await renderPureScriptPngBytes(experiment.value);
     const safeName = experiment.value.title.replace(/[\\/:*?"<>|]/g, "_");
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const filePath = await save({
+    const saved = await saveBinaryWithDialog({
       defaultPath: `${safeName}_纯享剧本.png`,
       filters: [{ name: "PNG Image", extensions: ["png"] }],
+      data: bytes,
     });
-    if (filePath) {
-      await invoke("save_binary_to_file", {
-        path: filePath,
-        data: Array.from(bytes),
-      });
+    if (saved) {
       showToast("纯享剧本长图 (.png) 已导出");
     }
   } catch (err: any) {
@@ -1520,16 +1559,12 @@ async function exportReplayMd() {
   try {
     const md = buildReplayHandoutMarkdown(experiment.value);
     const safeName = experiment.value.title.replace(/[\\/:*?"<>|]/g, "_");
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const filePath = await save({
+    const saved = await saveTextWithDialog({
       defaultPath: `${safeName}_剧本杀复盘手卡.md`,
       filters: [{ name: "Markdown", extensions: ["md"] }],
+      content: md,
     });
-    if (filePath) {
-      await invoke("save_markdown_to_file", {
-        path: filePath,
-        content: md,
-      });
+    if (saved) {
       showToast("剧本杀复盘手卡 (.md) 已导出");
     }
   } catch (err: any) {
@@ -1595,7 +1630,7 @@ async function copyRawPrompt() {
     id="app-main-shell"
     class="relative h-dvh w-screen flex flex-col overflow-hidden text-[#1D1D1F]"
     :class="[
-      isWindows ? 'bg-transparent' : isMobileOS && isDesktopSidebar && desktopLeftSidebarOpen ? 'bg-[#F9F9FB]' : 'bg-white',
+      (isWindows || isMacOS) ? 'bg-transparent' : isMobileOS && isDesktopSidebar && desktopLeftSidebarOpen ? 'bg-[#F9F9FB]' : 'bg-white',
       isMobileOS ? 'pl-[var(--safe-left,0px)] pr-[var(--safe-right,0px)]' : '',
     ]"
   >
@@ -1640,8 +1675,11 @@ async function copyRawPrompt() {
     <!-- Persistent Fixed Left Sidebar Toggle on non-Windows Desktop -->
     <div
       v-if="isDesktopSidebar && !isWindows"
-      class="pointer-events-none absolute top-0 left-0 z-30 h-[46px] flex items-center"
-      :class="isMacOS ? 'pl-[80px]' : 'pl-3'"
+      class="pointer-events-none absolute z-30 h-[46px] flex items-center"
+      :class="[
+        isMacOS ? 'pl-[80px]' : 'pl-3',
+        isMobileOS ? 'top-[var(--safe-top,env(safe-area-inset-top))] left-[var(--safe-left,0px)]' : 'top-0 left-0',
+      ]"
     >
       <button
         type="button"
@@ -1655,19 +1693,21 @@ async function copyRawPrompt() {
     <!-- Full-height Native Left Archive Sidebar (Desktop >= 1024px or Foldable/Tablet Landscape) -->
     <aside
       v-if="isDesktopSidebar"
-      class="shrink-0 h-full overflow-hidden transition-[width,opacity] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
-      :class="
+      class="shrink-0 h-full overflow-hidden"
+      :class="[
+        !isMobileOS ? 'transition-[width,opacity] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]' : '',
         desktopLeftSidebarOpen
           ? isCompactAndroidDesktop
             ? 'w-[204px] opacity-100'
             : 'w-[244px] opacity-100'
-          : 'w-0 opacity-0 pointer-events-none'
-      "
+          : 'w-0 opacity-0 pointer-events-none',
+      ]"
       :aria-hidden="!desktopLeftSidebarOpen"
     >
       <div
-        class="h-full transition-transform duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
+        class="h-full"
         :class="[
+          !isMobileOS ? 'transition-transform duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]' : '',
           isCompactAndroidDesktop ? 'w-[204px]' : 'w-[244px]',
           desktopLeftSidebarOpen ? 'translate-x-0' : '-translate-x-3',
         ]"
@@ -1735,19 +1775,25 @@ async function copyRawPrompt() {
     <div class="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
 
       <div
-        class="relative flex-1 min-h-0 flex flex-col overflow-hidden bg-white transition-[border-radius] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]"
-        :class="
+        class="relative flex-1 min-h-0 flex flex-col overflow-hidden bg-white"
+        :class="[
+          !isMobileOS ? 'transition-[border-radius] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]' : '',
           isWindows
             ? isDesktopSidebar && desktopLeftSidebarOpen
               ? 'md:rounded-tl-[12px] md:border-t md:border-l md:border-black/[0.06] md:shadow-[0_1px_14px_rgba(0,0,0,0.03)]'
               : 'md:rounded-t-[12px] md:border-t md:border-black/[0.06] md:shadow-[0_1px_14px_rgba(0,0,0,0.03)]'
-            : ''
-        "
+            : '',
+        ]"
       >
         <!-- Persistent Single Right Inspector Toggle at Top-Right Corner on Wide Desktop (hidden when in compact TitleBar) -->
         <div
           v-if="isWideDesktop && !(isWindows && titlebarLayoutMode === 'compact')"
-          class="pointer-events-none absolute top-0 right-3.5 z-30 h-[46px] flex items-center"
+          class="pointer-events-none absolute z-30 h-[46px] flex items-center"
+          :class="
+            isMobileOS
+              ? 'top-[var(--safe-top,env(safe-area-inset-top))] right-[calc(0.875rem+var(--safe-right,0px))]'
+              : 'top-0 right-3.5'
+          "
         >
           <button
             type="button"
@@ -1857,7 +1903,7 @@ async function copyRawPrompt() {
         <ResizablePanel
           :default-size="desktopInspectorOpen ? streamDefaultSize : 100"
           :min-size="streamMinPct"
-          :class="inspectorAnimating ? 'transition-[flex-grow] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]' : ''"
+          :class="!isMobileOS && inspectorAnimating ? 'transition-[flex-grow] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]' : ''"
         >
           <section class="relative flex-1 h-full flex flex-col bg-white min-w-0">
             <TopControlBar
@@ -1910,9 +1956,7 @@ async function copyRawPrompt() {
               :crisis-cards="latestCrisisCards"
               :observer-running="observerRunning"
               :active-private-room="experiment?.activePrivateRoom ?? null"
-              :director-busy="directorBusy"
               @submit="enqueueIntervention"
-              @director-command="handleDirectorCommand"
               @start-private-room="handleStartPrivateRoom"
               @close-private-room="handleClosePrivateRoom"
               @resolve-approval="handleResolveApproval"
@@ -1932,13 +1976,14 @@ async function copyRawPrompt() {
           :max-size="55"
           :collapsible="true"
           :collapsed-size="0"
-          :class="inspectorAnimating ? 'transition-[flex-grow] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]' : ''"
+          :class="!isMobileOS && inspectorAnimating ? 'transition-[flex-grow] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]' : ''"
           @collapse="desktopInspectorOpen = false"
           @expand="desktopInspectorOpen = true"
         >
           <aside
-            class="w-full h-full flex flex-col bg-white overflow-hidden transition-[opacity,transform] duration-220 ease-[cubic-bezier(0.22,1,0.36,1)]"
+            class="w-full h-full flex flex-col bg-white overflow-hidden"
             :class="[
+              !isMobileOS ? 'transition-[opacity,transform] duration-220 ease-[cubic-bezier(0.22,1,0.36,1)]' : '',
               isCompactAndroidDesktop ? 'min-w-0' : 'min-w-[280px]',
               desktopInspectorOpen ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-4 pointer-events-none',
             ]"
@@ -2077,9 +2122,7 @@ async function copyRawPrompt() {
             :crisis-cards="latestCrisisCards"
             :observer-running="observerRunning"
             :active-private-room="experiment?.activePrivateRoom ?? null"
-            :director-busy="directorBusy"
             @submit="enqueueIntervention"
-            @director-command="handleDirectorCommand"
             @start-private-room="handleStartPrivateRoom"
             @close-private-room="handleClosePrivateRoom"
             @resolve-approval="handleResolveApproval"

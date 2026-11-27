@@ -39,6 +39,7 @@ const props = defineProps<{
   reasoningContent: string;
   content: string;
   microCue?: string | null;
+  agentHasLeft?: boolean;
   isStreaming?: boolean;
   reasoningElapsedMs?: number;
   alignRight: boolean;
@@ -198,6 +199,13 @@ function submitEditReplay() {
 
         <span class="font-semibold truncate max-w-[160px] sm:max-w-[220px] md:text-[13.5px]" :class="palette.label">
           {{ agentLabel }}
+        </span>
+        <span
+          v-if="agentHasLeft"
+          class="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-400 border border-slate-200/70 text-[10.5px] font-medium shrink-0"
+          title="该角色已主动退场"
+        >
+          已离场
         </span>
         <span
           v-if="microCue"

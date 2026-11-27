@@ -87,7 +87,10 @@ html.ime-open {
 
   html.win-acrylic,
   html.win-acrylic body,
-  html.win-acrylic #app {
+  html.win-acrylic #app,
+  html.mac-vibrancy,
+  html.mac-vibrancy body,
+  html.mac-vibrancy #app {
     background: transparent !important;
   }
 
@@ -322,16 +325,55 @@ html.ime-open {
   }
 }
 
-/* Touch / Mobile WebView performance tuning: avoid expensive full-screen GPU backdrop blurs */
+/* Touch / Mobile WebView performance tuning: avoid expensive GPU backdrop blurs, huge shadows & continuous animations */
 html.mobile-os .sheet-overlay,
 html.mobile-os [data-reka-dialog-overlay],
 html.mobile-os [data-vaul-overlay],
-html.mobile-os .backdrop-blur-md,
-html.mobile-os .backdrop-blur-xl,
-html.mobile-os .backdrop-blur-2xl,
-html.mobile-os .backdrop-blur-\[2px\] {
-  backdrop-filter: none !important;
+html.mobile-os [class*="backdrop-blur"] {
   -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+html.mobile-os .sheet-content-left,
+html.mobile-os .sheet-content-right,
+html.mobile-os .ds-modal-content,
+html.mobile-os [data-vaul-drawer] {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12) !important;
+  contain: layout style;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+html.mobile-os .sheet-overlay[data-state="open"],
+html.mobile-os .ds-modal-overlay[data-state="open"] {
+  animation-duration: 120ms !important;
+}
+
+html.mobile-os .sheet-overlay[data-state="closed"],
+html.mobile-os .ds-modal-overlay[data-state="closed"] {
+  animation-duration: 90ms !important;
+}
+
+html.mobile-os .sheet-content-left[data-state="open"],
+html.mobile-os .sheet-content-right[data-state="open"] {
+  animation-duration: 180ms !important;
+}
+
+html.mobile-os .sheet-content-left[data-state="closed"],
+html.mobile-os .sheet-content-right[data-state="closed"] {
+  animation-duration: 120ms !important;
+}
+
+html.mobile-os .ds-modal-content[data-state="open"] {
+  animation: ds-overlay-in 120ms ease-out forwards !important;
+}
+
+html.mobile-os .ds-modal-content[data-state="closed"] {
+  animation: ds-overlay-out 90ms ease-in forwards !important;
+}
+
+html.mobile-os .animate-ping {
+  animation: none !important;
 }
 
 .terrarium-msg-item {

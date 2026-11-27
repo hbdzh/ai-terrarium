@@ -676,17 +676,6 @@ defineExpose({ openReportModal });
           <div class="flex flex-wrap items-center gap-1.5">
             <button
               type="button"
-              @click="emit('distillImprints')"
-              :disabled="distillingImprints || totalTurns === 0"
-              class="flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium bg-[var(--ds-accent-soft)] hover:bg-[var(--ds-accent-soft-hover)] text-[var(--ds-accent)] transition disabled:opacity-40"
-              title="提取本局角色经历并存入角色库"
-            >
-              <RefreshCw v-if="distillingImprints" class="w-3.5 h-3.5 animate-spin" />
-              <Sparkles v-else class="w-3.5 h-3.5" />
-              <span>{{ distillingImprints ? "总结中..." : "总结经历到角色库" }}</span>
-            </button>
-            <button
-              type="button"
               @click="copyReport"
               :disabled="!(reportViewTab === 'comparison' ? (comparisonReport ?? '').trim() : finalReport.trim())"
               class="flex items-center gap-1 px-3 py-1 rounded-full text-xs bg-[#F5F5F7] hover:bg-[#EAEAEF] text-slate-700 disabled:opacity-40"
@@ -827,6 +816,17 @@ defineExpose({ openReportModal });
                   <Check v-if="savedAgentIds[ag.id]" class="w-3 h-3" />
                   <BookmarkPlus v-else class="w-3 h-3" />
                   <span>{{ savedAgentIds[ag.id] ? `已存 · ${ag.label}` : `存入 ${ag.label}` }}</span>
+                </button>
+                <button
+                  type="button"
+                  @click="emit('distillImprints')"
+                  :disabled="distillingImprints || totalTurns === 0"
+                  class="flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium border border-black/[0.08] bg-white hover:bg-slate-100 text-slate-500 hover:text-slate-700 transition-colors disabled:opacity-40"
+                  title="提取本局角色经历并存入角色库"
+                >
+                  <RefreshCw v-if="distillingImprints" class="w-3 h-3 animate-spin" />
+                  <Sparkles v-else class="w-3 h-3" />
+                  <span>{{ distillingImprints ? "总结中..." : "总结经历到角色库" }}</span>
                 </button>
               </div>
             </div>

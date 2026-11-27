@@ -1,8 +1,14 @@
 import "./bootstrap";
 import { createApp } from "vue";
 import "./style.css";
-import App from "./App.vue";
-import { applyAndroidInsetsFromBridge } from "./utils/native";
+import { initPlatformDetection } from "./utils/platform";
+import { applyNativeInsetsFromBridge } from "./utils/native";
 
-applyAndroidInsetsFromBridge();
-createApp(App).mount("#app");
+async function boot() {
+  await initPlatformDetection();
+  applyNativeInsetsFromBridge();
+  const { default: App } = await import("./App.vue");
+  createApp(App).mount("#app");
+}
+
+boot();

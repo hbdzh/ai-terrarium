@@ -1,0 +1,11 @@
+{
+  "app": {
+    "windows": [
+      {
+        "title": "AI 生态观察箱 · AI Terrarium",
+        "transparent": false,
+        "visible": true
+      }
+    ]
+  }
+}

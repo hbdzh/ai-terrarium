@@ -234,6 +234,26 @@ pub fn extract_micro_cue(raw: &str) -> (String, Option<String>) {
     (cleaned, cue)
 }
 
+/// 从模型回复中剥离主动退场标记 `[LEAVE]`（不区分大小写），返回 `(纯净正文, 是否退场)`。
+pub fn extract_leave_marker(raw: &str) -> (String, bool) {
+    let mut result = String::with_capacity(raw.len());
+    let mut has_left = false;
+    let mut rest = raw;
+
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(start) = lower.find("[leave]") else {
+            break;
+        };
+        has_left = true;
+        result.push_str(&rest[..start]);
+        rest = &rest[start + 7..];
+    }
+    result.push_str(rest);
+    let cleaned = result.trim().to_string();
+    (cleaned, has_left)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +335,20 @@ mod tests {
         let (clean2, cue2) = extract_micro_cue("确实没见过那把钥匙。");
         assert_eq!(clean2, "确实没见过那把钥匙。");
         assert_eq!(cue2, None);
+    }
+
+    #[test]
+    fn test_extract_leave_marker() {
+        let (clean, left) = extract_leave_marker("那我就先走了，保重。[LEAVE]");
+        assert_eq!(clean, "那我就先走了，保重。");
+        assert!(left);
+
+        let (clean_ci, left_ci) = extract_leave_marker("再见。 [leave] ");
+        assert_eq!(clean_ci, "再见。");
+        assert!(left_ci);
+
+        let (clean_none, left_none) = extract_leave_marker("我再想想看。");
+        assert_eq!(clean_none, "我再想想看。");
+        assert!(!left_none);
     }
 }

@@ -147,7 +147,9 @@ function cancelDelete() {
     :class="
       isWindows && !inSheet
         ? 'bg-transparent'
-        : 'bg-[#F9F9FB] border-r border-black/[0.035]'
+        : isMacOS && !inSheet
+          ? 'bg-[#F6F6F8]/55 dark:bg-[#141418]/55 border-r border-black/[0.06] dark:border-white/[0.08]'
+          : 'bg-[#F9F9FB] border-r border-black/[0.035]'
     "
   >
     <!-- Top New Experiment Row + Lightweight Search (ChatGPT/Codex Sidebar style) -->
@@ -204,7 +206,7 @@ function cancelDelete() {
     <!-- Middle History Experiments List (Single-line minimal items on desktop, rich on touch sheet) -->
     <div class="relative flex-1 min-h-0 flex flex-col">
       <div
-        v-if="!(isWindows && !inSheet)"
+        v-if="!((isWindows || isMacOS) && !inSheet)"
         class="pointer-events-none absolute inset-x-0 top-0 h-3.5 z-10 bg-gradient-to-b from-[#F9F9FB] via-[#F9F9FB]/80 to-transparent"
       ></div>
       <div class="flex-1 min-h-0 overflow-y-auto px-2.5 py-1.5 space-y-0.5">
@@ -267,7 +269,7 @@ function cancelDelete() {
       </TransitionGroup>
       </div>
       <div
-        v-if="!(isWindows && !inSheet)"
+        v-if="!((isWindows || isMacOS) && !inSheet)"
         class="pointer-events-none absolute inset-x-0 bottom-0 h-4 z-10 bg-gradient-to-t from-[#F9F9FB] via-[#F9F9FB]/85 to-transparent"
       ></div>
     </div>
@@ -413,11 +415,7 @@ function cancelDelete() {
     <!-- Bottom Fixed Action Area (Mobile/Sheet only) -->
     <div
       v-if="inSheet"
-      class="relative shrink-0 px-2.5 pt-1.5 space-y-0.5"
-      :class="[
-        'bg-[#F9F9FB]',
-        isMobileOS ? 'pb-[calc(0.65rem+var(--safe-bottom,env(safe-area-inset-bottom)))]' : 'pb-2.5',
-      ]"
+      class="relative shrink-0 px-2.5 pt-1.5 pb-2.5 space-y-0.5 bg-[#F9F9FB]"
     >
       <!-- Distill Memory Imprints to Character Library -->
       <button

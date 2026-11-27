@@ -221,6 +221,11 @@ function agentLabel(agentId: string | null, fallback?: string): string {
   return found?.label ?? fallback ?? agentId;
 }
 
+function isAgentLeft(agentId: string | null): boolean {
+  if (!agentId) return false;
+  return Boolean(agentsList.value.find((a) => a.id === agentId)?.hasLeft);
+}
+
 function agentStyle(agentId: string | null) {
   const idx = agentIndex(agentId);
   return {
@@ -442,6 +447,7 @@ function godMeta(role: SpeakerRole, agentId: string | null) {
         :reasoning-content="item.msg.reasoningContent ?? ''"
         :content="item.msg.content"
         :micro-cue="item.msg.microCue"
+        :agent-has-left="isAgentLeft(item.msg.agentId)"
         :align-right="agentStyle(item.msg.agentId).alignRight"
         :palette="agentStyle(item.msg.agentId).palette"
         :highlighted="highlightedTurn === item.msg.turnNumber"

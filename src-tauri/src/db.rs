@@ -11,52 +11,13 @@ use crate::models::{
     builtin_character_cards, builtin_presets, is_pass_notice, ActivePrivateRoom, ApiProfile,
     BoardApprovalMode, CharacterCard, CrisisCard, ExperimentConfig, ExperimentDetail,
     ExperimentSummary, ObserverNote, PresetTemplate, RelationshipEdge, SpeakerRole,
-    TimelineMessage, TurnSnapshot, UiPrefs, DEFAULT_CORE_ENGINE_PROMPT, LEGACY_CORE_ENGINE_PROMPT,
+    TimelineMessage, TurnSnapshot, UiPrefs, DEFAULT_CORE_ENGINE_PROMPT,
 };
 use crate::sanitizer::strip_think_tags;
 
 const CORE_ENGINE_PROMPT_KEY: &str = "core_engine_prompt";
 const UI_PREFS_KEY: &str = "ui_prefs";
 const API_PROFILES_KEY: &str = "api_profiles";
-const BUILTIN_PRESETS_VERSION_KEY: &str = "builtin_presets_version";
-const CURRENT_BUILTIN_PRESETS_VERSION: &str = "5";
-
-fn is_legacy_unmodified_builtin(p: &PresetTemplate) -> bool {
-    match p.id.as_str() {
-        "free" => {
-            p.is_builtin && p.recommended_config.is_none() && p.global_system_prompt.is_empty()
-        }
-        "late_night_friends" => p.is_builtin && p.recommended_config.is_none(),
-        "casual_chat" => {
-            (p.is_builtin && p.recommended_config.is_none())
-                || p.global_system_prompt
-                    == "你们正在一间深夜便利店里对话。请像真人发微信一样自然口语化，每次严格 3～5 句话（不超过 120 字），适当带动作括号描写（如（拧开瓶盖）（瞥了一眼门外）），禁止引文挑刺、禁止学术黑话、禁止客套说教与总结升华。"
-                || p.global_system_prompt.starts_with("【场景背景】深夜暴雨停电的街角便利店。")
-        }
-        "shared_apartment" | "space_station" | "missing_usb" => {
-            p.is_builtin && p.recommended_config.is_none()
-        }
-        "philosophy" => {
-            (p.global_system_prompt
-                == "本次实验聚焦高密度哲学思辨：禁止空泛情绪宣泄或敷衍认同，每次回应必须精准回应上一位发言者的核心命题并推进一层思辨纵深。"
-                || p.global_system_prompt.starts_with("【场景背景】高密度哲学思辨圆桌。"))
-                && p.initial_topic.is_empty()
-        }
-        "scifi" => {
-            (p.global_system_prompt
-                == "你们正在共同推演近未来人类文明演化沙盘：请尽量给出具体制度、技术细节与日常切片，善用共享白板沉淀已确立的世界观公理。"
-                || p.global_system_prompt.starts_with("【场景背景】近未来人类文明演化沙盘推演。"))
-                && p.initial_topic.is_empty()
-        }
-        "absurd" => {
-            (p.global_system_prompt
-                == "喜剧黄金法则：无论设定多么离谱，所有参与者都必须全程一本正经、绝不自己笑场或跳出设定吐槽。"
-                || p.global_system_prompt.starts_with("【场景背景】严肃荒诞喜剧现场。"))
-                && p.initial_topic.is_empty()
-        }
-        _ => false,
-    }
-}
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -217,65 +178,8 @@ impl Database {
             "INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES (?1, ?2, ?3)",
             params![CORE_ENGINE_PROMPT_KEY, DEFAULT_CORE_ENGINE_PROMPT, now],
         )?;
-        conn.execute(
-            "UPDATE app_settings SET value = ?1, updated_at = ?2 WHERE key = ?3 AND value = ?4",
-            params![
-                DEFAULT_CORE_ENGINE_PROMPT,
-                now,
-                CORE_ENGINE_PROMPT_KEY,
-                LEGACY_CORE_ENGINE_PROMPT
-            ],
-        )?;
 
-        let preset_version: Option<String> = conn
-            .query_row(
-                "SELECT value FROM app_settings WHERE key = ?1",
-                params![BUILTIN_PRESETS_VERSION_KEY],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if preset_version.as_deref() != Some(CURRENT_BUILTIN_PRESETS_VERSION) {
-            for obsolete_id in [
-                "philosophy",
-                "scifi",
-                "absurd",
-                "shared_apartment",
-                "space_station",
-                "missing_usb",
-            ] {
-                let existing_obsolete: Option<String> = conn
-                    .query_row(
-                        "SELECT data_json FROM preset_templates WHERE id = ?1",
-                        params![obsolete_id],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                if let Some(old_json) = existing_obsolete {
-                    if let Ok(old_preset) = serde_json::from_str::<PresetTemplate>(&old_json) {
-                        if is_legacy_unmodified_builtin(&old_preset) {
-                            conn.execute(
-                                "DELETE FROM preset_templates WHERE id = ?1",
-                                params![obsolete_id],
-                            )?;
-                        }
-                    }
-                }
-            }
-            conn.execute(
-                "INSERT INTO app_settings (key, value, updated_at)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(key) DO UPDATE SET
-                    value = excluded.value,
-                    updated_at = excluded.updated_at",
-                params![
-                    BUILTIN_PRESETS_VERSION_KEY,
-                    CURRENT_BUILTIN_PRESETS_VERSION,
-                    now
-                ],
-            )?;
-        }
-
-        // Seed built-in presets if not yet persisted, or upgrade unmodified legacy built-in presets
+        // Seed built-in presets if not yet persisted
         for (idx, preset) in builtin_presets().into_iter().enumerate() {
             let data_json = serde_json::to_string(&preset)?;
             let existing: Option<String> = conn
@@ -286,43 +190,17 @@ impl Database {
                 )
                 .optional()?;
 
-            match existing {
-                None => {
-                    conn.execute(
-                        "INSERT INTO preset_templates (id, sort_order, data_json, updated_at)
-                         VALUES (?1, ?2, ?3, ?4)",
-                        params![preset.id, idx as i64, data_json, now],
-                    )?;
-                }
-                Some(old_json) => {
-                    if let Ok(mut old_preset) = serde_json::from_str::<PresetTemplate>(&old_json) {
-                        if is_legacy_unmodified_builtin(&old_preset) {
-                            conn.execute(
-                                "UPDATE preset_templates
-                                 SET sort_order = ?1, data_json = ?2, updated_at = ?3
-                                 WHERE id = ?4",
-                                params![idx as i64, data_json, now, preset.id],
-                            )?;
-                        } else if old_preset.is_builtin
-                            && old_preset.tags.is_empty()
-                            && !preset.tags.is_empty()
-                        {
-                            old_preset.tags = preset.tags.clone();
-                            let patched_json = serde_json::to_string(&old_preset)?;
-                            conn.execute(
-                                "UPDATE preset_templates
-                                 SET sort_order = ?1, data_json = ?2, updated_at = ?3
-                                 WHERE id = ?4",
-                                params![idx as i64, patched_json, now, preset.id],
-                            )?;
-                        } else {
-                            conn.execute(
-                                "UPDATE preset_templates SET sort_order = ?1 WHERE id = ?2",
-                                params![idx as i64, preset.id],
-                            )?;
-                        }
-                    }
-                }
+            if existing.is_none() {
+                conn.execute(
+                    "INSERT INTO preset_templates (id, sort_order, data_json, updated_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![preset.id, idx as i64, data_json, now],
+                )?;
+            } else {
+                conn.execute(
+                    "UPDATE preset_templates SET sort_order = ?1 WHERE id = ?2",
+                    params![idx as i64, preset.id],
+                )?;
             }
         }
 
@@ -684,13 +562,6 @@ impl Database {
                     updated_at = excluded.updated_at",
                 params![normalized.id, sort_order, data_json, now],
             )?;
-        }
-        self.list_presets()
-    }
-
-    pub fn reset_builtin_preset(&self, preset_id: &str) -> Result<Vec<PresetTemplate>> {
-        if let Some(builtin) = builtin_presets().into_iter().find(|p| p.id == preset_id) {
-            return self.save_preset(&builtin);
         }
         self.list_presets()
     }
@@ -2270,53 +2141,5 @@ mod tests {
 
         db.delete_experiment(&exp2.id).unwrap();
         assert_eq!(db.list_experiments().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn test_legacy_v2_builtin_presets_migrate_cleanly_to_v4() {
-        let db = Database::open_in_memory().unwrap();
-        {
-            let conn = db.conn.lock().unwrap();
-            conn.execute("DELETE FROM preset_templates", []).unwrap();
-            conn.execute(
-                "DELETE FROM app_settings WHERE key = ?1",
-                params![BUILTIN_PRESETS_VERSION_KEY],
-            )
-            .unwrap();
-            let old_philosophy = PresetTemplate {
-                id: "philosophy".to_string(),
-                name: "哲学思辨局".to_string(),
-                description: "old".to_string(),
-                global_system_prompt: "【场景背景】高密度哲学思辨圆桌。\nold".to_string(),
-                initial_topic: String::new(),
-                tags: vec![],
-                agent_prompts: vec![],
-                is_builtin: true,
-                recommended_config: None,
-                node_a_label: "感性直觉派".to_string(),
-                node_a_prompt: "old".to_string(),
-                node_b_label: "理性解构派".to_string(),
-                node_b_prompt: "old".to_string(),
-            };
-            conn.execute(
-                "INSERT INTO preset_templates (id, sort_order, data_json, updated_at)
-                 VALUES (?1, 2, ?2, '2026-01-01T00:00:00Z')",
-                params![
-                    "philosophy",
-                    serde_json::to_string(&old_philosophy).unwrap()
-                ],
-            )
-            .unwrap();
-        }
-
-        db.init_schema().unwrap();
-        let migrated = db.list_presets().unwrap();
-        assert_eq!(migrated.len(), 12);
-        assert!(!migrated.iter().any(|p| p.id == "philosophy"));
-        assert!(migrated.iter().any(|p| p.id == "late_night_friends"));
-        assert!(migrated.iter().any(|p| p.id == "ai_night_slacking"));
-        assert!(migrated.iter().any(|p| p.id == "green_train_sleeper"));
-        assert!(migrated.iter().any(|p| p.id == "neutrino_anomaly"));
-        assert!(migrated.iter().any(|p| p.id == "heat_death_ark"));
     }
 }

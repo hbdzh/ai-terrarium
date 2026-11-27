@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "dialog",
+  "description": "Dialog capability for platforms supported by tauri-plugin-dialog",
+  "windows": [
+    "main"
+  ],
+  "platforms": [
+    "windows",
+    "macOS",
+    "linux",
+    "android",
+    "iOS"
+  ],
+  "permissions": [
+    "dialog:default",
+    "os:default",
+    "clipboard-manager:default"
+  ]
+}

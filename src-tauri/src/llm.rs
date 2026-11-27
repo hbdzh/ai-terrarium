@@ -69,7 +69,6 @@ pub fn resolve_chat_completions_url(base_url: &str) -> String {
 pub struct FlippedPromptPayload {
     pub messages: Vec<ApiChatMessage>,
     pub consumed_whisper_ids: Vec<String>,
-    pub has_recent_god_system: bool,
 }
 
 pub fn build_tag_redlines(tags: &[String]) -> String {
@@ -106,27 +105,7 @@ pub fn build_flipped_messages(
     build_flipped_messages_full(speaker_agent_id, config, timeline, "", 0, "", "")
 }
 
-#[allow(dead_code)]
-pub fn build_flipped_messages_with_memory(
-    speaker_agent_id: &str,
-    config: &ExperimentConfig,
-    timeline: &[TimelineMessage],
-    compacted_summary: &str,
-    compacted_until_seq: i64,
-    board_content: &str,
-) -> FlippedPromptPayload {
-    build_flipped_messages_full(
-        speaker_agent_id,
-        config,
-        timeline,
-        compacted_summary,
-        compacted_until_seq,
-        board_content,
-        "",
-    )
-}
-
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn build_flipped_messages_full(
     speaker_agent_id: &str,
     config: &ExperimentConfig,
@@ -232,7 +211,6 @@ pub fn build_flipped_messages_with_room(
         }
     }
     god_system_events.reverse();
-    let has_recent_god_system = !god_system_events.is_empty();
 
     let pending_whispers: Vec<&TimelineMessage> = timeline
         .iter()
@@ -504,10 +482,15 @@ pub fn build_flipped_messages_with_room(
                 .to_string(),
         );
     }
-    let prev_was_pass = timeline.last().is_some_and(is_pass_notice);
-    if config.allow_pass_turn && !prev_was_pass {
+    if config.allow_pass_turn && speaker_in_active_room.is_none() {
         status_items.push(
-            "【选择性沉默规则】若当前话题你毫无兴趣、插不上话或觉得没必要回应，可直接仅输出 [PASS] 跳过本轮，不必硬凑字数。"
+            "【选择性沉默规则】若当前话题你毫无兴趣、插不上话，或对话已自然收尾、角色已道别、你无新信息可补充，必须直接仅输出 [PASS] 跳过本轮，严禁复读他人的告别语或凑字数客套。"
+                .to_string(),
+        );
+    }
+    if !node_cfg.has_left && !timeline.is_empty() {
+        status_items.push(
+            "【主动退场指令（可选）】当你在剧情中决定彻底离开现场、关闭通讯或结束交谈不再参与后续对话时，可在最后一句台词末尾附带 [LEAVE]。"
                 .to_string(),
         );
     }
@@ -599,7 +582,6 @@ pub fn build_flipped_messages_with_room(
     FlippedPromptPayload {
         messages: result,
         consumed_whisper_ids,
-        has_recent_god_system,
     }
 }
 
@@ -650,11 +632,10 @@ impl ResolvedThinkingParams {
     }
 }
 
-/// 思考控制参数优先级裁决（本局直觉快反应 > 单智能体 thinking_level > 自适应张力降档）
+/// 思考控制参数优先级裁决（本局直觉快反应 > 单智能体 thinking_level）
 pub fn resolve_thinking_params(
     config: &ExperimentConfig,
     node: &NodeConfig,
-    adaptive_reasoning_effort: Option<&str>,
 ) -> ResolvedThinkingParams {
     let vendor = detect_thinking_vendor(&node.base_url, &node.model_name);
 
@@ -722,17 +703,7 @@ pub fn resolve_thinking_params(
                 ..Default::default()
             },
         },
-        _ => {
-            // "default"：不注入额外厂商思考参数，仅当启用自适应张力降档时延续现有降档策略
-            if let Some(effort) = adaptive_reasoning_effort {
-                ResolvedThinkingParams {
-                    reasoning_effort: Some(effort.to_string()),
-                    ..Default::default()
-                }
-            } else {
-                ResolvedThinkingParams::default()
-            }
-        }
+        _ => ResolvedThinkingParams::default(),
     }
 }
 
@@ -1496,12 +1467,13 @@ mod tests {
                 &format!("msg-{i}"),
             ));
         }
-        let payload = build_flipped_messages_with_memory(
+        let payload = build_flipped_messages_full(
             "AiA",
             &cfg,
             &timeline,
             "双方围绕时间与熵增达成初步共识。",
             14,
+            "",
             "",
         );
         // 历史纪要注入对话流开头，不污染 system 前缀缓存
@@ -1627,9 +1599,8 @@ mod tests {
             sample_msg(2, 1, SpeakerRole::GodSystem, None, "收音机响了"),
         ];
 
-        // 开启或关闭 enable_prefix_cache_opt 都走唯一洁净三段式
-        for cache_opt in [true, false] {
-            cfg.enable_prefix_cache_opt = cache_opt;
+        // 固定走唯一洁净三段式
+        {
             let p = build_flipped_messages_full(
                 "AiA",
                 &cfg,
@@ -1639,7 +1610,6 @@ mod tests {
                 "- 停电发生在凌晨三点",
                 "怀疑老陈在套话",
             );
-            assert!(p.has_recent_god_system);
 
             // 1. system 静态四层金字塔（不含动态白板/私密备忘/事件/纪要）
             let sys = p.messages[0].content_str();
@@ -1908,14 +1878,14 @@ mod tests {
         ];
 
         let payload = build_flipped_messages("AiA", &cfg, &timeline);
-        assert!(!payload.has_recent_god_system);
         assert!(!payload.messages[0].content_str().contains("【系统底层演戏总纲】"));
 
         let tail = payload.messages.last().unwrap().content_str();
         assert!(!tail.contains("看了一眼消息，没接话"));
         assert!(!tail.contains("【近期环境事件"));
         assert!(!tail.contains("【优先回应规则】"));
-        assert!(!tail.contains("【选择性沉默规则】"));
+        assert!(tail.contains("【选择性沉默规则】"));
+        assert!(tail.contains("[LEAVE]"));
     }
 
     #[test]
@@ -1939,7 +1909,7 @@ mod tests {
             "",
             None,
             &HashMap::new(),
-            crate::models::LEGACY_CORE_ENGINE_PROMPT,
+            crate::models::DEFAULT_CORE_ENGINE_PROMPT,
             None,
         );
         let sys = payload.messages[0].content_str();
@@ -1952,26 +1922,76 @@ mod tests {
     }
 
     #[test]
+    fn test_private_room_suppresses_pass_rule() {
+        let mut cfg = ExperimentConfig::default();
+        cfg.allow_pass_turn = true;
+        let room = ActivePrivateRoom {
+            room_id: "room-1".to_string(),
+            member_ids: vec!["AiA".to_string(), "AiB".to_string()],
+            remaining_turns: 2,
+            title: "里屋".to_string(),
+        };
+        let mut room_members = HashMap::new();
+        room_members.insert(
+            "room-1".to_string(),
+            vec!["AiA".to_string(), "AiB".to_string()],
+        );
+
+        let payload_in_room = build_flipped_messages_with_room(
+            "AiA",
+            &cfg,
+            &[],
+            "",
+            0,
+            "",
+            "",
+            Some(&room),
+            &room_members,
+            "",
+            None,
+        );
+        let tail_in_room = payload_in_room.messages.last().unwrap().content_str();
+        assert!(!tail_in_room.contains("【选择性沉默规则】"));
+        assert!(!tail_in_room.contains("[PASS]"));
+
+        let payload_no_room = build_flipped_messages_with_room(
+            "AiA",
+            &cfg,
+            &[],
+            "",
+            0,
+            "",
+            "",
+            None,
+            &room_members,
+            "",
+            None,
+        );
+        let tail_no_room = payload_no_room.messages.last().unwrap().content_str();
+        assert!(tail_no_room.contains("【选择性沉默规则】"));
+    }
+
+    #[test]
     fn test_thinking_params_priority_and_vendor_mapping() {
         let mut cfg = ExperimentConfig::default();
         cfg.intuitive_fast_reply = false;
 
-        // 1. "default" injects nothing when adaptive reasoning is inactive
+        // 1. "default" injects nothing
         let mut openai_node = cfg.agents[0].clone();
         openai_node.base_url = "https://api.openai.com/v1".to_string();
         openai_node.model_name = "o3-mini".to_string();
         openai_node.thinking_level = "default".to_string();
-        assert!(resolve_thinking_params(&cfg, &openai_node, None).is_empty());
+        assert!(resolve_thinking_params(&cfg, &openai_node).is_empty());
 
         // 2. OpenAI standard mapping: off -> "none", low/medium/high -> matching effort
         openai_node.thinking_level = "off".to_string();
         assert_eq!(
-            resolve_thinking_params(&cfg, &openai_node, None).reasoning_effort.as_deref(),
+            resolve_thinking_params(&cfg, &openai_node).reasoning_effort.as_deref(),
             Some("none")
         );
         openai_node.thinking_level = "high".to_string();
         assert_eq!(
-            resolve_thinking_params(&cfg, &openai_node, None).reasoning_effort.as_deref(),
+            resolve_thinking_params(&cfg, &openai_node).reasoning_effort.as_deref(),
             Some("high")
         );
 
@@ -1980,17 +2000,17 @@ mod tests {
         qwen_node.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string();
         qwen_node.model_name = "qwen-plus".to_string();
         qwen_node.thinking_level = "off".to_string();
-        let qwen_off = resolve_thinking_params(&cfg, &qwen_node, None);
+        let qwen_off = resolve_thinking_params(&cfg, &qwen_node);
         assert_eq!(qwen_off.enable_thinking, Some(false));
         assert_eq!(qwen_off.thinking_budget, None);
 
         qwen_node.thinking_level = "medium".to_string();
-        let qwen_med = resolve_thinking_params(&cfg, &qwen_node, None);
+        let qwen_med = resolve_thinking_params(&cfg, &qwen_node);
         assert_eq!(qwen_med.enable_thinking, Some(true));
         assert_eq!(qwen_med.thinking_budget, Some(4096));
 
         qwen_node.thinking_level = "high".to_string();
-        let qwen_high = resolve_thinking_params(&cfg, &qwen_node, None);
+        let qwen_high = resolve_thinking_params(&cfg, &qwen_node);
         assert_eq!(qwen_high.enable_thinking, Some(true));
         assert_eq!(qwen_high.thinking_budget, Some(16384));
 
@@ -1999,25 +2019,25 @@ mod tests {
         ds_node.base_url = "https://ark.cn-beijing.volces.com/api/v3".to_string();
         ds_node.model_name = "doubao-seed".to_string();
         ds_node.thinking_level = "off".to_string();
-        let ds_off = resolve_thinking_params(&cfg, &ds_node, None);
+        let ds_off = resolve_thinking_params(&cfg, &ds_node);
         assert_eq!(ds_off.thinking.as_ref().map(|t| t.kind.as_str()), Some("disabled"));
         assert_eq!(ds_off.reasoning_effort, None);
 
         ds_node.thinking_level = "low".to_string();
-        let ds_low = resolve_thinking_params(&cfg, &ds_node, None);
+        let ds_low = resolve_thinking_params(&cfg, &ds_node);
         assert_eq!(ds_low.thinking.as_ref().map(|t| t.kind.as_str()), Some("enabled"));
         assert_eq!(ds_low.reasoning_effort.as_deref(), Some("low"));
 
         // 5. Priority 1: intuitive_fast_reply overrides any agent thinking_level ("high")
         cfg.intuitive_fast_reply = true;
-        let fast_qwen = resolve_thinking_params(&cfg, &qwen_node, None);
+        let fast_qwen = resolve_thinking_params(&cfg, &qwen_node);
         assert_eq!(fast_qwen.enable_thinking, Some(false));
         assert_eq!(fast_qwen.thinking_budget, None);
 
-        let fast_ds = resolve_thinking_params(&cfg, &ds_node, None);
+        let fast_ds = resolve_thinking_params(&cfg, &ds_node);
         assert_eq!(fast_ds.thinking.as_ref().map(|t| t.kind.as_str()), Some("disabled"));
 
-        let fast_openai = resolve_thinking_params(&cfg, &openai_node, None);
+        let fast_openai = resolve_thinking_params(&cfg, &openai_node);
         assert_eq!(fast_openai.reasoning_effort.as_deref(), Some("minimal"));
     }
 
