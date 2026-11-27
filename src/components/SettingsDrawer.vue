@@ -377,7 +377,7 @@ function normalizeImportedConfig(raw: any): ExperimentConfig {
     tokenBudget:
       typeof raw?.tokenBudget === "number" && raw.tokenBudget >= 0
         ? Math.round(raw.tokenBudget)
-        : (fallback.tokenBudget ?? 0),
+        : (fallback.tokenBudget ?? 50000),
     contextWindowTokens:
       typeof raw?.contextWindowTokens === "number" && raw.contextWindowTokens >= 2048
         ? Math.round(raw.contextWindowTokens)

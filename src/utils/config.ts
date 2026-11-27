@@ -6,13 +6,13 @@ export function normalizeThinkingLevel(raw: unknown): string {
   const s = typeof raw === "string" ? raw.trim().toLowerCase() : "";
   return s === "off" || s === "low" || s === "medium" || s === "high" || s === "default"
     ? s
-    : "default";
+    : "low";
 }
 
 export function cloneNormalizedConfig(src: ExperimentConfig): ExperimentConfig {
   const cloned: ExperimentConfig = JSON.parse(JSON.stringify(src));
   cloned.globalSystemPrompt = cloned.globalSystemPrompt ?? "";
-  cloned.tokenBudget = cloned.tokenBudget ?? 0;
+  cloned.tokenBudget = cloned.tokenBudget ?? 50000;
   cloned.contextWindowTokens = cloned.contextWindowTokens ?? 32000;
   cloned.compactionThresholdPct = cloned.compactionThresholdPct ?? 80;
   cloned.boardApprovalMode = cloned.boardApprovalMode ?? "auto";

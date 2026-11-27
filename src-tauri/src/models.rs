@@ -49,7 +49,7 @@ impl Default for UiPrefs {
 }
 
 pub fn default_thinking_level() -> String {
-    "default".to_string()
+    "low".to_string()
 }
 
 pub fn normalize_thinking_level(raw: &str) -> String {
@@ -773,14 +773,14 @@ impl Default for ExperimentConfig {
             tags: preset.tags,
             global_system_prompt: preset.global_system_prompt,
             initial_topic: preset.initial_topic,
-            observer_interval: 10,
+            observer_interval: 5,
             pause_seconds: 2.5,
             max_consecutive_turns: 100,
-            token_budget: 0,
+            token_budget: 50_000,
             context_window_tokens: default_context_window_tokens(),
             compaction_threshold_pct: default_compaction_threshold_pct(),
             board_approval_mode: BoardApprovalMode::Auto,
-            enable_board_tools: false,
+            enable_board_tools: true,
             initial_board: String::new(),
             enable_compaction_guard: true,
             enable_private_notes: false,
