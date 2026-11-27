@@ -4,7 +4,8 @@
   <p><strong>把多个大模型放进同一个数字生态箱，看它们自主推演、暗中密谋、各怀心思，而你站在玻璃外当造物主。</strong></p>
   <p>
     <a href="https://github.com/hbdzh/ai-terrarium/releases/tag/v0.1.0">下载 v0.1.0</a> ·
-    <a href="#核心玩法">核心玩法</a> ·
+    <a href="#主要功能">主要功能</a> ·
+    <a href="#其他功能">其他功能</a> ·
     <a href="#从源码构建">从源码构建</a> ·
     <a href="mcp/README.md">MCP 与本地接口</a> ·
     <a href="README_EN.md">English</a>
@@ -17,7 +18,9 @@ AI Terrarium 是一个基于 **Tauri v2 + Vue 3 + Rust** 构建的跨端多智�
 
 在这里，角色不再只是“一问一答的工具”，而是拥有各自模型、人设、思考深度与私密记忆的独立个体。你可以袖手旁观它们的自由演化，也可以随时打破平静——丢入一条突发环境事件、向某个角色悄悄“传音”、拉几个角色进限时私密房间，甚至开启**盲猜模式**隐藏它们的内心独白，像追一场无法预测结局的群像剧。
 
-## 核心玩法
+<a id="主要功能"></a>
+
+## 主要功能
 
 - **造物主视角与实时干预**
   - **自由推演 / 单步掌控**：支持全自动连续对话，也可随时暂停、单步推进或强制指定下一位发言者。
@@ -30,9 +33,17 @@ AI Terrarium 是一个基于 **Tauri v2 + Vue 3 + Rust** 构建的跨端多智�
 - **拟人化调度与轻量分流**
   - **让 AI 像真人一样聊天**：支持智能点名、无话可说时跳过（`[PASS]`）、快反应短句接话、随机情绪扰动，以及按角色独立配置思考深度。
   - **后台辅助模型分流**：可单独指定轻量辅助模型承担智能点名与白板防泄密审核，降低主模型开销。
-- **多模型混搭与外部联动**
-  - 支持任意 OpenAI 兼容接口，内置 DeepSeek、阿里云百炼 (Qwen)、月之暗面 (Kimi)、火山引擎 (豆包)、OpenAI、Google Gemini、智谱清言 (GLM)、MiniMax、OpenRouter 等预设，可让不同模型同台飙戏。
-  - 内置默认关闭、仅监听 `127.0.0.1` 的本地 HTTP / WebSocket 控制接口与零依赖 Node.js MCP 桥接（[mcp/terrarium_mcp.mjs](mcp/terrarium_mcp.mjs)），可接入 Claude Desktop 或 Cursor。
+
+<a id="其他功能"></a>
+
+## 其他功能
+
+- **多模型混搭与 API 配置解耦**：支持任意 OpenAI 兼容接口，内置 DeepSeek、阿里云百炼 (Qwen)、月之暗面 (Kimi)、火山引擎 (豆包)、OpenAI、Google Gemini、智谱清言 (GLM)、MiniMax、OpenRouter 等预设；API Profile 与角色创建解耦，可为不同角色或辅助调度灵活分配不同模型。
+- **实验分叉与时间线快照**：支持从当前实验分叉并微调参数或角色设定，在平行时间线上对照不同演化结果。
+- **观察员分析与转折事件卡**：支持后台观察员定期生成演化分析报告，以及抽取转折事件卡并一键注入场景。
+- **角色库、剧本标签与纯剧本视图**：内置可复用角色人设库、风格与规则标签，支持剧本导入/导出与纯剧本阅读打印视图。
+- **富文本渲染与外观适配**：支持思考流折叠展示、Markdown 代码高亮与 KaTeX 数学公式渲染，以及浅色 / 深色 / 跟随系统主题切换。
+- **本地持久化与外部 MCP 联动**：基于 SQLite 本地存储实验记录；内置默认关闭、仅监听 `127.0.0.1` 的本地 HTTP / WebSocket 控制接口与零依赖 Node.js MCP 桥接（[mcp/terrarium_mcp.mjs](mcp/terrarium_mcp.mjs)），可接入 Claude Desktop 或 Cursor。
 
 ## 下载与支持平台
 
@@ -82,6 +93,13 @@ cargo test
 ## 进阶文档
 
 - [本地 HTTP / WebSocket 接口与 MCP 桥接说明](mcp/README.md)
+
+## 参考与致谢
+
+本项目在多智能体调度、工具/插件化架构与上下文管理设计上参考了以下开源项目：
+
+- [openai/codex](https://github.com/openai/codex) — OpenAI 轻量级终端编码代理
+- [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) — DeepSeek Harness（Everything is a Plugin）
 
 ## 许可证
 
