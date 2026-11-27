@@ -40,7 +40,7 @@ Current version: `v0.1.0` (prebuilt binaries are not yet published on [GitHub Re
 | Windows | Build from source | Includes custom window chrome integration |
 | macOS | Build from source | Native overlay titlebar layout |
 | Linux | Build from source | Standard Tauri v2 desktop build |
-| OpenHarmony | Source-level adaptation | Includes `ohos_compat.rs` and `feat/open-harmony` branch patches |
+| OpenHarmony | Build from source | HarmonyOS / OpenHarmony adaptation completed (`ohos_compat.rs` and `feat/open-harmony` branch patches) |
 
 <a id="getting-started"></a>
 
