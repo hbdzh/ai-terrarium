@@ -9,6 +9,7 @@ dist-ssr/
 # Tauri / Rust
 src-tauri/target/
 .ohos-tools/
+.tools/
 
 # Editor / OS
 .DS_Store

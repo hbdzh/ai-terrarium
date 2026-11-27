@@ -364,12 +364,21 @@ html.mobile-os .sheet-content-right[data-state="closed"] {
   animation-duration: 120ms !important;
 }
 
+@keyframes ds-modal-mobile-in {
+  from { opacity: 0; transform: translate3d(-50%, -49%, 0) scale(0.97); }
+  to { opacity: 1; transform: translate3d(-50%, -50%, 0) scale(1); }
+}
+@keyframes ds-modal-mobile-out {
+  from { opacity: 1; transform: translate3d(-50%, -50%, 0) scale(1); }
+  to { opacity: 0; transform: translate3d(-50%, -49%, 0) scale(0.98); }
+}
+
 html.mobile-os .ds-modal-content[data-state="open"] {
-  animation: ds-overlay-in 120ms ease-out forwards !important;
+  animation: ds-modal-mobile-in 150ms cubic-bezier(0.22, 1, 0.36, 1) forwards !important;
 }
 
 html.mobile-os .ds-modal-content[data-state="closed"] {
-  animation: ds-overlay-out 90ms ease-in forwards !important;
+  animation: ds-modal-mobile-out 100ms ease-in forwards !important;
 }
 
 html.mobile-os .animate-ping {
@@ -843,12 +852,12 @@ html.dark .text-\[\#007AFF\] {
   to { opacity: 0; }
 }
 @keyframes ds-modal-in {
-  from { opacity: 0; transform: translate(-50%, -48.5%) scale(0.96); }
-  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  from { opacity: 0; transform: translate3d(-50%, -48.5%, 0) scale(0.96); }
+  to { opacity: 1; transform: translate3d(-50%, -50%, 0) scale(1); }
 }
 @keyframes ds-modal-out {
-  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-  to { opacity: 0; transform: translate(-50%, -49%) scale(0.97); }
+  from { opacity: 1; transform: translate3d(-50%, -50%, 0) scale(1); }
+  to { opacity: 0; transform: translate3d(-50%, -49%, 0) scale(0.97); }
 }
 @keyframes ds-popover-in {
   from { opacity: 0; transform: translateY(4px) scale(0.96); }
@@ -867,11 +876,17 @@ html.dark .text-\[\#007AFF\] {
   to { stroke-dashoffset: 0; }
 }
 
+.ds-modal-overlay {
+  will-change: opacity;
+}
 .ds-modal-overlay[data-state="open"] {
   animation: ds-overlay-in 180ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 .ds-modal-overlay[data-state="closed"] {
   animation: ds-overlay-out 130ms ease-in forwards;
+}
+.ds-modal-content {
+  will-change: transform, opacity;
 }
 .ds-modal-content[data-state="open"] {
   animation: ds-modal-in 200ms cubic-bezier(0.22, 1, 0.36, 1) forwards;

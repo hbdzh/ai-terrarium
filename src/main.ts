@@ -1,14 +1,13 @@
 import "./bootstrap";
 import { createApp } from "vue";
 import "./style.css";
-import { initPlatformDetection } from "./utils/platform";
+import App from "./App.vue";
+import { initPlatformDetection, isMobileOS } from "./utils/platform";
 import { applyNativeInsetsFromBridge } from "./utils/native";
 
-async function boot() {
-  await initPlatformDetection();
-  applyNativeInsetsFromBridge();
-  const { default: App } = await import("./App.vue");
-  createApp(App).mount("#app");
-}
+applyNativeInsetsFromBridge();
+createApp(App).mount("#app");
 
-boot();
+void initPlatformDetection().then(() => {
+  document.documentElement.classList.toggle("mobile-os", isMobileOS);
+});

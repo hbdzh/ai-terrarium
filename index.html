@@ -56,14 +56,6 @@
         @media (max-width: 1023px) { .boot-sidebar { display: none !important; } }
       </style>
     </div>
-    <script>
-      requestAnimationFrame(function () {
-        var internals = window.__TAURI_INTERNALS__;
-        if (internals && typeof internals.invoke === "function") {
-          internals.invoke("show_main_window").catch(function () {});
-        }
-      });
-    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -25,11 +25,11 @@ import ThoughtStream, { type StreamingDraft } from "./components/ThoughtStream.v
 import ObserverPanel from "./components/ObserverPanel.vue";
 import CreatorConsole from "./components/CreatorConsole.vue";
 import PureScriptPrintView from "./components/PureScriptPrintView.vue";
+import AdaptiveModal from "./components/ui/AdaptiveModal.vue";
+import Sheet from "./components/ui/Sheet.vue";
+import SettingsDrawer from "./components/SettingsDrawer.vue";
 
-const AdaptiveModal = defineAsyncComponent(() => import("./components/ui/AdaptiveModal.vue"));
-const Sheet = defineAsyncComponent(() => import("./components/ui/Sheet.vue"));
 const SharedBoardDrawer = defineAsyncComponent(() => import("./components/SharedBoardDrawer.vue"));
-const SettingsDrawer = defineAsyncComponent(() => import("./components/SettingsDrawer.vue"));
 const ScenarioScriptModal = defineAsyncComponent(() => import("./components/ScenarioScriptModal.vue"));
 const NewExperimentModal = defineAsyncComponent(() => import("./components/NewExperimentModal.vue"));
 const ForkTweakModal = defineAsyncComponent(() => import("./components/ForkTweakModal.vue"));
@@ -963,24 +963,26 @@ onMounted(async () => {
   };
   const warmAsyncPanels = () => {
     warmupMarkdownParser();
-    void import("./components/ui/Sheet.vue");
-    void import("./components/ui/AdaptiveModal.vue");
     void import("./components/SharedBoardDrawer.vue");
-    void import("./components/SettingsDrawer.vue");
     void import("./components/NewExperimentModal.vue");
     void import("./components/ScenarioScriptModal.vue");
+    void import("./components/ForkTweakModal.vue");
   };
   if (typeof winIdle.requestIdleCallback === "function") {
-    winIdle.requestIdleCallback(warmAsyncPanels, { timeout: 600 });
+    winIdle.requestIdleCallback(warmAsyncPanels, { timeout: 300 });
   } else {
-    window.setTimeout(warmAsyncPanels, isMobileOS ? 450 : 120);
+    window.setTimeout(warmAsyncPanels, isMobileOS ? 250 : 60);
   }
 
   const ch = new Channel<StreamEvent>();
   ch.onmessage = handleStreamEvent;
 
-  // Fallback in case inline HTML script didn't show the window yet
-  invoke("show_main_window").catch(() => {});
+  // Show main window once Vue has rendered the initial frame to avoid white flash
+  void nextTick(() => {
+    requestAnimationFrame(() => {
+      invoke("show_main_window").catch(() => {});
+    });
+  });
 
   // Consume pre-initiated IPC promises (started in bootstrap.ts before Vue mounted)
   await Promise.all([
