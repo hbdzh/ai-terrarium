@@ -5,7 +5,6 @@ import { KeyboardAvoidMode } from '@kit.ArkUI';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { vibrator } from '@kit.SensorServiceKit';
 import window from '@ohos.window';
-import web_webview from '@ohos.web.webview';
 import picker from '@ohos.file.picker';
 import fileIo from '@ohos.file.fs';
 import util from '@ohos.util';
@@ -199,11 +198,6 @@ export default class EntryAbility extends RustAbility {
   }
 
   async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): Promise<void> {
-    try {
-      web_webview.WebviewController.initializeWebEngine();
-    } catch {
-      // Ignore if already initialized
-    }
     if (this.context?.filesDir) {
       nativeLib.setOhosFilesDir(this.context.filesDir);
     }
