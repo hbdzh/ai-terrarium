@@ -391,6 +391,7 @@ html.mobile-os .animate-ping {
 }
 
 html.mobile-os .terrarium-msg-item {
+  content-visibility: visible;
   contain: layout style;
 }
 

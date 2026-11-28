@@ -1111,6 +1111,22 @@ fn ohos_trigger_haptic(kind: String) {
     }
 }
 
+#[cfg(target_env = "ohos")]
+static OHOS_STREAM_WS_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+#[tauri::command]
+fn get_ohos_stream_ws_port() -> Option<u16> {
+    #[cfg(target_env = "ohos")]
+    {
+        let port = OHOS_STREAM_WS_PORT.load(std::sync::atomic::Ordering::Relaxed);
+        return if port > 0 { Some(port) } else { None };
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        None
+    }
+}
+
 #[tauri::command]
 fn show_main_window(window: tauri::Window) {
     if !window.is_visible().unwrap_or(false) {
@@ -1169,6 +1185,42 @@ pub fn run() {
                 .ensure_default_experiment()
                 .expect("failed to ensure default experiment");
             let engine = TerrariumEngine::new(Arc::clone(&db), default_exp.id);
+
+            #[cfg(target_env = "ohos")]
+            {
+                let ws_engine = Arc::clone(&engine);
+                tauri::async_runtime::spawn(async move {
+                    use axum::extract::ws::{Message, WebSocketUpgrade};
+                    use axum::extract::State;
+                    use axum::routing::get;
+                    use axum::Router;
+
+                    async fn ws_handler(
+                        ws: WebSocketUpgrade,
+                        State(eng): State<Arc<TerrariumEngine>>,
+                    ) -> axum::response::Response {
+                        ws.on_upgrade(move |mut socket| async move {
+                            let mut rx = eng.subscribe_ws_json();
+                            while let Ok(json) = rx.recv().await {
+                                if socket.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        })
+                    }
+
+                    if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
+                        if let Ok(addr) = listener.local_addr() {
+                            OHOS_STREAM_WS_PORT
+                                .store(addr.port(), std::sync::atomic::Ordering::Relaxed);
+                            let app = Router::new()
+                                .route("/ws", get(ws_handler))
+                                .with_state(ws_engine);
+                            let _ = axum::serve(listener, app).await;
+                        }
+                    }
+                });
+            }
 
             let ui_prefs = db.get_ui_prefs().unwrap_or_default();
             let initial_theme = ui_prefs.theme_preference.clone();
@@ -1239,6 +1291,7 @@ pub fn run() {
             ohos_get_insets,
             ohos_set_status_bar_light_icons,
             ohos_trigger_haptic,
+            get_ohos_stream_ws_port,
             show_main_window,
             set_window_theme,
             get_core_engine_prompt,

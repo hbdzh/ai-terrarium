@@ -309,6 +309,7 @@ impl TerrariumEngine {
 
             let cancel_rx = self.cancel_tx.subscribe();
             let channel_ref = Arc::clone(&self.channel);
+            let ws_tx_ref = self.ws_tx.clone();
             let exp_id_clone = exp_id.to_string();
             let msg_id_clone = msg_id.to_string();
 
@@ -322,7 +323,16 @@ impl TerrariumEngine {
                 content: String::new(),
                 last_flush: std::time::Instant::now(),
             }));
-            let emit_event = |ch_arc: &Arc<RwLock<Option<Channel<StreamEvent>>>>, ev: StreamEvent| {
+            let emit_event = |ch_arc: &Arc<RwLock<Option<Channel<StreamEvent>>>>,
+                              ws_tx: &tokio::sync::broadcast::Sender<String>,
+                              ev: StreamEvent| {
+                if ws_tx.receiver_count() > 0 {
+                    if let Ok(json) = serde_json::to_string(&ev) {
+                        if ws_tx.send(json).is_ok() {
+                            return;
+                        }
+                    }
+                }
                 if let Ok(guard) = ch_arc.try_read() {
                     if let Some(ch) = guard.as_ref() {
                         let _ = ch.send(ev);
@@ -339,6 +349,7 @@ impl TerrariumEngine {
             };
             let flush_batch = |batch_arc: &Arc<std::sync::Mutex<DeltaBatch>>,
                                ch_arc: &Arc<RwLock<Option<Channel<StreamEvent>>>>,
+                               ws_tx: &tokio::sync::broadcast::Sender<String>,
                                e_id: &str,
                                m_id: &str,
                                force: bool| {
@@ -359,6 +370,7 @@ impl TerrariumEngine {
                 if !r_out.is_empty() {
                     emit_event(
                         ch_arc,
+                        ws_tx,
                         StreamEvent::StreamReasoningDelta {
                             experiment_id: e_id.to_string(),
                             message_id: m_id.to_string(),
@@ -369,6 +381,7 @@ impl TerrariumEngine {
                 if !c_out.is_empty() {
                     emit_event(
                         ch_arc,
+                        ws_tx,
                         StreamEvent::StreamDelta {
                             experiment_id: e_id.to_string(),
                             message_id: m_id.to_string(),
@@ -380,6 +393,7 @@ impl TerrariumEngine {
 
             let batch_for_cb = Arc::clone(&delta_batch);
             let ch_for_cb = Arc::clone(&channel_ref);
+            let ws_for_cb = ws_tx_ref.clone();
             let e_for_cb = exp_id_clone.clone();
             let m_for_cb = msg_id_clone.clone();
 
@@ -396,19 +410,20 @@ impl TerrariumEngine {
                             let mut b = batch_for_cb.lock().unwrap();
                             b.content.push_str(delta);
                         }
-                        flush_batch(&batch_for_cb, &ch_for_cb, &e_for_cb, &m_for_cb, false);
+                        flush_batch(&batch_for_cb, &ch_for_cb, &ws_for_cb, &e_for_cb, &m_for_cb, false);
                     }
                     StreamDeltaChunk::Reasoning(delta) => {
                         {
                             let mut b = batch_for_cb.lock().unwrap();
                             b.reasoning.push_str(delta);
                         }
-                        flush_batch(&batch_for_cb, &ch_for_cb, &e_for_cb, &m_for_cb, false);
+                        flush_batch(&batch_for_cb, &ch_for_cb, &ws_for_cb, &e_for_cb, &m_for_cb, false);
                     }
                     StreamDeltaChunk::RetryNotice(msg) => {
-                        flush_batch(&batch_for_cb, &ch_for_cb, &e_for_cb, &m_for_cb, true);
+                        flush_batch(&batch_for_cb, &ch_for_cb, &ws_for_cb, &e_for_cb, &m_for_cb, true);
                         emit_event(
                             &ch_for_cb,
+                            &ws_for_cb,
                             StreamEvent::EngineNotice {
                                 experiment_id: e_for_cb.clone(),
                                 message: msg,
@@ -418,7 +433,7 @@ impl TerrariumEngine {
                 },
             )
             .await;
-            flush_batch(&delta_batch, &channel_ref, &exp_id_clone, &msg_id_clone, true);
+            flush_batch(&delta_batch, &channel_ref, &ws_tx_ref, &exp_id_clone, &msg_id_clone, true);
             let res = res?;
 
             for d in res.downgraded_params {

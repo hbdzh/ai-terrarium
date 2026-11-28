@@ -63,6 +63,7 @@ pub struct TerrariumEngine {
     pub compaction_guard: Arc<Mutex<CompactionGuard>>,
     pub channel: Arc<RwLock<Option<Channel<StreamEvent>>>>,
     pub event_tx: broadcast::Sender<StreamEvent>,
+    pub ws_tx: broadcast::Sender<String>,
     pub blind_guess_mode: Arc<AtomicBool>,
     pub notify: Arc<Notify>,
     pub cancel_tx: watch::Sender<u64>,
@@ -77,6 +78,7 @@ impl TerrariumEngine {
             .expect("failed to build reqwest client");
         let (cancel_tx, _) = watch::channel(0u64);
         let (event_tx, _) = broadcast::channel(256);
+        let (ws_tx, _) = broadcast::channel(512);
 
         let engine = Arc::new(Self {
             db,
@@ -92,6 +94,7 @@ impl TerrariumEngine {
             compaction_guard: Arc::new(Mutex::new(CompactionGuard::default())),
             channel: Arc::new(RwLock::new(None)),
             event_tx,
+            ws_tx,
             blind_guess_mode: Arc::new(AtomicBool::new(false)),
             notify: Arc::new(Notify::new()),
             cancel_tx,
@@ -144,6 +147,10 @@ impl TerrariumEngine {
         self.blind_guess_mode.load(Ordering::SeqCst)
     }
 
+    pub fn subscribe_ws_json(&self) -> broadcast::Receiver<String> {
+        self.ws_tx.subscribe()
+    }
+
     pub(super) async fn emit(&self, event: StreamEvent) {
         if !matches!(
             event,
@@ -152,6 +159,13 @@ impl TerrariumEngine {
                 | StreamEvent::StreamStart { .. }
         ) {
             let _ = self.event_tx.send(event.clone());
+        }
+        if self.ws_tx.receiver_count() > 0 {
+            if let Ok(json) = serde_json::to_string(&event) {
+                if self.ws_tx.send(json).is_ok() {
+                    return;
+                }
+            }
         }
         let guard = self.channel.read().await;
         if let Some(ch) = guard.as_ref() {

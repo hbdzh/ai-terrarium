@@ -1,6 +1,6 @@
 [package]
 name = "ai-terrarium"
-version = "0.1.0"
+version = "0.2.0"
 description = "AI Terrarium - Dual-Agent Autonomous Evolution Space"
 authors = ["AI Terrarium"]
 edition = "2021"
@@ -64,7 +64,7 @@ tauri-runtime = { git = "https://github.com/tauri-apps/tauri", branch = "feat/op
 tauri-runtime-wry = { git = "https://github.com/tauri-apps/tauri", branch = "feat/open-harmony" }
 tauri-macros = { git = "https://github.com/tauri-apps/tauri", branch = "feat/open-harmony" }
 tauri-codegen = { git = "https://github.com/tauri-apps/tauri", branch = "feat/open-harmony" }
-wry = { git = "https://github.com/tauri-apps/wry", branch = "feat/open-harmony" }
+wry = { path = "vendor/wry" }
 tao = { git = "https://github.com/tauri-apps/tao", branch = "feat/open-harmony" }
 tauri-plugin-dialog = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "feat/open-harmony" }
 tauri-plugin-fs = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "feat/open-harmony" }

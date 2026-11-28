@@ -5,6 +5,7 @@ import { KeyboardAvoidMode } from '@kit.ArkUI';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { vibrator } from '@kit.SensorServiceKit';
 import window from '@ohos.window';
+import web_webview from '@ohos.web.webview';
 import picker from '@ohos.file.picker';
 import fileIo from '@ohos.file.fs';
 import util from '@ohos.util';
@@ -31,6 +32,7 @@ export default class EntryAbility extends RustAbility {
   public mode: 'xcomponent' | 'webview' = 'webview'
   private mainWin: window.Window | null = null;
   private keyboardHeightVp: number = 0;
+  private lastInsetsJson: string = '';
 
   private isDesktopDevice(): boolean {
     const t = (deviceInfo.deviceType || '').toLowerCase();
@@ -63,7 +65,11 @@ export default class EntryAbility extends RustAbility {
       const right = Math.round(uiCtx.px2vp(rightPx));
       const imeBottom = Math.max(this.keyboardHeightVp, Math.round(uiCtx.px2vp(imePx)));
 
-      nativeLib.updateOhosInsets(JSON.stringify({ top, right, bottom, left, imeBottom }));
+      const insetsJson = JSON.stringify({ top, right, bottom, left, imeBottom });
+      if (insetsJson !== this.lastInsetsJson) {
+        this.lastInsetsJson = insetsJson;
+        nativeLib.updateOhosInsets(insetsJson);
+      }
     } catch {
       // Ignore if avoidArea is unavailable on current device
     }
@@ -193,6 +199,11 @@ export default class EntryAbility extends RustAbility {
   }
 
   async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): Promise<void> {
+    try {
+      web_webview.WebviewController.initializeWebEngine();
+    } catch {
+      // Ignore if already initialized
+    }
     if (this.context?.filesDir) {
       nativeLib.setOhosFilesDir(this.context.filesDir);
     }

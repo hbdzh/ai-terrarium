@@ -786,6 +786,10 @@ function handleStreamEvent(ev: StreamEvent) {
       break;
 
     case "tool_call_started":
+      if (streaming.value && streaming.value.messageId === ev.messageId) {
+        pendingContentDelta = "";
+        streaming.value.content = "";
+      }
       showToast(`${ev.agentLabel} 正在调用工具: ${ev.toolName}`);
       break;
 
@@ -976,6 +980,22 @@ onMounted(async () => {
 
   const ch = new Channel<StreamEvent>();
   ch.onmessage = handleStreamEvent;
+
+  if (isHarmonyOS) {
+    invoke<number | null>("get_ohos_stream_ws_port")
+      .then((wsPort) => {
+        if (!wsPort) return;
+        const ws = new WebSocket(`ws://127.0.0.1:${wsPort}/ws`);
+        ws.onmessage = (ev) => {
+          try {
+            handleStreamEvent(JSON.parse(ev.data as string) as StreamEvent);
+          } catch {
+            // Ignore malformed WS payloads
+          }
+        };
+      })
+      .catch(() => {});
+  }
 
   // Show main window once Vue has rendered the initial frame to avoid white flash
   void nextTick(() => {
