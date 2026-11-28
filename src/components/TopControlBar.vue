@@ -158,8 +158,12 @@ const headerHorizontalPadding = computed(() => {
 
   const pr =
     props.hideInspectorToggle && !props.inspectorOpen
-      ? "pr-[52px]"
-      : "pr-3 md:pr-4";
+      ? isMobileOS
+        ? "pr-[calc(52px+var(--safe-right,0px))]"
+        : "pr-[52px]"
+      : isMobileOS
+        ? "pr-[calc(0.875rem+var(--safe-right,0px))]"
+        : "pr-3 md:pr-4";
 
   return `${pl} ${pr}`;
 });
